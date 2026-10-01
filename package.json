@@ -1,0 +1,257 @@
+{
+  "name": "mf-dashboard",
+  "publisher": "megahoma",
+  "displayName": "%extension.displayName%",
+  "description": "%extension.description%",
+  "version": "0.0.1",
+  "license": "MIT",
+  "icon": "media/mf-dashboard.png",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "main": "./dist/extension.js",
+  "l10n": "./l10n",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "mf-dashboard",
+          "title": "%viewContainer.title%",
+          "icon": "media/mf-dashboard.svg"
+        }
+      ]
+    },
+    "views": {
+      "mf-dashboard": [
+        {
+          "id": "mf-dashboard",
+          "name": "%view.title%",
+          "icon": "media/mf-dashboard.svg"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "mf-dashboard",
+        "contents": "%viewsWelcome.empty%\n[%viewsWelcome.discover%](command:mf-dashboard.discover)"
+      }
+    ],
+    "commands": [
+      {
+        "command": "mf-dashboard.refresh",
+        "title": "%command.refresh%",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "mf-dashboard.discover",
+        "title": "%command.discover%",
+        "icon": "$(search)"
+      },
+      {
+        "command": "mf-dashboard.start",
+        "title": "%command.start%",
+        "icon": "$(play)"
+      },
+      {
+        "command": "mf-dashboard.rebuildTypes",
+        "title": "%command.rebuildTypes%",
+        "icon": "$(tools)"
+      },
+      {
+        "command": "mf-dashboard.refetchTypes",
+        "title": "%command.refetchTypes%",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "mf-dashboard.useFlat",
+        "title": "%command.useFlat%",
+        "icon": "$(list-flat)"
+      },
+      {
+        "command": "mf-dashboard.useTree",
+        "title": "%command.useTree%",
+        "icon": "$(list-tree)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "mf-dashboard.refresh",
+          "when": "view == mf-dashboard",
+          "group": "navigation"
+        },
+        {
+          "command": "mf-dashboard.useFlat",
+          "when": "view == mf-dashboard && config.mf-dashboard.structure != flat",
+          "group": "navigation@1"
+        },
+        {
+          "command": "mf-dashboard.useTree",
+          "when": "view == mf-dashboard && config.mf-dashboard.structure == flat",
+          "group": "navigation@1"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "mf-dashboard.start",
+          "when": "view == mf-dashboard && viewItem == silent",
+          "group": "inline"
+        },
+        {
+          "command": "mf-dashboard.rebuildTypes",
+          "when": "view == mf-dashboard && viewItem == stale",
+          "group": "inline"
+        },
+        {
+          "command": "mf-dashboard.refetchTypes",
+          "when": "view == mf-dashboard && viewItem == unfetched",
+          "group": "inline"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "%configuration.title%",
+      "properties": {
+        "mf-dashboard.envMode": {
+          "type": "string",
+          "default": "development",
+          "description": "%configuration.envMode%"
+        },
+        "mf-dashboard.language": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "en",
+            "ru"
+          ],
+          "default": "auto",
+          "description": "%configuration.language%"
+        },
+        "mf-dashboard.structure": {
+          "type": "string",
+          "enum": [
+            "tree",
+            "flat"
+          ],
+          "default": "tree",
+          "description": "%configuration.structure%"
+        },
+        "mf-dashboard.ignorePaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "%configuration.ignorePaths%"
+        },
+        "mf-dashboard.extraManifestUrls": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "%configuration.extraManifestUrls%"
+        },
+        "mf-dashboard.packageManager": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "npm",
+            "pnpm"
+          ],
+          "default": "auto",
+          "description": "%configuration.packageManager%"
+        },
+        "mf-dashboard.probeIntervalMs": {
+          "type": "number",
+          "minimum": 1000,
+          "default": 5000,
+          "description": "%configuration.probeIntervalMs%"
+        },
+        "mf-dashboard.typesSettleMs": {
+          "type": "number",
+          "default": 15000,
+          "description": "%configuration.typesSettleMs%"
+        },
+        "mf-dashboard.terminal.reveal": {
+          "type": "boolean",
+          "default": true,
+          "description": "%configuration.terminal.reveal%"
+        },
+        "mf-dashboard.scripts.start": {
+          "type": "string",
+          "default": "dev",
+          "description": "%configuration.scripts.start%"
+        },
+        "mf-dashboard.commands.rebuildTypes": {
+          "type": "string",
+          "default": "",
+          "description": "%configuration.commands.rebuildTypes%"
+        },
+        "mf-dashboard.commands.refetchTypes": {
+          "type": "string",
+          "default": "",
+          "description": "%configuration.commands.refetchTypes%"
+        },
+        "mf-dashboard.apps": {
+          "type": "object",
+          "description": "%configuration.apps%",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "workspaceFolder": {
+                "type": "string"
+              },
+              "manifestPath": {
+                "type": "string"
+              },
+              "scripts": {
+                "type": "object",
+                "properties": {
+                  "start": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "lint": "rslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "compile": "esbuild src/app/extension.ts --bundle --platform=node --format=cjs --outfile=dist/extension.js --external:vscode",
+    "package": "vsce package",
+    "vscode:prepublish": "npm run compile",
+    "prepare": "husky"
+  },
+  "lint-staged": {
+    "*.ts": [
+      "prettier --write",
+      "rslint --fix"
+    ],
+    "*.{json,md}": "prettier --write"
+  },
+  "devDependencies": {
+    "@rslint/core": "^0.9.3",
+    "@types/node": "^26.6.2",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^4.0.0",
+    "esbuild": "^0.28.2",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.5.1",
+    "ovsx": "^1.2.0",
+    "prettier": "^3.9.9",
+    "typescript": "^7.0.2"
+  }
+}
