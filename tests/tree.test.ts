@@ -1,0 +1,174 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import test from "node:test";
+import {
+  createProbeBook,
+  putAppResult,
+  type ArtifactProbe,
+  type LocalApp,
+} from "../src/entities/microfrontend/index.ts";
+import { icons, terms } from "../src/shared/config/index.ts";
+import {
+  beginRefetch,
+  endRefetch,
+  DashboardSession,
+  type DashboardSettings,
+} from "../src/widgets/mf-dashboard-tree/session.ts";
+
+function app(overrides: Partial<LocalApp> & Pick<LocalApp, "name">): LocalApp {
+  return {
+    folder: "/widget-1",
+    configFile: "/widget-1/rsbuild.config.ts",
+    port: 4100,
+    manifest: true,
+    generateTypes: true,
+    consumeTypes: true,
+    typesFolder: "@mf-types",
+    tsconfig: "./tsconfig.json",
+    manifestPath: "/mf-manifest.json",
+    compilerInstance: null,
+    remotes: [],
+    ...overrides,
+  };
+}
+
+function artifact(overrides: Partial<ArtifactProbe> = {}): ArtifactProbe {
+  return {
+    manifestReachable: false,
+    buildVersion: null,
+    zipUrl: null,
+    zipMtime: null,
+    zipHash: null,
+    ...overrides,
+  };
+}
+
+function settings(overrides: Partial<DashboardSettings> = {}): DashboardSettings {
+  return {
+    apps: undefined,
+    envMode: "development",
+    ignorePaths: [],
+    extraManifestUrls: [],
+    structure: "tree",
+    ...overrides,
+  };
+}
+
+test("a second refetch for the same link is rejected", () => {
+  const pending = new Set<string>();
+  assert.equal(beginRefetch(pending, "a\0b\0b"), true);
+  assert.equal(beginRefetch(pending, "a\0b\0b"), false);
+  assert.equal(beginRefetch(pending, "a\0c\0c"), true);
+  endRefetch(pending, "a\0b\0b");
+  assert.equal(beginRefetch(pending, "a\0b\0b"), true);
+});
+
+test("an empty app list stays empty and does not scan", async () => {
+  let scans = 0;
+  const session = new DashboardSession(
+    {
+      readSettings: () => settings(),
+      writeApps() {
+        throw new Error("no write");
+      },
+      scan() {
+        scans += 1;
+        return { app: app({ name: "app" }) };
+      },
+      loadKnown() {
+        throw new Error("missing apps are not loaded");
+      },
+      async probe(input) {
+        assert.deepEqual(input.apps, []);
+        assert.deepEqual(input.links, []);
+      },
+      roots: () => [{ name: "widget-1", path: "/widget-1" }],
+    },
+    createProbeBook(),
+    () => {},
+  );
+  await session.refresh();
+  assert.equal(scans, 0);
+  assert.deepEqual(session.nodes(), []);
+});
+
+test("discover does not write an empty apps object when nothing is found", async () => {
+  let writes = 0;
+  const session = new DashboardSession(
+    {
+      readSettings: () => settings(),
+      writeApps() {
+        writes += 1;
+      },
+      scan: () => ({}),
+      loadKnown() {
+        return [];
+      },
+      async probe() {},
+      roots: () => [{ name: "widget-1", path: "/widget-1" }],
+    },
+    createProbeBook(),
+    () => {},
+  );
+  await session.discover();
+  assert.equal(writes, 0);
+  assert.deepEqual(session.nodes(), []);
+});
+
+test("relabel uses the next terms without scanning", async () => {
+  let scans = 0;
+  let probes = 0;
+  let fires = 0;
+  const stored = settings({ apps: { app: { path: "widget-1" } } });
+  const book = createProbeBook();
+  const session = new DashboardSession(
+    {
+      readSettings: () => stored,
+      writeApps() {},
+      scan() {
+        scans += 1;
+        return {};
+      },
+      loadKnown: () => [app({ name: "app", port: 4100, folder: "/widget-1" })],
+      async probe() {
+        probes += 1;
+        putAppResult(book, "app", { portOpen: true, ...artifact() });
+      },
+      roots: () => [{ name: "widget-1", path: "/widget-1" }],
+    },
+    book,
+    () => {
+      fires += 1;
+    },
+  );
+  await session.refresh();
+  const before = fires;
+  session.relabel({ ...terms, listen: "работает", folder: "каталог", localPort: "локальный порт" });
+  assert.equal(scans, 0);
+  assert.equal(probes, 1);
+  assert.equal(fires, before + 1);
+  assert.match(session.nodes()[0]?.description ?? "", /работает/);
+  assert.match(session.nodes()[0]?.tooltip ?? "", /каталог/);
+});
+
+test("the provider registers the tree without a view message", () => {
+  const provider = fs.readFileSync(
+    new URL("../src/widgets/mf-dashboard-tree/provider.ts", import.meta.url),
+    "utf8",
+  );
+  const extension = fs.readFileSync(new URL("../src/app/extension.ts", import.meta.url), "utf8");
+  const itemStart = provider.indexOf("getTreeItem(");
+  const itemEnd = provider.indexOf("getChildren(", itemStart);
+  assert.equal(/\.message\b/.test(provider.slice(itemStart, itemEnd)), false);
+  assert.match(provider, /new vscode\.ThemeIcon\(icons\[row\.kind\]\)/);
+  assert.match(provider, /description = row\.description/);
+  assert.match(extension, /selectedTerms/);
+  assert.match(extension, /onDidChangeTerms/);
+  assert.match(extension, /widgets\/mf-dashboard-tree\/index\.ts/);
+  assert.match(extension, /registerTreeDataProvider\("mf-dashboard"/);
+  assert.match(extension, /mf-dashboard\.refresh/);
+  assert.match(extension, /mf-dashboard\.discover/);
+  assert.match(extension, /mf-dashboard\.refetchTypes/);
+  assert.match(extension, /mf-dashboard\.useFlat/);
+  assert.match(extension, /mf-dashboard\.useTree/);
+});
