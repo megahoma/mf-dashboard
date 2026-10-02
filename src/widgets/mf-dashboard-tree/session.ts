@@ -4,8 +4,10 @@ import {
   appProbeId,
   externalManifestId,
   linkProbeId,
+  manifestTooltipLines,
   scanWorkspace,
   type LocalApp,
+  type ManifestModules,
   type ProbeBook,
   type ProbeCycleInput,
   type RemoteLink,
@@ -388,6 +390,10 @@ export class DashboardSession {
       false,
       null,
       app.name,
+      {
+        exposes: probe?.exposes ?? [],
+        shared: probe?.shared ?? [],
+      },
     );
     return {
       id: `app:${app.name}`,
@@ -418,6 +424,7 @@ export class DashboardSession {
     };
     const producer = byName.get(remote.name);
     const local = producer !== undefined && producer.port !== null;
+    const linkProbe = this.book.links.get(linkProbeId(link));
     const input: StatusInput & { folder?: string } = local
       ? {
           role: "link",
@@ -425,7 +432,7 @@ export class DashboardSession {
           portOpen: this.book.apps.get(appProbeId(producer.name))?.portOpen ?? false,
           manifestEnabled: producer.manifest,
           buildVersion: this.book.apps.get(appProbeId(producer.name))?.buildVersion ?? null,
-          requestFailure: this.book.links.get(linkProbeId(link))?.requestFailure,
+          requestFailure: linkProbe?.requestFailure,
           url: remote.url,
           typesState: this.typesForLink(link),
           folder: producer.folder,
@@ -433,15 +440,18 @@ export class DashboardSession {
       : {
           role: "external",
           port: null,
-          portOpen: this.book.links.get(linkProbeId(link))?.manifestReachable ?? false,
+          portOpen: linkProbe?.manifestReachable ?? false,
           manifestEnabled: true,
-          buildVersion: this.book.links.get(linkProbeId(link))?.buildVersion ?? null,
-          requestFailure: this.book.links.get(linkProbeId(link))?.requestFailure,
+          buildVersion: linkProbe?.buildVersion ?? null,
+          requestFailure: linkProbe?.requestFailure,
           url: remote.url,
           typesState: "none",
         };
     const linkId = linkRowId(link);
-    const row = this.model(input, this.pending.has(linkId), linkId, remote.name);
+    const row = this.model(input, this.pending.has(linkId), linkId, remote.name, {
+      exposes: linkProbe?.exposes ?? [],
+      shared: linkProbe?.shared ?? [],
+    });
     const id = JSON.stringify([parentId, linkId]);
     const nested =
       producer !== undefined && producer.port !== null && !stack.has(producer.name)
@@ -474,6 +484,10 @@ export class DashboardSession {
       false,
       null,
       hostLabel(url),
+      {
+        exposes: result?.exposes ?? [],
+        shared: result?.shared ?? [],
+      },
     );
     return {
       id: `extra:${url}`,
@@ -489,6 +503,7 @@ export class DashboardSession {
     pending: boolean,
     linkId: string | null,
     name: string,
+    modules: ManifestModules = { exposes: [], shared: [] },
   ): Pick<DashboardNode, "kind" | "description" | "tooltip" | "contextValue"> {
     const row = rowModel(input, this.terms);
     const contextValue = rowContextValue(row.kind, pending);
@@ -505,6 +520,7 @@ export class DashboardSession {
     if (this.scriptGaps.has(name)) tooltip = `${tooltip}\n${this.terms.scriptMissing}`;
     const rebuildError = this.rebuildErrors.get(name);
     if (rebuildError) tooltip = `${tooltip}\n${rebuildError}`;
+    for (const line of manifestTooltipLines(modules, this.terms)) tooltip = `${tooltip}\n${line}`;
     return { kind: row.kind, description: row.description, tooltip, contextValue };
   }
 }

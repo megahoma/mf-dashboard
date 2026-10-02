@@ -1,5 +1,7 @@
 export { discoverSource, readEnvFile, scanWorkspace } from "./discover.ts";
 export type { LocalApp, ScanOptions } from "./discover.ts";
+export { manifestTooltipLines, readManifestModules } from "./manifest-modules.ts";
+export type { ManifestLineTerms, ManifestModules, ManifestShared } from "./manifest-modules.ts";
 export {
   appProbeId,
   createConfirmationStore,

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { filesFingerprint } from "../../shared/fingerprint.ts";
 import type { LocalApp } from "./discover.ts";
+import { readManifestModules, type ManifestShared } from "./manifest-modules.ts";
 
 export { filesFingerprint };
 
@@ -25,6 +26,8 @@ export interface ArtifactProbe {
   zipUrl: string | null;
   zipMtime: number | null;
   zipHash: string | null;
+  exposes: string[];
+  shared: ManifestShared[];
 }
 
 export interface ProbeResult extends ArtifactProbe {
@@ -323,16 +326,18 @@ async function probeManifest(url: string | null, net: Net): Promise<ArtifactProb
       requestFailure: response.status ? `HTTP ${response.status}` : "HTTP error",
     };
   const buildVersion = readBuildVersion(response.json);
+  const modules = readManifestModules(response.json);
   const zipUrl = resolveZipUrl(url, response.json);
-  if (!zipUrl) return { ...blank, manifestReachable: true, buildVersion };
+  if (!zipUrl) return { ...blank, manifestReachable: true, buildVersion, ...modules };
   const zip = await callNet(net.get(zipUrl));
-  if (!zip?.ok) return { ...blank, manifestReachable: true, buildVersion, zipUrl };
+  if (!zip?.ok) return { ...blank, manifestReachable: true, buildVersion, zipUrl, ...modules };
   return {
     manifestReachable: true,
     buildVersion,
     zipUrl,
     zipMtime: finiteMs(zip.lastModified),
     zipHash: zip.body ? sha256(zip.body) : null,
+    ...modules,
   };
 }
 
@@ -387,6 +392,8 @@ function emptyArtifact(): ArtifactProbe {
     zipUrl: null,
     zipMtime: null,
     zipHash: null,
+    exposes: [],
+    shared: [],
   };
 }
 
