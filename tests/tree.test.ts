@@ -119,6 +119,136 @@ test("discover does not write an empty apps object when nothing is found", async
   assert.deepEqual(session.nodes(), []);
 });
 
+test("refresh keeps the cleared book marked until the probe settles", async () => {
+  const book = createProbeBook();
+  putAppResult(book, "app", { portOpen: true, ...artifact() });
+  putLinkResult(book, {
+    link: {
+      consumer: "app",
+      alias: "dep",
+      remoteName: "dep",
+      url: "http://127.0.0.1:4200/mf-manifest.json",
+    },
+    ...artifact(),
+  });
+  putExternalResult(book, "https://cdn.example/mf-manifest.json", artifact());
+  let probeFlag: boolean | undefined;
+  let probeApps = -1;
+  let probeLinks = -1;
+  let probeExtras = -1;
+  let changeFlag: boolean | undefined;
+  const session = new DashboardSession(
+    {
+      readSettings: () => settings({ apps: { app: { path: "." } } }),
+      writeApps() {},
+      scan() {
+        return {};
+      },
+      loadKnown: () => [app({ name: "app" })],
+      async probe() {
+        probeFlag = session.probeRunning;
+        probeApps = book.apps.size;
+        probeLinks = book.links.size;
+        probeExtras = book.extras.size;
+      },
+      roots: () => [{ name: "widget-1", path: "/widget-1" }],
+    },
+    book,
+    () => {
+      changeFlag = session.probeRunning;
+    },
+  );
+  await session.refresh();
+  assert.equal(probeFlag, true);
+  assert.equal(probeApps, 0);
+  assert.equal(probeLinks, 0);
+  assert.equal(probeExtras, 0);
+  assert.equal(changeFlag, false);
+  assert.equal(session.probeRunning, false);
+
+  let rejectedChange = false;
+  const failing = new DashboardSession(
+    {
+      readSettings: () => settings({ apps: { app: { path: "." } } }),
+      writeApps() {},
+      scan() {
+        return {};
+      },
+      loadKnown: () => [app({ name: "app" })],
+      async probe() {
+        throw new Error("down");
+      },
+      roots: () => [{ name: "widget-1", path: "/widget-1" }],
+    },
+    createProbeBook(),
+    () => {
+      rejectedChange = true;
+    },
+  );
+  await assert.rejects(() => failing.refresh(), /down/);
+  assert.equal(failing.probeRunning, false);
+  assert.equal(rejectedChange, false);
+});
+
+test("a failed refresh keeps the previous problem drafts", async () => {
+  const linkUrl = "http://127.0.0.1:4200/mf-manifest.json";
+  const extraUrl = "https://cdn.example/mf-manifest.json";
+  const settingsFile = "/widget-1/.vscode/settings.json";
+  const book = createProbeBook();
+  putAppResult(book, "app", { portOpen: true, ...artifact() });
+  putAppResult(book, "dep", { portOpen: true, ...artifact() });
+  putLinkResult(book, {
+    link: { consumer: "app", alias: "dep", remoteName: "dep", url: linkUrl },
+    ...artifact({ manifestReachable: true }),
+  });
+  const session = new DashboardSession(
+    {
+      readSettings: () => settings({ apps: { app: { path: "." } }, extraManifestUrls: [extraUrl] }),
+      writeApps() {},
+      scan() {
+        return {};
+      },
+      loadKnown: () => session.loaded,
+      async probe() {
+        throw new Error("down");
+      },
+      roots: () => [{ name: "widget-1", path: "/widget-1" }],
+    },
+    book,
+    () => {},
+  );
+  session.typesForLink = () => "unfetched";
+  session.loaded = [
+    app({
+      name: "app",
+      port: 4100,
+      remotes: [{ alias: "dep", name: "dep", url: linkUrl }],
+    }),
+    app({ name: "dep", port: 4200 }),
+  ];
+  session.extraUrls = [extraUrl];
+  session.structure = "flat";
+  const linkDraft = {
+    file: "/widget-1/rsbuild.config.ts",
+    message: "app → dep: " + terms.unfetched,
+    severity: "information" as const,
+    kind: "unfetched" as const,
+  };
+  const extraDraft = {
+    file: settingsFile,
+    message: "cdn.example: " + terms.noAnswer,
+    severity: "warning" as const,
+    kind: "noAnswer" as const,
+  };
+  assert.deepEqual(session.problemDrafts(settingsFile), [linkDraft, extraDraft]);
+  assert.deepEqual(session.problemDrafts(null), [linkDraft]);
+  const before = session.problemDrafts(settingsFile);
+  await assert.rejects(() => session.refresh(), /down/);
+  session.relabel(session.terms);
+  assert.equal(session.probeRunning, false);
+  assert.deepEqual(session.problemDrafts(settingsFile), before);
+});
+
 test("relabel uses the next terms without scanning", async () => {
   let scans = 0;
   let probes = 0;
@@ -253,6 +383,9 @@ test("the provider registers the tree without a view message", () => {
   const itemStart = provider.indexOf("getTreeItem(");
   const itemEnd = provider.indexOf("getChildren(", itemStart);
   assert.equal(/\.message\b/.test(provider.slice(itemStart, itemEnd)), false);
+  const notifyStart = provider.indexOf("private notify()");
+  const notifyEnd = provider.indexOf("private publishProblems(", notifyStart);
+  assert.match(provider.slice(notifyStart, notifyEnd), /if \(this\.disposed\) return/);
   assert.match(provider, /new vscode\.ThemeIcon\(icons\[row\.kind\]\)/);
   assert.match(provider, /description = row\.description/);
   assert.match(extension, /selectedTerms/);
