@@ -68,6 +68,7 @@ Tooltip notes do not change the icon:
 - `types download failed`: the download failed.
 - `script not found`: **Start** has no such script key in `package.json`.
 - `folder: not in workspace`: an external address has no directory in this workspace.
+- `exposes` and `shared`: names from the manifest JSON for this row. An app row uses its own manifest. A link uses the manifest at that link's URL. A list of more than eight names shows the count, the first eight names, and an ellipsis. The icon and the gray description stay the status.
 
 A failed manifest request adds the HTTP status (`HTTP 404`, `HTTP 503`), a timeout, or a network error. The note disappears after the next successful request. An external URL stays `unreachable`. A local application's status still comes from its port.
 

@@ -4,6 +4,8 @@ import test from "node:test";
 import {
   createProbeBook,
   putAppResult,
+  putExternalResult,
+  putLinkResult,
   type ArtifactProbe,
   type LocalApp,
 } from "../src/entities/microfrontend/index.ts";
@@ -39,6 +41,8 @@ function artifact(overrides: Partial<ArtifactProbe> = {}): ArtifactProbe {
     zipUrl: null,
     zipMtime: null,
     zipHash: null,
+    exposes: [],
+    shared: [],
     ...overrides,
   };
 }
@@ -149,6 +153,95 @@ test("relabel uses the next terms without scanning", async () => {
   assert.equal(fires, before + 1);
   assert.match(session.nodes()[0]?.description ?? "", /работает/);
   assert.match(session.nodes()[0]?.tooltip ?? "", /каталог/);
+});
+
+test("each row tooltip uses that row's manifest modules", () => {
+  const linkUrl = "http://127.0.0.1:4200/mf-manifest.json";
+  const extraUrl = "https://cdn.example/mf-manifest.json";
+  const book = createProbeBook();
+  putAppResult(book, "app", {
+    portOpen: true,
+    ...artifact({
+      manifestReachable: true,
+      exposes: ["./App"],
+      shared: [{ name: "react", version: "18.2.0", singleton: true }],
+    }),
+  });
+  putAppResult(book, "dep", {
+    portOpen: true,
+    ...artifact({ manifestReachable: true, exposes: ["./Producer"] }),
+  });
+  putAppResult(book, "plain", { portOpen: false, ...artifact() });
+  putLinkResult(book, {
+    link: { consumer: "app", alias: "dep", remoteName: "dep", url: linkUrl },
+    ...artifact({ manifestReachable: true, exposes: ["./Link"] }),
+  });
+  putExternalResult(book, extraUrl, artifact({ manifestReachable: true, exposes: ["./Extra"] }));
+  const session = new DashboardSession(
+    {
+      readSettings: () => settings(),
+      writeApps() {
+        throw new Error("no write");
+      },
+      scan() {
+        throw new Error("no scan");
+      },
+      loadKnown() {
+        throw new Error("no load");
+      },
+      async probe() {
+        throw new Error("no probe");
+      },
+      roots: () => [],
+    },
+    book,
+    () => {},
+  );
+  session.loaded = [
+    app({
+      name: "app",
+      port: 4100,
+      remotes: [{ alias: "dep", name: "dep", url: linkUrl }],
+    }),
+    app({ name: "dep", port: 4200, folder: "/widget-1/dep" }),
+    app({ name: "plain", port: 4300 }),
+  ];
+  session.extraUrls = [extraUrl];
+
+  const nodes = session.nodes();
+  const appRow = nodes.find((node) => node.name === "app");
+  const plain = nodes.find((node) => node.name === "plain");
+  const extra = nodes.find((node) => node.name === "cdn.example");
+  const link = appRow?.children.find((node) => node.name === "dep");
+  assert.ok(appRow);
+  assert.ok(plain);
+  assert.ok(extra);
+  assert.ok(link);
+
+  assert.equal(appRow.kind, "listen");
+  assert.equal(appRow.description, ":4100 · " + terms.listen);
+  assert.ok(appRow.tooltip.indexOf("exposes: ./App") > appRow.tooltip.indexOf(terms.listen));
+  assert.ok(
+    appRow.tooltip.indexOf("shared: react@18.2.0 singleton") >
+      appRow.tooltip.indexOf("exposes: ./App"),
+  );
+  assert.equal(appRow.tooltip.includes("./Producer"), false);
+  assert.equal(appRow.tooltip.includes("./Link"), false);
+
+  assert.equal(link.kind, "listen");
+  assert.equal(link.description, ":4200 · " + terms.listen);
+  assert.ok(link.tooltip.indexOf("exposes: ./Link") > link.tooltip.indexOf(terms.typesUnknown));
+  assert.equal(link.tooltip.includes("shared:"), false);
+  assert.equal(link.tooltip.includes("./Producer"), false);
+  assert.equal(link.tooltip.includes("./App"), false);
+
+  assert.equal(extra.kind, "answers");
+  assert.equal(extra.description, "cdn.example · " + terms.answers);
+  assert.ok(extra.tooltip.indexOf("exposes: ./Extra") > extra.tooltip.indexOf(terms.noWorkspace));
+
+  assert.equal(plain.kind, "silent");
+  assert.equal(plain.tooltip.includes("exposes:"), false);
+  assert.equal(plain.tooltip.includes("shared:"), false);
 });
 
 test("the provider registers the tree without a view message", () => {
