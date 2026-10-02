@@ -9,7 +9,7 @@
   "configuration.envMode": "Which .env.<mode> file supplies remote URLs.",
   "configuration.ignorePaths": "Extra directories skipped while scanning for Module Federation configs.",
   "configuration.extraManifestUrls": "Manifest URLs that have no application in this workspace.",
-  "configuration.packageManager": "auto reads the repository package manager. npm and pnpm are explicit.",
+  "configuration.packageManager": "auto reads the repository package manager. npm, pnpm, yarn, and bun are explicit.",
   "configuration.probeIntervalMs": "Milliseconds between port, manifest, and zip checks.",
   "configuration.typesSettleMs": "Milliseconds after a source save before a zip is treated as stale.",
   "configuration.terminal.reveal": "Show the terminal when Start runs a script.",
