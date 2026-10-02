@@ -13,6 +13,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # changelogithub walks commits back to the previous tag.
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -30,9 +33,9 @@ jobs:
           echo "version=${version}" >> "$GITHUB_ENV"
       - name: Publish the VSIX on the GitHub release
         env:
-          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            "mf-dashboard-${version}.vsix" \
-            --title "$GITHUB_REF_NAME" \
-            --notes "MF Dashboard ${version}"
+          npx changelogithub@15.0.4 \
+            --name "$GITHUB_REF_NAME" \
+            --to "$GITHUB_REF_NAME" \
+            --assets "mf-dashboard-${version}.vsix"
