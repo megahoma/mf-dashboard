@@ -9,7 +9,7 @@
   "configuration.envMode": "Какой файл .env.<режим> задаёт URL удалённых модулей.",
   "configuration.ignorePaths": "Дополнительные каталоги, которые обход пропускает.",
   "configuration.extraManifestUrls": "URL манифестов без приложения в этом воркспейсе.",
-  "configuration.packageManager": "auto читает менеджер репозитория. npm и pnpm задаются явно.",
+  "configuration.packageManager": "auto читает менеджер репозитория. npm, pnpm, yarn и bun задаются явно.",
   "configuration.probeIntervalMs": "Пауза в миллисекундах между проверками порта, манифеста и zip.",
   "configuration.typesSettleMs": "Пауза в миллисекундах после сохранения исходника, прежде чем zip считается устаревшим.",
   "configuration.terminal.reveal": "Показывать терминал, когда Запустить выполняет script.",

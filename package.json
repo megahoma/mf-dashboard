@@ -160,7 +160,9 @@
           "enum": [
             "auto",
             "npm",
-            "pnpm"
+            "pnpm",
+            "yarn",
+            "bun"
           ],
           "default": "auto",
           "description": "%configuration.packageManager%"
