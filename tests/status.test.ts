@@ -22,13 +22,14 @@ test("healthy link is listen with version", () => {
   assert.equal(grayLabel("listen", base), ":4100 · " + terms.listen + " · 1.0.0");
 });
 
-test("a root ignores a foreign url and only reports its port", () => {
+test("a root with a foreign url stays listen and keeps the local gray line", () => {
   const input = {
     ...base,
     role: "app" as const,
     url: "http://example.com/widget-1/mf-manifest.json",
   };
   assert.equal(classify(input), "listen");
+  assert.equal(grayLabel("listen", input), ":4100 · " + terms.listen + " · 1.0.0");
 });
 
 test("stale-source classifies as stale", () => {
@@ -164,7 +165,7 @@ test("stale wins over an invalid url", () => {
   );
 });
 
-test("none, manual, and unknown do not change the link icon", () => {
+test("none, manual, and unknown stay listen on a local url and otherHost on a foreign url", () => {
   for (const typesState of ["none", "manual", "unknown"] as const) {
     assert.equal(classify({ ...base, typesState }), "listen");
     assert.equal(
@@ -177,8 +178,8 @@ test("none, manual, and unknown do not change the link icon", () => {
 test("empty, unsubstituted, and non-http urls are invalid", () => {
   assert.equal(classify({ ...base, url: "" }), "invalidUrl");
   assert.equal(classify({ ...base, url: "   " }), "invalidUrl");
-  assert.equal(classify({ ...base, url: "http://${PUBLIC_HOST}/mf-manifest.json" }), "invalidUrl");
-  assert.equal(classify({ ...base, url: "${PUBLIC_REMOTE}" }), "invalidUrl");
+  assert.equal(classify({ ...base, url: "http://${HOST}/mf-manifest.json" }), "invalidUrl");
+  assert.equal(classify({ ...base, url: "${HOST}" }), "invalidUrl");
   assert.equal(classify({ ...base, url: "ftp://files.example/mf-manifest.json" }), "invalidUrl");
   assert.equal(classify({ ...base, url: "ws://127.0.0.1:4100/mf-manifest.json" }), "invalidUrl");
   assert.equal(grayLabel("invalidUrl", { ...base, url: null }), ":4100 · " + terms.invalidUrl);
@@ -258,7 +259,7 @@ test("external checks the url before the manifest answer and ignores types", () 
   assert.equal(classify(up), "answers");
   assert.equal(classify({ ...up, url: null }), "invalidUrl");
   assert.equal(classify({ ...up, url: "ftp://static.example/mf-manifest.json" }), "invalidUrl");
-  assert.equal(classify({ ...up, url: "http://${PUBLIC_HOST}/mf-manifest.json" }), "invalidUrl");
+  assert.equal(classify({ ...up, url: "http://${HOST}/mf-manifest.json" }), "invalidUrl");
   assert.equal(classify({ ...up, portOpen: false }), "noAnswer");
   assert.equal(
     grayLabel("noAnswer", { ...up, portOpen: false }),
@@ -353,7 +354,7 @@ test("the invalid url hint says whether the address is missing or malformed", ()
   assert.equal(invalidUrlHint("   "), terms.urlMissing);
   assert.equal(invalidUrlHint("not a url"), terms.urlMalformed);
   assert.equal(invalidUrlHint("ftp://files.example/mf-manifest.json"), terms.urlMalformed);
-  assert.equal(invalidUrlHint("http://${PUBLIC_HOST}/mf-manifest.json"), terms.urlMalformed);
-  assert.equal(invalidUrlHint("${PUBLIC_REMOTE}"), terms.urlMalformed);
+  assert.equal(invalidUrlHint("http://${HOST}/mf-manifest.json"), terms.urlMalformed);
+  assert.equal(invalidUrlHint("${HOST}"), terms.urlMalformed);
   assert.equal(invalidUrlHint("http://127.0.0.1:4100/mf-manifest.json"), null);
 });
