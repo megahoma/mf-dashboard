@@ -43,6 +43,23 @@ test("open port and manifest json yield buildVersion", async () => {
   assert.equal(result.buildVersion, "1.0.0");
 });
 
+test("a reached manifest keeps exposes and shared on the link probe", async () => {
+  const result = await probeLink(link("http://127.0.0.1:4100/mf-manifest.json"), {
+    connect: async () => true,
+    get: async () => ({
+      ok: true,
+      json: {
+        exposes: [{ path: "./Button", name: "Button" }, { name: "Header" }],
+        shared: [{ name: "react", version: "18.2.0", singleton: true, requiredVersion: "^18" }],
+      },
+      body: null,
+      lastModified: null,
+    }),
+  });
+  assert.deepEqual(result.exposes, ["./Button", "Header"]);
+  assert.deepEqual(result.shared, [{ name: "react", version: "18.2.0", singleton: true }]);
+});
+
 test("manifest disabled does not call get", async () => {
   let called = false;
   const net = {
