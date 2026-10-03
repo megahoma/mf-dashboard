@@ -1,4 +1,4 @@
-import fs from "node:fs";
+import fs, { existsSync } from "node:fs";
 import path from "node:path";
 import * as vscode from "vscode";
 import type { DashboardTerms } from "../../shared/config/index.ts";
@@ -36,6 +36,8 @@ import {
   rebuildPlan,
   type ChainNode,
 } from "../../features/rebuild-types/index.ts";
+import { MANIFEST_SCHEME, ManifestDocuments } from "../../features/open-manifest/documents.ts";
+import { manifestFailureMessage, manifestPreviewText } from "../../features/open-manifest/text.ts";
 import {
   lookupScript,
   resolvePackageManager,
@@ -51,7 +53,8 @@ import {
   type DashboardSettings,
   type WorkspaceRoot,
 } from "./session.ts";
-import { probeWorkspace } from "./net.ts";
+import { createLoopbackNet, probeWorkspace } from "./net.ts";
+import { linkTypesDir, localManifestUrl, rowAction, type RowAction } from "./targets.ts";
 
 const REBUILD_TIMEOUT_MS = 5 * 60_000;
 
@@ -141,6 +144,8 @@ export class MfDashboardProvider
   private timer: ReturnType<typeof setTimeout> | undefined;
   private readonly saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private disposed = false;
+  private readonly manifests = new ManifestDocuments();
+  private readonly manifestRegistration: vscode.Disposable;
 
   constructor(
     termsOf: () => DashboardTerms,
@@ -173,6 +178,10 @@ export class MfDashboardProvider
     this.session.onRefreshFailed = () => {
       this.typeCache.clear();
     };
+    this.manifestRegistration = vscode.workspace.registerTextDocumentContentProvider(
+      MANIFEST_SCHEME,
+      this.manifests,
+    );
   }
 
   dispose(): void {
@@ -180,6 +189,8 @@ export class MfDashboardProvider
     if (this.timer) clearTimeout(this.timer);
     for (const timer of this.saveTimers.values()) clearTimeout(timer);
     this.saveTimers.clear();
+    this.manifestRegistration.dispose();
+    this.manifests.dispose();
     this.diagnostics.dispose();
     this.change.dispose();
   }
@@ -381,6 +392,92 @@ export class MfDashboardProvider
     const terminal = vscode.window.createTerminal({ name: `MF ${app.name}`, cwd: invocation.cwd });
     terminal.sendText(`${invocation.command} ${invocation.args.join(" ")}`);
     if (settings.terminalReveal) terminal.show();
+  }
+
+  async openConfig(node?: DashboardNode): Promise<void> {
+    const action = this.actionFor(node);
+    if (!action?.configFile) return;
+    await this.showFile(action.configFile);
+  }
+
+  async openProducerConfig(node?: DashboardNode): Promise<void> {
+    const action = this.actionFor(node);
+    if (!action?.producerConfigFile) return;
+    await this.showFile(action.producerConfigFile);
+  }
+
+  async revealTypes(node?: DashboardNode): Promise<void> {
+    const action = this.actionFor(node);
+    if (!action?.typesDir) return;
+    await vscode.commands.executeCommand("revealInExplorer", vscode.Uri.file(action.typesDir));
+  }
+
+  async openManifest(node?: DashboardNode): Promise<void> {
+    const action = this.actionFor(node);
+    if (!node || !action?.manifestUrl) return;
+    try {
+      const response = await createLoopbackNet().get(action.manifestUrl);
+      if (!response.ok) {
+        void vscode.window.showErrorMessage(
+          manifestFailureMessage(new Error("http"), response.status),
+        );
+        return;
+      }
+      const uri = this.manifests.uri(
+        node.name,
+        action.manifestUrl,
+        manifestPreviewText(response.json, response.body),
+      );
+      const document = await vscode.workspace.openTextDocument(uri);
+      await vscode.window.showTextDocument(document, { preview: true });
+    } catch (error) {
+      void vscode.window.showErrorMessage(manifestFailureMessage(error));
+    }
+  }
+
+  private async showFile(file: string): Promise<void> {
+    if (!existsSync(file)) {
+      void vscode.window.showErrorMessage("MF dashboard: config file is missing");
+      return;
+    }
+    const document = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+    await vscode.window.showTextDocument(document, { preview: true });
+  }
+
+  private actionFor(node?: DashboardNode): RowAction | null {
+    if (!node) return null;
+    if (node.linkId) {
+      const [consumerName, alias, remoteName] = node.linkId.split("\0");
+      const consumer = this.session.loaded.find((app) => app.name === consumerName);
+      if (!consumer) return null;
+      const remote = consumer.remotes.find(
+        (item) => item.alias === alias && item.name === remoteName,
+      );
+      const producer = this.session.loaded.find((app) => app.name === remoteName);
+      return rowAction({
+        configFile: consumer.configFile,
+        producerConfigFile: producer?.configFile ?? null,
+        typesDir: linkTypesDir(consumer.folder, alias, consumer.typesFolder),
+        manifestUrl: remote?.url ?? null,
+      });
+    }
+    if (node.id.startsWith("extra:")) {
+      return rowAction({
+        configFile: null,
+        producerConfigFile: null,
+        typesDir: null,
+        manifestUrl: node.id.slice("extra:".length),
+      });
+    }
+    const app = this.session.loaded.find((item) => item.name === node.name);
+    if (!app) return null;
+    return rowAction({
+      configFile: app.configFile,
+      producerConfigFile: null,
+      typesDir: path.resolve(app.folder, app.typesFolder),
+      manifestUrl:
+        app.manifest && app.port != null ? localManifestUrl(app.port, app.manifestPath) : null,
+    });
   }
 
   rebuild(node?: DashboardNode): Promise<void> {

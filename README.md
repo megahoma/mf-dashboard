@@ -120,6 +120,16 @@ The scan always skips `node_modules`, `.git`, and `dist`.
 
 **Fetch @mf-types** appears on a link whose status is `types not updated`. While `mf-dashboard.commands.refetchTypes` is empty, the extension downloads the zip for the link URL, checks the unpacked files, and replaces the consumer's `@mf-types/<alias>` directory. Files from the previous install stay if the download fails. The consumer port must be listening. The download proceeds even if the dev server never notices that the directory was removed. A non-empty command replaces the built-in download and still has to pass the same check. Until the operation finishes, the row stays `types not updated`, the tooltip says `waiting for types download`, and another fetch is disabled. An error or the 60 second timeout clears the wait and allows a retry. The row stays `types not updated` until the directory matches this link's zip hash and the file fingerprint. `consumeTypes: false` does not offer a download.
 
+The row context menu opens locations for the selected row. These commands are not inline icons.
+
+**Open config** opens the app config. On a link it opens the consumer config, where that remote URL is written. A missing file shows `config file is missing` and does not open a tab.
+
+**Open producer config** is on a link whose producer is a local app with its own config file.
+
+**Reveal types** shows the types directory in the Explorer. A link reveals `<consumer>/<typesFolder>/<alias>`. An app reveals its `<typesFolder>`. The command is absent until that directory exists.
+
+**Open manifest** fetches the manifest again and opens the JSON in a read-only editor tab. An app uses `http://127.0.0.1:<port><manifestPath>` when the manifest is enabled and a port is declared. A link or an extra URL uses the configured URL. A failed request shows the HTTP status, a timeout, or a network error, and does not open a tab. The extension does not open a browser.
+
 ## Example
 
 The port comes from `server.port` or `devServer.port` in the config. It is not a setting. The federation name and the directory may differ: a federation named `widget` may live in `apps/widget`. The default manifest path is `/mf-manifest.json`. `manifest.fileName`, `server.base`, or `import.meta.env.ASSET_PREFIX` can set another path.

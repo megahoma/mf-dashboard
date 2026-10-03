@@ -1,4 +1,4 @@
-import fs from "node:fs";
+import fs, { existsSync } from "node:fs";
 import path from "node:path";
 import {
   appProbeId,
@@ -27,6 +27,7 @@ import {
 } from "../../entities/status/index.ts";
 import { mergeMissingApps } from "../../features/init-settings/index.ts";
 import { icons, terms, type DashboardTerms } from "../../shared/config/index.ts";
+import { linkTypesDir, localManifestUrl, rowAction, withActionTokens } from "./targets.ts";
 
 export interface AppSetting {
   path: string;
@@ -479,6 +480,15 @@ export class DashboardSession {
     return entries;
   }
 
+  private actionTokens(input: {
+    configFile: string | null;
+    producerConfigFile: string | null;
+    typesDir: string | null;
+    manifestUrl: string | null;
+  }): string[] {
+    return rowAction(input, existsSync).tokens;
+  }
+
   private appNode(
     app: LocalApp,
     byName: Map<string, LocalApp>,
@@ -509,6 +519,16 @@ export class DashboardSession {
       id: `app:${app.name}`,
       name: app.name,
       ...row,
+      contextValue: withActionTokens(
+        row.contextValue,
+        this.actionTokens({
+          configFile: app.configFile,
+          producerConfigFile: null,
+          typesDir: path.resolve(app.folder, app.typesFolder),
+          manifestUrl:
+            app.manifest && app.port != null ? localManifestUrl(app.port, app.manifestPath) : null,
+        }),
+      ),
       linkId: null,
       children:
         this.structure === "flat"
@@ -606,6 +626,15 @@ export class DashboardSession {
       id,
       name: remote.name,
       ...row,
+      contextValue: withActionTokens(
+        row.contextValue,
+        this.actionTokens({
+          configFile: parent.configFile,
+          producerConfigFile: producer?.configFile ?? null,
+          typesDir: linkTypesDir(parent.folder, remote.alias, parent.typesFolder),
+          manifestUrl: remote.url,
+        }),
+      ),
       linkId,
       children: nested,
     };
@@ -622,6 +651,15 @@ export class DashboardSession {
       id: `extra:${url}`,
       name: hostLabel(url),
       ...row,
+      contextValue: withActionTokens(
+        row.contextValue,
+        this.actionTokens({
+          configFile: null,
+          producerConfigFile: null,
+          typesDir: null,
+          manifestUrl: url,
+        }),
+      ),
       linkId: null,
       children: [],
     };

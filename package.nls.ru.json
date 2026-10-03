@@ -24,5 +24,9 @@
   "command.rebuildTypes": "Сгенерировать типы",
   "command.refetchTypes": "Загрузить @mf-types",
   "command.useFlat": "Плоский список",
-  "command.useTree": "Дерево"
+  "command.useTree": "Дерево",
+  "command.openConfig": "Открыть конфиг",
+  "command.openProducerConfig": "Открыть конфиг производителя",
+  "command.revealTypes": "Показать типы",
+  "command.openManifest": "Открыть манифест"
 }

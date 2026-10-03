@@ -74,9 +74,43 @@
         "command": "mf-dashboard.useTree",
         "title": "%command.useTree%",
         "icon": "$(list-tree)"
+      },
+      {
+        "command": "mf-dashboard.openConfig",
+        "title": "%command.openConfig%"
+      },
+      {
+        "command": "mf-dashboard.openProducerConfig",
+        "title": "%command.openProducerConfig%"
+      },
+      {
+        "command": "mf-dashboard.revealTypes",
+        "title": "%command.revealTypes%"
+      },
+      {
+        "command": "mf-dashboard.openManifest",
+        "title": "%command.openManifest%"
       }
     ],
     "menus": {
+      "commandPalette": [
+        {
+          "command": "mf-dashboard.openConfig",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.openProducerConfig",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.revealTypes",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.openManifest",
+          "when": "false"
+        }
+      ],
       "view/title": [
         {
           "command": "mf-dashboard.refresh",
@@ -97,18 +131,38 @@
       "view/item/context": [
         {
           "command": "mf-dashboard.start",
-          "when": "view == mf-dashboard && viewItem == silent",
+          "when": "view == mf-dashboard && viewItem =~ /^silent($| )/",
           "group": "inline"
         },
         {
           "command": "mf-dashboard.rebuildTypes",
-          "when": "view == mf-dashboard && viewItem == stale",
+          "when": "view == mf-dashboard && viewItem =~ /^stale($| )/",
           "group": "inline"
         },
         {
           "command": "mf-dashboard.refetchTypes",
-          "when": "view == mf-dashboard && viewItem == unfetched",
+          "when": "view == mf-dashboard && viewItem =~ /^unfetched($| )/",
           "group": "inline"
+        },
+        {
+          "command": "mf-dashboard.openConfig",
+          "when": "view == mf-dashboard && viewItem =~ /(^| )config($| )/",
+          "group": "navigation"
+        },
+        {
+          "command": "mf-dashboard.openProducerConfig",
+          "when": "view == mf-dashboard && viewItem =~ /(^| )producer($| )/",
+          "group": "navigation"
+        },
+        {
+          "command": "mf-dashboard.revealTypes",
+          "when": "view == mf-dashboard && viewItem =~ /(^| )types($| )/",
+          "group": "navigation"
+        },
+        {
+          "command": "mf-dashboard.openManifest",
+          "when": "view == mf-dashboard && viewItem =~ /(^| )manifest($| )/",
+          "group": "navigation"
         }
       ]
     },
