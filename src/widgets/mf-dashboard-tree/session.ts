@@ -2,18 +2,29 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   appProbeId,
+  createProbeBook,
   externalManifestId,
   linkProbeId,
   manifestTooltipLines,
   scanWorkspace,
+  type ArtifactProbe,
+  type LinkProbeResult,
   type LocalApp,
   type ManifestModules,
   type ProbeBook,
   type ProbeCycleInput,
+  type ProbeResult,
   type RemoteLink,
   type ScanOptions,
 } from "../../entities/microfrontend/index.ts";
-import { rowModel, type StatusInput, type StatusKind } from "../../entities/status/index.ts";
+import {
+  classify,
+  problemDraft,
+  rowModel,
+  type ProblemDraft,
+  type StatusInput,
+  type StatusKind,
+} from "../../entities/status/index.ts";
 import { mergeMissingApps } from "../../features/init-settings/index.ts";
 import { icons, terms, type DashboardTerms } from "../../shared/config/index.ts";
 
@@ -49,7 +60,7 @@ export interface DashboardPorts {
     envMode: string,
     ignorePaths: readonly string[],
   ): LocalApp[];
-  probe(input: ProbeCycleInput): Promise<void>;
+  probe(book: ProbeBook, input: ProbeCycleInput): Promise<void>;
   roots(): WorkspaceRoot[];
 }
 
@@ -213,6 +224,9 @@ export class DashboardSession {
   structure: DashboardStructure = "tree";
   terms: DashboardTerms = terms;
   typesForLink: (link: RemoteLink) => StatusInput["typesState"] = () => "unknown";
+  beforeRefreshChange: () => void = () => {};
+  onRefreshFailed: () => void = () => {};
+  probeRunning = false;
   readonly pending = new Set<string>();
   readonly refetchErrors = new Set<string>();
   readonly scriptGaps = new Set<string>();
@@ -228,26 +242,53 @@ export class DashboardSession {
   }
 
   async refresh(): Promise<void> {
-    this.book.apps.clear();
-    this.book.links.clear();
-    this.book.extras.clear();
-    const current = this.ports.readSettings();
-    const roots = this.ports.roots();
-    this.structure = current.structure === "flat" ? "flat" : "tree";
-    this.extraUrls = [...current.extraManifestUrls];
-    if (roots.length === 0 || current.apps === undefined) this.loaded = [];
-    else
-      this.loaded = this.ports.loadKnown(roots, current.apps, current.envMode, current.ignorePaths);
-    const names = new Set<string>();
-    for (const app of this.loaded) {
-      if (names.has(app.name)) throw new Error(`duplicate federation name: ${app.name}`);
-      names.add(app.name);
+    const snapshot = this.captureRefreshState();
+    this.probeRunning = true;
+    let structureAtProbe = this.structure;
+    try {
+      const current = this.ports.readSettings();
+      const roots = this.ports.roots();
+      const extraUrls = [...current.extraManifestUrls];
+      // A flat/tree toggle during the probe updates this.structure in place.
+      this.structure = current.structure === "flat" ? "flat" : "tree";
+      structureAtProbe = this.structure;
+      const loaded =
+        roots.length === 0 || current.apps === undefined
+          ? []
+          : this.ports.loadKnown(roots, current.apps, current.envMode, current.ignorePaths);
+      const names = new Set<string>();
+      for (const app of loaded) {
+        if (names.has(app.name)) throw new Error(`duplicate federation name: ${app.name}`);
+        names.add(app.name);
+      }
+      // The probe writes `staged`. The visible book stays put until the swap below.
+      const staged = createProbeBook();
+      await this.ports.probe(staged, {
+        apps: loaded,
+        links: linksOf(loaded),
+        extraManifestUrls: extraUrls,
+      });
+      this.applyRefreshState({
+        apps: staged.apps,
+        links: staged.links,
+        extras: staged.extras,
+        loaded,
+        extraUrls,
+        structure: this.structure,
+      });
+    } catch (error) {
+      const toggledDuringProbe = this.structure !== structureAtProbe;
+      this.applyRefreshState({
+        ...snapshot,
+        structure: toggledDuringProbe ? this.structure : snapshot.structure,
+      });
+      this.probeRunning = false;
+      this.onRefreshFailed();
+      if (toggledDuringProbe) this.onChange();
+      throw error;
     }
-    await this.ports.probe({
-      apps: this.loaded,
-      links: linksOf(this.loaded),
-      extraManifestUrls: this.extraUrls,
-    });
+    this.probeRunning = false;
+    this.beforeRefreshChange();
     this.onChange();
   }
 
@@ -331,11 +372,80 @@ export class DashboardSession {
     this.onChange();
   }
 
+  private captureRefreshState(): {
+    apps: Map<string, ProbeResult>;
+    links: Map<string, LinkProbeResult>;
+    extras: Map<string, ArtifactProbe>;
+    loaded: LocalApp[];
+    extraUrls: string[];
+    structure: DashboardStructure;
+  } {
+    return {
+      apps: new Map(this.book.apps),
+      links: new Map(this.book.links),
+      extras: new Map(this.book.extras),
+      loaded: this.loaded,
+      extraUrls: [...this.extraUrls],
+      structure: this.structure,
+    };
+  }
+
+  private applyRefreshState(snapshot: {
+    apps: Map<string, ProbeResult>;
+    links: Map<string, LinkProbeResult>;
+    extras: Map<string, ArtifactProbe>;
+    loaded: LocalApp[];
+    extraUrls: string[];
+    structure: DashboardStructure;
+  }): void {
+    this.book.apps.clear();
+    for (const [key, value] of snapshot.apps) this.book.apps.set(key, value);
+    this.book.links.clear();
+    for (const [key, value] of snapshot.links) this.book.links.set(key, value);
+    this.book.extras.clear();
+    for (const [key, value] of snapshot.extras) this.book.extras.set(key, value);
+    this.loaded = snapshot.loaded;
+    this.extraUrls = snapshot.extraUrls;
+    this.structure = snapshot.structure;
+  }
+
   nodes(): DashboardNode[] {
     const byName = new Map(this.loaded.map((item) => [item.name, item]));
     const roots = this.rootApps(byName).map((item) => this.appNode(item, byName, new Set()));
     for (const url of this.extraUrls) roots.push(this.extraNode(url));
     return roots;
+  }
+
+  problemDrafts(settingsFile: string | null): ProblemDraft[] {
+    const drafts: ProblemDraft[] = [];
+    const byName = new Map(this.loaded.map((item) => [item.name, item]));
+    for (const app of this.loaded) {
+      for (const remote of app.remotes) {
+        const kind = classify(this.linkStatusInput(app, remote, byName));
+        const draft = problemDraft({
+          kind,
+          surface: "link",
+          owner: app.name,
+          alias: remote.alias,
+          label: this.terms[kind],
+          file: app.configFile,
+        });
+        if (draft) drafts.push(draft);
+      }
+    }
+    for (const url of this.extraUrls) {
+      const kind = classify(this.extraStatusInput(url));
+      const draft = problemDraft({
+        kind,
+        surface: "extra",
+        owner: hostLabel(url),
+        alias: null,
+        label: this.terms[kind],
+        file: settingsFile,
+      });
+      if (draft) drafts.push(draft);
+    }
+    return drafts;
   }
 
   private rootApps(byName: Map<string, LocalApp>): LocalApp[] {
@@ -409,6 +519,57 @@ export class DashboardSession {
     };
   }
 
+  private linkStatusInput(
+    parent: LocalApp,
+    remote: LocalApp["remotes"][number],
+    byName: Map<string, LocalApp>,
+  ): StatusInput {
+    const link: RemoteLink = {
+      consumer: parent.name,
+      alias: remote.alias,
+      remoteName: remote.name,
+      url: remote.url,
+    };
+    const producer = byName.get(remote.name);
+    const local = producer !== undefined && producer.port !== null;
+    if (local) {
+      return {
+        role: "link",
+        port: producer.port,
+        portOpen: this.book.apps.get(appProbeId(producer.name))?.portOpen ?? false,
+        manifestEnabled: producer.manifest,
+        buildVersion: this.book.apps.get(appProbeId(producer.name))?.buildVersion ?? null,
+        requestFailure: this.book.links.get(linkProbeId(link))?.requestFailure,
+        url: remote.url,
+        typesState: this.typesForLink(link),
+      };
+    }
+    return {
+      role: "external",
+      port: null,
+      portOpen: this.book.links.get(linkProbeId(link))?.manifestReachable ?? false,
+      manifestEnabled: true,
+      buildVersion: this.book.links.get(linkProbeId(link))?.buildVersion ?? null,
+      requestFailure: this.book.links.get(linkProbeId(link))?.requestFailure,
+      url: remote.url,
+      typesState: "none",
+    };
+  }
+
+  private extraStatusInput(url: string): StatusInput {
+    const result = this.book.extras.get(externalManifestId(url));
+    return {
+      role: "external",
+      port: null,
+      portOpen: result?.manifestReachable ?? false,
+      manifestEnabled: true,
+      buildVersion: result?.buildVersion ?? null,
+      requestFailure: result?.requestFailure,
+      url,
+      typesState: "none",
+    };
+  }
+
   private linkNode(
     parent: LocalApp,
     remote: LocalApp["remotes"][number],
@@ -422,31 +583,13 @@ export class DashboardSession {
       remoteName: remote.name,
       url: remote.url,
     };
-    const producer = byName.get(remote.name);
-    const local = producer !== undefined && producer.port !== null;
     const linkProbe = this.book.links.get(linkProbeId(link));
-    const input: StatusInput & { folder?: string } = local
-      ? {
-          role: "link",
-          port: producer.port,
-          portOpen: this.book.apps.get(appProbeId(producer.name))?.portOpen ?? false,
-          manifestEnabled: producer.manifest,
-          buildVersion: this.book.apps.get(appProbeId(producer.name))?.buildVersion ?? null,
-          requestFailure: linkProbe?.requestFailure,
-          url: remote.url,
-          typesState: this.typesForLink(link),
-          folder: producer.folder,
-        }
-      : {
-          role: "external",
-          port: null,
-          portOpen: linkProbe?.manifestReachable ?? false,
-          manifestEnabled: true,
-          buildVersion: linkProbe?.buildVersion ?? null,
-          requestFailure: linkProbe?.requestFailure,
-          url: remote.url,
-          typesState: "none",
-        };
+    const status = this.linkStatusInput(parent, remote, byName);
+    const producer = byName.get(remote.name);
+    const input: StatusInput & { folder?: string } =
+      producer !== undefined && producer.port !== null
+        ? { ...status, folder: producer.folder }
+        : status;
     const linkId = linkRowId(link);
     const row = this.model(input, this.pending.has(linkId), linkId, remote.name, {
       exposes: linkProbe?.exposes ?? [],
@@ -470,25 +613,11 @@ export class DashboardSession {
 
   private extraNode(url: string): DashboardNode {
     const result = this.book.extras.get(externalManifestId(url));
-    const row = this.model(
-      {
-        role: "external",
-        port: null,
-        portOpen: result?.manifestReachable ?? false,
-        manifestEnabled: true,
-        buildVersion: result?.buildVersion ?? null,
-        requestFailure: result?.requestFailure,
-        url,
-        typesState: "none",
-      },
-      false,
-      null,
-      hostLabel(url),
-      {
-        exposes: result?.exposes ?? [],
-        shared: result?.shared ?? [],
-      },
-    );
+    const input: StatusInput = this.extraStatusInput(url);
+    const row = this.model(input, false, null, hostLabel(url), {
+      exposes: result?.exposes ?? [],
+      shared: result?.shared ?? [],
+    });
     return {
       id: `extra:${url}`,
       name: hostLabel(url),

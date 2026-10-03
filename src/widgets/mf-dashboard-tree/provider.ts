@@ -16,6 +16,7 @@ import {
   type LocalApp,
   type RemoteLink,
 } from "../../entities/microfrontend/index.ts";
+import { diagnosticUpdates, extraManifestSettingsFile } from "../../entities/status/index.ts";
 import {
   describeLink,
   sourceFreshness,
@@ -103,6 +104,19 @@ async function writeWorkspaceApps(apps: Record<string, AppSetting>): Promise<voi
     .update("apps", apps, vscode.ConfigurationTarget.Workspace);
 }
 
+function settingsDiagnosticFile(): string | null {
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  const workspaceFile = vscode.workspace.workspaceFile;
+  const inspected = vscode.workspace
+    .getConfiguration("mf-dashboard")
+    .inspect<unknown>("extraManifestUrls");
+  return extraManifestSettingsFile({
+    workspaceValueDefined: inspected?.workspaceValue !== undefined,
+    workspaceFile: workspaceFile ?? null,
+    singleFolderPath: folders.length === 1 ? folders[0].uri.fsPath : null,
+  });
+}
+
 function workspaceRoots(): WorkspaceRoot[] {
   return (vscode.workspace.workspaceFolders ?? []).map((folder) => ({
     name: folder.name,
@@ -115,6 +129,8 @@ export class MfDashboardProvider
 {
   private readonly change = new vscode.EventEmitter<DashboardNode | undefined | null | void>();
   readonly onDidChangeTreeData = this.change.event;
+  private readonly diagnostics = vscode.languages.createDiagnosticCollection("mf-dashboard");
+  private publishedFiles: string[] = [];
   readonly session: DashboardSession;
   private readonly run = createSerialQueue();
   private readonly termsOf: () => DashboardTerms;
@@ -141,16 +157,22 @@ export class MfDashboardProvider
         writeApps: writeWorkspaceApps,
         scan: scanWorkspace,
         loadKnown: loadKnownApps,
-        probe: (input) => probeWorkspace(book, input),
+        probe: (target, input) => probeWorkspace(target, input),
         roots: workspaceRoots,
       },
       book,
       () => {
-        this.change.fire();
+        this.notify();
       },
     );
     this.session.terms = termsOf();
     this.session.typesForLink = (link) => this.cachedTypes(link);
+    this.session.beforeRefreshChange = () => {
+      this.typeCache.clear();
+    };
+    this.session.onRefreshFailed = () => {
+      this.typeCache.clear();
+    };
   }
 
   dispose(): void {
@@ -158,7 +180,43 @@ export class MfDashboardProvider
     if (this.timer) clearTimeout(this.timer);
     for (const timer of this.saveTimers.values()) clearTimeout(timer);
     this.saveTimers.clear();
+    this.diagnostics.dispose();
     this.change.dispose();
+  }
+
+  private notify(): void {
+    if (this.disposed) return;
+    if (!this.session.probeRunning) this.publishProblems();
+    this.change.fire();
+  }
+
+  private publishProblems(): void {
+    const drafts = this.session.problemDrafts(settingsDiagnosticFile());
+    const byFile = new Map<string, vscode.Diagnostic[]>();
+    for (const draft of drafts) {
+      const diagnostic = new vscode.Diagnostic(
+        new vscode.Range(0, 0, 0, 0),
+        draft.message,
+        draft.severity === "warning"
+          ? vscode.DiagnosticSeverity.Warning
+          : vscode.DiagnosticSeverity.Information,
+      );
+      diagnostic.source = "MF Dashboard";
+      const list = byFile.get(draft.file) ?? [];
+      list.push(diagnostic);
+      byFile.set(draft.file, list);
+    }
+    const updates = diagnosticUpdates(this.publishedFiles, [...byFile.keys()]);
+    this.publishedFiles = [...byFile.keys()];
+    this.diagnostics.set(
+      updates.map(
+        ({ file, present }) =>
+          [vscode.Uri.file(file), present ? byFile.get(file) : undefined] as [
+            vscode.Uri,
+            vscode.Diagnostic[] | undefined,
+          ],
+      ),
+    );
   }
 
   armProbe(): void {
@@ -195,21 +253,20 @@ export class MfDashboardProvider
       );
       if (!included) continue;
       this.typeCache.clear();
-      this.change.fire();
+      this.notify();
       const previous = this.saveTimers.get(app.name);
       if (previous) clearTimeout(previous);
       const timer = setTimeout(() => {
         this.saveTimers.delete(app.name);
         if (this.disposed) return;
         this.typeCache.clear();
-        this.change.fire();
+        this.notify();
       }, settings.typesSettleMs);
       this.saveTimers.set(app.name, timer);
     }
   }
 
   private async reload(): Promise<void> {
-    this.typeCache.clear();
     await this.session.refresh();
   }
 

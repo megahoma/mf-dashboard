@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
 import {
+  appProbeId,
   createProbeBook,
   putAppResult,
   putExternalResult,
@@ -82,7 +83,7 @@ test("an empty app list stays empty and does not scan", async () => {
       loadKnown() {
         throw new Error("missing apps are not loaded");
       },
-      async probe(input) {
+      async probe(_book, input) {
         assert.deepEqual(input.apps, []);
         assert.deepEqual(input.links, []);
       },
@@ -119,6 +120,250 @@ test("discover does not write an empty apps object when nothing is found", async
   assert.deepEqual(session.nodes(), []);
 });
 
+test("refresh keeps the previous book until the probe settles", async () => {
+  const previousExtra = "https://cdn.example/mf-manifest.json";
+  const nextExtra = "https://next.example/mf-manifest.json";
+  const book = createProbeBook();
+  putAppResult(book, "app", { portOpen: true, ...artifact({ buildVersion: "old" }) });
+  putLinkResult(book, {
+    link: {
+      consumer: "app",
+      alias: "dep",
+      remoteName: "dep",
+      url: "http://127.0.0.1:4200/mf-manifest.json",
+    },
+    ...artifact(),
+  });
+  putExternalResult(book, previousExtra, artifact({ manifestReachable: true }));
+  const visible = [app({ name: "app", port: 4100 })];
+  let probeFlag: boolean | undefined;
+  let duringKind: string | undefined;
+  let changeFlag: boolean | undefined;
+  const session: DashboardSession = new DashboardSession(
+    {
+      readSettings: () =>
+        settings({
+          apps: { app: { path: "." } },
+          extraManifestUrls: [nextExtra],
+          structure: "flat",
+        }),
+      writeApps() {},
+      scan() {
+        return {};
+      },
+      loadKnown: () => [app({ name: "app", port: 4100 })],
+      async probe(target) {
+        probeFlag = session.probeRunning;
+        duringKind = session.nodes()[0]?.kind;
+        assert.equal(session.loaded, visible);
+        assert.deepEqual(session.extraUrls, [previousExtra]);
+        assert.equal(book.apps.get(appProbeId("app"))?.buildVersion, "old");
+        assert.equal(book.links.size, 1);
+        assert.equal(book.extras.size, 1);
+        putAppResult(target, "app", { portOpen: false, ...artifact({ buildVersion: "new" }) });
+        assert.equal(book.apps.get(appProbeId("app"))?.buildVersion, "old");
+        assert.equal(session.structure, "flat");
+        session.setStructure("tree");
+      },
+      roots: () => [{ name: "widget-1", path: "/widget-1" }],
+    },
+    book,
+    () => {
+      changeFlag = session.probeRunning;
+    },
+  );
+  session.loaded = visible;
+  session.extraUrls = [previousExtra];
+  await session.refresh();
+  assert.equal(probeFlag, true);
+  assert.equal(duringKind, "listen");
+  assert.equal(changeFlag, false);
+  assert.equal(session.probeRunning, false);
+  assert.notEqual(session.loaded, visible);
+  assert.equal(book.apps.get(appProbeId("app"))?.buildVersion, "new");
+  assert.equal(book.links.size, 0);
+  assert.equal(book.extras.size, 0);
+  assert.equal(session.nodes()[0]?.kind, "silent");
+  assert.equal(
+    session.nodes().some((node) => node.name === "cdn.example"),
+    false,
+  );
+  assert.equal(
+    session.nodes().some((node) => node.name === "next.example"),
+    true,
+  );
+  assert.deepEqual(session.extraUrls, [nextExtra]);
+  assert.equal(session.structure, "tree");
+
+  const kept = createProbeBook();
+  putAppResult(kept, "app", { portOpen: true, ...artifact({ buildVersion: "kept" }) });
+  const keptLoaded = [app({ name: "app", port: 4100 })];
+  let rejectedChange = false;
+  const failing = new DashboardSession(
+    {
+      readSettings: () =>
+        settings({
+          apps: { other: { path: "." } },
+          extraManifestUrls: ["https://other.example/mf-manifest.json"],
+          structure: "flat",
+        }),
+      writeApps() {},
+      scan() {
+        return {};
+      },
+      loadKnown: () => [app({ name: "other", port: 1 })],
+      async probe() {
+        throw new Error("down");
+      },
+      roots: () => [{ name: "widget-1", path: "/widget-1" }],
+    },
+    kept,
+    () => {
+      rejectedChange = true;
+    },
+  );
+  failing.loaded = keptLoaded;
+  await assert.rejects(() => failing.refresh(), /down/);
+  assert.equal(failing.probeRunning, false);
+  assert.equal(rejectedChange, false);
+  assert.equal(failing.loaded, keptLoaded);
+  assert.equal(failing.nodes()[0]?.name, "app");
+  assert.equal(failing.nodes()[0]?.kind, "listen");
+  assert.equal(failing.book.apps.get(appProbeId("app"))?.buildVersion, "kept");
+  assert.deepEqual(failing.extraUrls, []);
+  assert.equal(failing.structure, "tree");
+});
+
+test("a failed probe preserves a structure toggle", async () => {
+  let changes = 0;
+  const session = new DashboardSession(
+    {
+      readSettings: () => settings(),
+      writeApps() {},
+      scan() {
+        return {};
+      },
+      loadKnown: () => [],
+      async probe() {
+        session.setStructure("flat");
+        throw new Error("down");
+      },
+      roots: () => [],
+    },
+    createProbeBook(),
+    () => {
+      changes += 1;
+    },
+  );
+  await assert.rejects(() => session.refresh(), /down/);
+  assert.equal(session.structure, "flat");
+  assert.equal(changes, 2);
+});
+
+test("a failed refresh keeps the previous problem drafts", async () => {
+  const linkUrl = "http://127.0.0.1:4200/mf-manifest.json";
+  const extraUrl = "https://cdn.example/mf-manifest.json";
+  const settingsFile = "/widget-1/.vscode/settings.json";
+  const book = createProbeBook();
+  putAppResult(book, "app", { portOpen: true, ...artifact() });
+  putAppResult(book, "dep", { portOpen: true, ...artifact() });
+  putLinkResult(book, {
+    link: { consumer: "app", alias: "dep", remoteName: "dep", url: linkUrl },
+    ...artifact({ manifestReachable: true }),
+  });
+  const session: DashboardSession = new DashboardSession(
+    {
+      readSettings: () => settings({ apps: { app: { path: "." } }, extraManifestUrls: [extraUrl] }),
+      writeApps() {},
+      scan() {
+        return {};
+      },
+      loadKnown: () => session.loaded,
+      async probe() {
+        throw new Error("down");
+      },
+      roots: () => [{ name: "widget-1", path: "/widget-1" }],
+    },
+    book,
+    () => {},
+  );
+  session.typesForLink = () => "unfetched";
+  session.loaded = [
+    app({
+      name: "app",
+      port: 4100,
+      remotes: [{ alias: "dep", name: "dep", url: linkUrl }],
+    }),
+    app({ name: "dep", port: 4200 }),
+  ];
+  session.extraUrls = [extraUrl];
+  session.structure = "flat";
+  const linkDraft = {
+    file: "/widget-1/rsbuild.config.ts",
+    message: "app → dep: " + terms.unfetched,
+    severity: "information" as const,
+    kind: "unfetched" as const,
+  };
+  const extraDraft = {
+    file: settingsFile,
+    message: "cdn.example: " + terms.noAnswer,
+    severity: "warning" as const,
+    kind: "noAnswer" as const,
+  };
+  assert.deepEqual(session.problemDrafts(settingsFile), [linkDraft, extraDraft]);
+  assert.deepEqual(session.problemDrafts(null), [linkDraft]);
+  const before = session.problemDrafts(settingsFile);
+  await assert.rejects(() => session.refresh(), /down/);
+  session.relabel(session.terms);
+  assert.equal(session.probeRunning, false);
+  assert.deepEqual(session.problemDrafts(settingsFile), before);
+});
+
+test("a link that reaches listen leaves the problem drafts", () => {
+  const linkUrl = "http://127.0.0.1:4200/mf-manifest.json";
+  const book = createProbeBook();
+  putAppResult(book, "app", { portOpen: true, ...artifact() });
+  putAppResult(book, "dep", { portOpen: true, ...artifact() });
+  putLinkResult(book, {
+    link: { consumer: "app", alias: "dep", remoteName: "dep", url: linkUrl },
+    ...artifact({ manifestReachable: true }),
+  });
+  let typesState: "unfetched" | "ok" = "unfetched";
+  const session = new DashboardSession(
+    {
+      readSettings: () => settings(),
+      writeApps() {},
+      scan() {
+        return {};
+      },
+      loadKnown: () => [],
+      async probe() {},
+      roots: () => [],
+    },
+    book,
+    () => {},
+  );
+  session.typesForLink = () => typesState;
+  session.loaded = [
+    app({
+      name: "app",
+      port: 4100,
+      remotes: [{ alias: "dep", name: "dep", url: linkUrl }],
+    }),
+    app({ name: "dep", port: 4200 }),
+  ];
+  assert.deepEqual(session.problemDrafts(null), [
+    {
+      file: "/widget-1/rsbuild.config.ts",
+      message: "app → dep: " + terms.unfetched,
+      severity: "information",
+      kind: "unfetched",
+    },
+  ]);
+  typesState = "ok";
+  assert.deepEqual(session.problemDrafts(null), []);
+});
+
 test("relabel uses the next terms without scanning", async () => {
   let scans = 0;
   let probes = 0;
@@ -134,9 +379,9 @@ test("relabel uses the next terms without scanning", async () => {
         return {};
       },
       loadKnown: () => [app({ name: "app", port: 4100, folder: "/widget-1" })],
-      async probe() {
+      async probe(target) {
         probes += 1;
-        putAppResult(book, "app", { portOpen: true, ...artifact() });
+        putAppResult(target, "app", { portOpen: true, ...artifact() });
       },
       roots: () => [{ name: "widget-1", path: "/widget-1" }],
     },
@@ -253,6 +498,9 @@ test("the provider registers the tree without a view message", () => {
   const itemStart = provider.indexOf("getTreeItem(");
   const itemEnd = provider.indexOf("getChildren(", itemStart);
   assert.equal(/\.message\b/.test(provider.slice(itemStart, itemEnd)), false);
+  const notifyStart = provider.indexOf("private notify()");
+  const notifyEnd = provider.indexOf("private publishProblems(", notifyStart);
+  assert.match(provider.slice(notifyStart, notifyEnd), /if \(this\.disposed\) return/);
   assert.match(provider, /new vscode\.ThemeIcon\(icons\[row\.kind\]\)/);
   assert.match(provider, /description = row\.description/);
   assert.match(extension, /selectedTerms/);
