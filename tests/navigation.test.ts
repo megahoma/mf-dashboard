@@ -19,7 +19,44 @@ registerHooks({
 const { ManifestDocuments } = await import("../src/features/open-manifest/documents.ts");
 const { MfDashboardProvider } = await import("../src/widgets/mf-dashboard-tree/provider.ts");
 
-test("shared producers are scanned once and invalidated with the link status cache", (t) => {
+test("stat failures in installed types do not prevent rendering the dashboard", (t) => {
+  const producer = localApp("producer", "/producer", { generateTypes: false });
+  const consumer = localApp("consumer", "/consumer", {
+    consumeTypes: true,
+    remotes: [{ alias: "producer", name: "producer", url: null }],
+  });
+  const provider = new MfDashboardProvider(() => terms);
+  t.after(() => provider.dispose());
+  provider.session.loaded = [consumer, producer, localApp("other", "/other")];
+  for (const code of ["EACCES", "EIO", "ENOTDIR"]) {
+    const stat = t.mock.method(fs, "statSync", () => {
+      throw Object.assign(new Error(code), { code });
+    });
+    try {
+      provider.session.beforeRefreshChange();
+      const rows = provider.getChildren();
+      assert.deepEqual(
+        rows.map((row) => row.name),
+        ["consumer", "other"],
+      );
+      assert.equal(rows[0].children[0].name, "producer");
+      assert.equal(
+        provider.session.typesForLink({
+          consumer: "consumer",
+          alias: "producer",
+          remoteName: "producer",
+          url: null,
+        }),
+        "manual",
+      );
+    } finally {
+      stat.mock.restore();
+    }
+  }
+});
+
+test("shared producers are scanned once and invalidated with the link status cache", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-producer-cache-"));
   const producer = localApp("producer", root);
   const source = path.join(root, "app.ts");
@@ -42,7 +79,9 @@ test("shared producers are scanned once and invalidated with the link status cac
   };
   const linkB = { ...linkA, consumer: "b" };
   const read = t.mock.method(fs, "readFileSync");
+  const stat = t.mock.method(fs, "statSync");
   const count = () => read.mock.calls.filter((call) => String(call.arguments[0]) === source).length;
+  const scans = () => stat.mock.calls.filter((call) => String(call.arguments[0]) === source).length;
   provider.session.typesForLink(linkA);
   provider.session.typesForLink(linkB);
   assert.equal(count(), 1);
@@ -56,6 +95,18 @@ test("shared producers are scanned once and invalidated with the link status cac
   provider.session.onRefreshFailed();
   provider.session.typesForLink(linkA);
   assert.equal(count(), 2);
+  fs.writeFileSync(source, "export const app = 3;");
+  await provider.fileSaved(source);
+  // fileSaved's notification observes both links; they share the new producer snapshot.
+  provider.session.typesForLink(linkA);
+  provider.session.typesForLink(linkB);
+  assert.equal(count(), 3);
+  const beforeSettle = scans();
+  t.mock.timers.tick(15_000);
+  provider.session.typesForLink(linkA);
+  provider.session.typesForLink(linkB);
+  assert.ok(scans() > beforeSettle, "the settle timer invalidates both provider caches again");
+  assert.equal(count(), 3, "unchanged source bytes remain cached after the settle timer");
 });
 
 test("manifest documents update in place and keep credentials out of their URI", () => {

@@ -15,6 +15,7 @@ export interface RebuildContext {
   apps: readonly LocalApp[];
   book: ProbeBook;
   confirmations: ConfirmationStore;
+  published: Map<string, string>;
   settings: ScriptSettings & { rebuildCommand: string };
   refetchCommand(): string;
   persist(): void | PromiseLike<void>;
@@ -32,12 +33,11 @@ export async function rebuildTypes(
     runShell,
   },
 ): Promise<void> {
-  const { apps, book, confirmations } = context;
+  const { apps, book, confirmations, published } = context;
   const nodes = apps
     .filter((app) => app.generateTypes)
     .map((app) => operations.collectProducerEvidence(app, apps, book, confirmations));
   const plan = rebuildPlan(root, nodes);
-  const published = new Map<string, string>();
   for (const step of plan) {
     if (step.action === "skip") continue;
     const app = apps.find((item) => item.name === step.name);
