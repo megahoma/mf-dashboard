@@ -75,7 +75,11 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.window.registerTreeDataProvider("mf-dashboard", provider),
     vscode.commands.registerCommand("mf-dashboard.refresh", () => provider.refresh()),
-    vscode.commands.registerCommand("mf-dashboard.discover", () => provider.discover()),
+    vscode.commands.registerCommand("mf-dashboard.discover", async () => {
+      await provider.discover();
+      if (provider.session.loaded.length === 0)
+        await vscode.window.showInformationMessage(selectedTerms().empty);
+    }),
     vscode.commands.registerCommand("mf-dashboard.useFlat", () => setStructure("flat")),
     vscode.commands.registerCommand("mf-dashboard.useTree", () => setStructure("tree")),
     vscode.commands.registerCommand("mf-dashboard.start", (node?: DashboardNode) =>

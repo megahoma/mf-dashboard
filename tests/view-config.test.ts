@@ -26,14 +26,18 @@ function welcomeContents(): string {
   return entry.contents;
 }
 
-test("viewsWelcome uses static empty-state keys and a discover link", () => {
+test("viewsWelcome localizes the entire contents with a discover link", () => {
   const contents = welcomeContents();
-  assert.match(contents, /%viewsWelcome\.empty%/);
-  assert.match(contents, /\[%viewsWelcome\.discover%\]\(command:mf-dashboard\.discover\)/);
-  assert.equal(en["viewsWelcome.empty"], "No Module Federation configs found");
-  assert.equal(ru["viewsWelcome.empty"], "Конфиги Module Federation не найдены");
-  assert.equal(en["viewsWelcome.discover"], "Find microfrontends");
-  assert.equal(ru["viewsWelcome.discover"], "Найти микрофронты");
+  assert.match(contents, /^%[^%]+%$/);
+  const key = contents.slice(1, -1);
+  assert.equal(
+    en[key],
+    "No Module Federation configs found\n[Find microfrontends](command:mf-dashboard.discover)",
+  );
+  assert.equal(
+    ru[key],
+    "Конфиги Module Federation не найдены\n[Найти микрофронты](command:mf-dashboard.discover)",
+  );
 });
 
 test("refresh and discover are declared commands", () => {

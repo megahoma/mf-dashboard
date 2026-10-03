@@ -36,7 +36,7 @@
     "viewsWelcome": [
       {
         "view": "mf-dashboard",
-        "contents": "%viewsWelcome.empty%\n[%viewsWelcome.discover%](command:mf-dashboard.discover)"
+        "contents": "%viewsWelcome.contents%"
       }
     ],
     "commands": [
