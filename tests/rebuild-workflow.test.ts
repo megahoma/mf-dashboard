@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+  appProbeId,
   createProbeBook,
   putAppResult,
   type LocalApp,
@@ -45,6 +46,7 @@ test("rebuild installs dependencies before generation and saves the newly built 
     apps: [parent, child],
     book,
     confirmations,
+    published: new Map(),
     settings: { "mf-dashboard.scripts.start": "dev", rebuildCommand: "" },
     refetchCommand: () => "",
     persist: () => {
@@ -92,6 +94,25 @@ test("rebuild installs dependencies before generation and saves the newly built 
     parent.remotes[0].url,
   );
 
+  // The probe still has the old hash, but Last-Modified lets the child skip the next rebuild.
+  const childProbe = book.apps.get(appProbeId("child"));
+  assert.ok(childProbe);
+  childProbe.zipMtime = Date.now() + 60_000;
+  fs.writeFileSync(path.join(parent.folder, "app.ts"), "parent changed");
+  events.length = 0;
+  await rebuildTypes("parent", context, operations);
+  assert.deepEqual(events, [
+    "install:parent:child",
+    "persist",
+    "generate:parent",
+    "persist",
+    "done:parent",
+  ]);
+  assert.equal(childProbe.zipHash, "old", "the probe has not caught up with generation");
+  assert.deepEqual(confirmations.generation("parent")?.builtDependencyHashes, {
+    child: "new-child",
+  });
+
   for (const app of [parent, child]) {
     putAppResult(book, app.name, {
       portOpen: true,
@@ -138,6 +159,7 @@ test("custom rebuild checks the published archive and never confirms a failed co
     apps: [app],
     book: createProbeBook(),
     confirmations,
+    published: new Map(),
     settings: {
       "mf-dashboard.scripts.start": "dev",
       "mf-dashboard.apps": { app: { manifestPath: "custom.json" } },
@@ -170,6 +192,7 @@ test("custom rebuild checks the published archive and never confirms a failed co
   };
   await rebuildTypes("app", context, operations);
   assert.equal(confirmations.generation("app")?.zipHash, "published");
+  assert.equal(context.published.get("app"), "published");
   assert.equal(checked, 1);
   await assert.rejects(
     () =>
@@ -248,6 +271,7 @@ test("a dependency without a URL or producer port fails before installation or g
             apps,
             book: createProbeBook(),
             confirmations,
+            published: new Map(),
             settings: { "mf-dashboard.scripts.start": "dev", rebuildCommand: "" },
             refetchCommand: unexpected,
             persist: unexpected,

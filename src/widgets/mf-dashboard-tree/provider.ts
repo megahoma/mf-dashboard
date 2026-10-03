@@ -23,6 +23,7 @@ import {
   type ConfirmationStore,
   describeLink,
   readInstalledEvidence,
+  type InstalledEvidence,
   sourceContains,
 } from "../../entities/federated-types/index.ts";
 import { resolveStartScript } from "../../features/init-settings/index.ts";
@@ -128,6 +129,7 @@ export class MfDashboardProvider
   private readonly confirmations: ConfirmationStore;
   private readonly persistConfirmations: () => void | PromiseLike<void>;
   private readonly producerCache = new Map<string, ProducerSnapshot>();
+  private readonly publishedZipHashes = new Map<string, string>();
   private readonly typeCache = new Map<string, ReturnType<typeof describeLink>>();
   private timer: ReturnType<typeof setTimeout> | undefined;
   private readonly saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -427,6 +429,7 @@ export class MfDashboardProvider
         apps: this.session.loaded,
         book: this.session.book,
         confirmations: this.confirmations,
+        published: this.publishedZipHashes,
         settings: {
           "mf-dashboard.scripts.start": settings.startScript,
           "mf-dashboard.apps": settings.apps,
@@ -507,6 +510,12 @@ export class MfDashboardProvider
         /* Invalid targets carry no installed evidence. */
       }
     }
+    let installed: InstalledEvidence;
+    try {
+      installed = readInstalledEvidence(destination);
+    } catch {
+      installed = { folderExists: true, filesFingerprint: "" };
+    }
     return describeLink({
       consumeTypes: consumer.consumeTypes,
       producer: producer
@@ -520,7 +529,7 @@ export class MfDashboardProvider
       installConfirmation: this.confirmations.install(link),
       checkedAt: Date.now(),
       typesSettleMs: readWorkspaceSettings().typesSettleMs,
-      installed: readInstalledEvidence(destination),
+      installed,
     });
   }
 }

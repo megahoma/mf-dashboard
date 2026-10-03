@@ -34,7 +34,7 @@ export class EventEmitter<T> {
 }
 
 export const languages = {
-  createDiagnosticCollection: () => ({ dispose() {} }),
+  createDiagnosticCollection: () => ({ set(_entries: unknown) {}, dispose() {} }),
 };
 export const workspace = {
   getConfiguration() {
