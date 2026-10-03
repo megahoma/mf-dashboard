@@ -8,6 +8,7 @@ const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url),
     commands?: { command: string; title: string }[];
     viewsWelcome?: { view: string; contents: string }[];
     menus?: {
+      commandPalette?: { command: string; when?: string }[];
       "view/title"?: { command: string; when?: string; group?: string }[];
       "view/item/context"?: { command: string; when?: string; group?: string }[];
     };
@@ -25,6 +26,16 @@ function welcomeContents(): string {
   assert.ok(entry, "viewsWelcome for mf-dashboard");
   return entry.contents;
 }
+
+test("row navigation commands stay out of the command palette", () => {
+  for (const name of ["openConfig", "openProducerConfig", "revealTypes", "openManifest"]) {
+    assert.equal(
+      pkg.contributes.menus?.commandPalette?.find((item) => item.command === `mf-dashboard.${name}`)
+        ?.when,
+      "false",
+    );
+  }
+});
 
 test("viewsWelcome localizes the entire contents with a discover link", () => {
   const contents = welcomeContents();
@@ -99,17 +110,17 @@ test("start, rebuild, and refetch are inline on silent, stale, and unfetched", (
   const byCommand = new Map(inline.map((item) => [item.command, item]));
   assert.deepEqual(byCommand.get("mf-dashboard.start"), {
     command: "mf-dashboard.start",
-    when: "view == mf-dashboard && viewItem == silent",
+    when: "view == mf-dashboard && viewItem =~ /^silent($| )/",
     group: "inline",
   });
   assert.deepEqual(byCommand.get("mf-dashboard.rebuildTypes"), {
     command: "mf-dashboard.rebuildTypes",
-    when: "view == mf-dashboard && viewItem == stale",
+    when: "view == mf-dashboard && viewItem =~ /^stale($| )/",
     group: "inline",
   });
   assert.deepEqual(byCommand.get("mf-dashboard.refetchTypes"), {
     command: "mf-dashboard.refetchTypes",
-    when: "view == mf-dashboard && viewItem == unfetched",
+    when: "view == mf-dashboard && viewItem =~ /^unfetched($| )/",
     group: "inline",
   });
 });

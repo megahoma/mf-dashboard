@@ -94,6 +94,18 @@ export function activate(context: vscode.ExtensionContext): void {
       const linkId = node.linkId;
       return provider.finishRefetch(linkId).finally(() => provider.releaseRefetch(linkId));
     }),
+    vscode.commands.registerCommand("mf-dashboard.openConfig", (node?: DashboardNode) =>
+      provider.openConfig(node),
+    ),
+    vscode.commands.registerCommand("mf-dashboard.openProducerConfig", (node?: DashboardNode) =>
+      provider.openProducerConfig(node),
+    ),
+    vscode.commands.registerCommand("mf-dashboard.revealTypes", (node?: DashboardNode) =>
+      provider.revealTypes(node),
+    ),
+    vscode.commands.registerCommand("mf-dashboard.openManifest", (node?: DashboardNode) =>
+      provider.openManifest(node),
+    ),
   );
   void openPanel(provider).catch((error: unknown) =>
     vscode.window.showErrorMessage(`MF dashboard: ${String(error)}`),

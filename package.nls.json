@@ -24,5 +24,9 @@
   "command.rebuildTypes": "Rebuild types",
   "command.refetchTypes": "Fetch @mf-types",
   "command.useFlat": "Flat list",
-  "command.useTree": "Tree"
+  "command.useTree": "Tree",
+  "command.openConfig": "Open config",
+  "command.openProducerConfig": "Open producer config",
+  "command.revealTypes": "Reveal types",
+  "command.openManifest": "Open manifest"
 }
