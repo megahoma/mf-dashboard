@@ -1,3 +1,4 @@
+import path from "node:path";
 import type { StatusKind } from "./classify.ts";
 
 export type ProblemSeverity = "warning" | "information";
@@ -7,6 +8,18 @@ export interface ProblemDraft {
   message: string;
   severity: ProblemSeverity;
   kind: StatusKind;
+}
+
+export function extraManifestSettingsFile(input: {
+  workspaceValueDefined: boolean;
+  workspaceFile: { scheme: string; fsPath: string } | null;
+  singleFolderPath: string | null;
+}): string | null {
+  if (!input.workspaceValueDefined) return null;
+  if (input.workspaceFile)
+    return input.workspaceFile.scheme === "file" ? input.workspaceFile.fsPath : null;
+  if (input.singleFolderPath) return path.join(input.singleFolderPath, ".vscode", "settings.json");
+  return null;
 }
 
 export function diagnosticUpdates(

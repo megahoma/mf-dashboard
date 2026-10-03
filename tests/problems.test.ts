@@ -1,10 +1,61 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import { test } from "node:test";
 import {
   diagnosticUpdates,
+  extraManifestSettingsFile,
   problemDraft,
   problemSeverity,
 } from "../src/entities/status/problems.ts";
+
+test("extra manifest diagnostics follow the workspace value", () => {
+  const folder = "/repo/app";
+  const workspace = "/repo/app.code-workspace";
+  const settingsFile = path.join(folder, ".vscode", "settings.json");
+  assert.equal(
+    extraManifestSettingsFile({
+      workspaceValueDefined: true,
+      workspaceFile: null,
+      singleFolderPath: folder,
+    }),
+    settingsFile,
+  );
+  assert.equal(
+    extraManifestSettingsFile({
+      workspaceValueDefined: true,
+      workspaceFile: { scheme: "file", fsPath: workspace },
+      singleFolderPath: folder,
+    }),
+    workspace,
+  );
+  assert.equal(
+    extraManifestSettingsFile({
+      workspaceValueDefined: true,
+      workspaceFile: { scheme: "file", fsPath: workspace },
+      singleFolderPath: null,
+    }),
+    workspace,
+  );
+  assert.equal(
+    extraManifestSettingsFile({
+      workspaceValueDefined: false,
+      workspaceFile: { scheme: "file", fsPath: workspace },
+      singleFolderPath: folder,
+    }),
+    null,
+  );
+});
+
+test("an untitled workspace does not fall back to folder settings", () => {
+  assert.equal(
+    extraManifestSettingsFile({
+      workspaceValueDefined: true,
+      workspaceFile: { scheme: "untitled", fsPath: "1555503116870" },
+      singleFolderPath: "/repo/app",
+    }),
+    null,
+  );
+});
 
 test("warning and information kinds", () => {
   assert.equal(problemSeverity("invalidUrl"), "warning");

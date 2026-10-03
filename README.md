@@ -80,7 +80,7 @@ The same failed statuses are written to the Problems panel, source `MF Dashboard
 
 `URL error`, `non-local URL`, `different port`, and `unreachable` are warnings. `types not rebuilt` and `types not updated` are information. `listening`, `stopped`, and `reachable` are not written.
 
-A link is attached to the consumer config. The message is the consumer name, the alias, and the status, for example `shell → widget: types not updated`. An extra manifest URL is attached to `.vscode/settings.json` of the first workspace folder when that file exists, otherwise to the `.code-workspace` file. An extra URL with neither file stays in the tree only.
+A link is attached to the consumer config. The message is the consumer name, the alias, and the status, for example `shell → widget: types not updated`. An extra manifest URL is attached to the workspace value of `mf-dashboard.extraManifestUrls`. When the window has a saved `.code-workspace` file, the diagnostic uses that file, including a workspace with one folder. A single folder opened without a workspace file uses its `.vscode/settings.json`. An extra URL in an unsaved workspace or with no workspace value stays in the tree only.
 
 The list is replaced when a probe finishes and when the tree redraws. It is left in place while a probe request is still running. Flat mode still reports link problems.
 

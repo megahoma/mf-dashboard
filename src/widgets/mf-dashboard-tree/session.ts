@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   appProbeId,
+  createProbeBook,
   externalManifestId,
   linkProbeId,
   manifestTooltipLines,
@@ -59,7 +60,7 @@ export interface DashboardPorts {
     envMode: string,
     ignorePaths: readonly string[],
   ): LocalApp[];
-  probe(input: ProbeCycleInput): Promise<void>;
+  probe(book: ProbeBook, input: ProbeCycleInput): Promise<void>;
   roots(): WorkspaceRoot[];
 }
 
@@ -243,36 +244,47 @@ export class DashboardSession {
   async refresh(): Promise<void> {
     const snapshot = this.captureRefreshState();
     this.probeRunning = true;
+    let structureAtProbe = this.structure;
     try {
-      this.book.apps.clear();
-      this.book.links.clear();
-      this.book.extras.clear();
       const current = this.ports.readSettings();
       const roots = this.ports.roots();
+      const extraUrls = [...current.extraManifestUrls];
+      // A flat/tree toggle during the probe updates this.structure in place.
       this.structure = current.structure === "flat" ? "flat" : "tree";
-      this.extraUrls = [...current.extraManifestUrls];
-      if (roots.length === 0 || current.apps === undefined) this.loaded = [];
-      else
-        this.loaded = this.ports.loadKnown(
-          roots,
-          current.apps,
-          current.envMode,
-          current.ignorePaths,
-        );
+      structureAtProbe = this.structure;
+      const loaded =
+        roots.length === 0 || current.apps === undefined
+          ? []
+          : this.ports.loadKnown(roots, current.apps, current.envMode, current.ignorePaths);
       const names = new Set<string>();
-      for (const app of this.loaded) {
+      for (const app of loaded) {
         if (names.has(app.name)) throw new Error(`duplicate federation name: ${app.name}`);
         names.add(app.name);
       }
-      await this.ports.probe({
-        apps: this.loaded,
-        links: linksOf(this.loaded),
-        extraManifestUrls: this.extraUrls,
+      // The probe writes `staged`. The visible book stays put until the swap below.
+      const staged = createProbeBook();
+      await this.ports.probe(staged, {
+        apps: loaded,
+        links: linksOf(loaded),
+        extraManifestUrls: extraUrls,
+      });
+      this.applyRefreshState({
+        apps: staged.apps,
+        links: staged.links,
+        extras: staged.extras,
+        loaded,
+        extraUrls,
+        structure: this.structure,
       });
     } catch (error) {
-      this.restoreRefreshState(snapshot);
+      const toggledDuringProbe = this.structure !== structureAtProbe;
+      this.applyRefreshState({
+        ...snapshot,
+        structure: toggledDuringProbe ? this.structure : snapshot.structure,
+      });
       this.probeRunning = false;
       this.onRefreshFailed();
+      if (toggledDuringProbe) this.onChange();
       throw error;
     }
     this.probeRunning = false;
@@ -378,7 +390,7 @@ export class DashboardSession {
     };
   }
 
-  private restoreRefreshState(snapshot: {
+  private applyRefreshState(snapshot: {
     apps: Map<string, ProbeResult>;
     links: Map<string, LinkProbeResult>;
     extras: Map<string, ArtifactProbe>;

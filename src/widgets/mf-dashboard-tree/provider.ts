@@ -16,7 +16,7 @@ import {
   type LocalApp,
   type RemoteLink,
 } from "../../entities/microfrontend/index.ts";
-import { diagnosticUpdates } from "../../entities/status/index.ts";
+import { diagnosticUpdates, extraManifestSettingsFile } from "../../entities/status/index.ts";
 import {
   describeLink,
   sourceFreshness,
@@ -105,14 +105,16 @@ async function writeWorkspaceApps(apps: Record<string, AppSetting>): Promise<voi
 }
 
 function settingsDiagnosticFile(): string | null {
-  const folder = vscode.workspace.workspaceFolders?.[0];
-  if (folder) {
-    const file = path.join(folder.uri.fsPath, ".vscode", "settings.json");
-    if (fs.existsSync(file)) return file;
-  }
+  const folders = vscode.workspace.workspaceFolders ?? [];
   const workspaceFile = vscode.workspace.workspaceFile;
-  if (workspaceFile?.scheme === "file") return workspaceFile.fsPath;
-  return null;
+  const inspected = vscode.workspace
+    .getConfiguration("mf-dashboard")
+    .inspect<unknown>("extraManifestUrls");
+  return extraManifestSettingsFile({
+    workspaceValueDefined: inspected?.workspaceValue !== undefined,
+    workspaceFile: workspaceFile ?? null,
+    singleFolderPath: folders.length === 1 ? folders[0].uri.fsPath : null,
+  });
 }
 
 function workspaceRoots(): WorkspaceRoot[] {
@@ -155,7 +157,7 @@ export class MfDashboardProvider
         writeApps: writeWorkspaceApps,
         scan: scanWorkspace,
         loadKnown: loadKnownApps,
-        probe: (input) => probeWorkspace(book, input),
+        probe: (target, input) => probeWorkspace(target, input),
         roots: workspaceRoots,
       },
       book,
@@ -200,7 +202,6 @@ export class MfDashboardProvider
           : vscode.DiagnosticSeverity.Information,
       );
       diagnostic.source = "MF Dashboard";
-      diagnostic.code = draft.kind;
       const list = byFile.get(draft.file) ?? [];
       list.push(diagnostic);
       byFile.set(draft.file, list);
