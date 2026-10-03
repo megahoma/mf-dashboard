@@ -38,6 +38,7 @@ export function discoverProgram(
   source: string,
   filePath: string,
   env: Record<string, string>,
+  dependencies?: Set<string>,
 ): LocalApp | null {
   let options = parsed.pluginObject?.k === "obj" ? parsed.pluginObject : null;
   let scope = parsed.bindings;
@@ -45,7 +46,7 @@ export function discoverProgram(
   // defines the federation options, not a rewritten copy of it.
   let configFile = filePath;
   if (!options && parsed.pluginCallee) {
-    const loaded = loadCallee(filePath, parsed, parsed.pluginCallee);
+    const loaded = loadCallee(filePath, parsed, parsed.pluginCallee, dependencies);
     if (loaded?.options.k === "obj") {
       options = loaded.options;
       scope = loaded.bindings;

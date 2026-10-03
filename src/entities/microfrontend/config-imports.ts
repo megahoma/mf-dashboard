@@ -10,15 +10,20 @@ interface Loaded {
   bindings: Map<string, Ast>;
 }
 
-export function loadCallee(filePath: string, parsed: Program, callee: string): Loaded | null {
+export function loadCallee(
+  filePath: string,
+  parsed: Program,
+  callee: string,
+  dependencies?: Set<string>,
+): Loaded | null {
   const local = objectAst(parsed.bindings.get(callee));
   if (local) return { file: filePath, options: local, bindings: parsed.bindings };
   const imported = parsed.imports.get(callee);
   if (!imported?.from.startsWith(".")) return null;
-  const resolved = resolveSpecifier(filePath, imported.from);
+  const resolved = resolveSpecifier(filePath, imported.from, dependencies);
   if (!resolved) return null;
   const exported = imported.exported === "*" ? callee : imported.exported;
-  return resolveExport(resolved, exported, 0, new Set([path.resolve(filePath)]));
+  return resolveExport(resolved, exported, 0, new Set([path.resolve(filePath)]), dependencies);
 }
 
 function resolveExport(
@@ -26,10 +31,12 @@ function resolveExport(
   exportName: string,
   depth: number,
   seen: Set<string>,
+  dependencies?: Set<string>,
 ): Loaded | null {
   const resolved = path.resolve(file);
   if (depth > 8 || seen.has(resolved)) return null;
   seen.add(resolved);
+  dependencies?.add(resolved);
   let text: string;
   try {
     text = fs.readFileSync(resolved, "utf8");
@@ -41,20 +48,24 @@ function resolveExport(
   if (options) return { file: resolved, options, bindings: parsed.bindings };
   for (const rex of parsed.reexports) {
     if (rex.exported !== exportName || !rex.from) continue;
-    const next = resolveSpecifier(resolved, rex.from);
+    const next = resolveSpecifier(resolved, rex.from, dependencies);
     if (!next) continue;
-    return resolveExport(next, rex.local, depth + 1, seen);
+    return resolveExport(next, rex.local, depth + 1, seen, dependencies);
   }
   for (const spec of parsed.starFrom) {
-    const next = resolveSpecifier(resolved, spec);
+    const next = resolveSpecifier(resolved, spec, dependencies);
     if (!next) continue;
-    const found = resolveExport(next, exportName, depth + 1, seen);
+    const found = resolveExport(next, exportName, depth + 1, seen, dependencies);
     if (found) return found;
   }
   return null;
 }
 
-function resolveSpecifier(fromFile: string, spec: string): string | null {
+function resolveSpecifier(
+  fromFile: string,
+  spec: string,
+  dependencies?: Set<string>,
+): string | null {
   if (!spec.startsWith(".")) return null;
   const base = path.resolve(path.dirname(fromFile), spec);
   const candidates =
@@ -64,8 +75,10 @@ function resolveSpecifier(fromFile: string, spec: string): string | null {
           ...SOURCE_EXTS.map((ext) => path.join(base, `index${ext}`)),
         ]
       : [base];
-  const root = packageRoot(fromFile);
+  const root = packageRoot(fromFile, dependencies);
   for (const candidate of candidates) {
+    // Missing candidates matter too: creating options.ts can replace an existing options.js.
+    dependencies?.add(candidate);
     if (!fs.existsSync(candidate) || !fs.statSync(candidate).isFile()) continue;
     const real = fs.realpathSync(candidate);
     if (!isInside(fs.realpathSync(root), real)) return null;
@@ -75,10 +88,12 @@ function resolveSpecifier(fromFile: string, spec: string): string | null {
   return null;
 }
 
-function packageRoot(filePath: string): string {
+function packageRoot(filePath: string, dependencies?: Set<string>): string {
   let dir = path.dirname(path.resolve(filePath));
   while (true) {
-    if (fs.existsSync(path.join(dir, "package.json"))) return dir;
+    const packageFile = path.join(dir, "package.json");
+    dependencies?.add(packageFile);
+    if (fs.existsSync(packageFile)) return dir;
     const parent = path.dirname(dir);
     if (parent === dir) return path.dirname(path.resolve(filePath));
     dir = parent;

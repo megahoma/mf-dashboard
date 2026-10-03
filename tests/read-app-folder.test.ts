@@ -113,6 +113,84 @@ test("manifest overrides are applied independently of the cached parse", (t) => 
   assert.equal(load()?.manifestPath, "/mf-manifest.json");
 });
 
+test("changing or removing an intermediate re-export invalidates the parsed config", (t) => {
+  const { roots, settings, cache, config, app } = fixture(t);
+  fs.writeFileSync(path.join(app, "package.json"), "{}");
+  const barrel = path.join(app, "barrel.ts");
+  const nested = path.join(app, "src", "nested.ts");
+  rewrite(
+    config,
+    'import { federation } from "./barrel"; createModuleFederationConfig(federation());',
+  );
+  rewrite(barrel, 'export { federation } from "./src/nested";');
+  rewrite(nested, 'export { federation } from "../old";');
+  for (const [file, remote, port] of [
+    ["old", "one", 3001],
+    ["new", "two", 3002],
+  ] as const) {
+    rewrite(
+      path.join(app, `${file}.ts`),
+      `export function federation() { return { name: "widget", manifest: true, remotes: { remote: "${remote}@http://localhost:${port}/mf-manifest.json" } }; }`,
+    );
+  }
+  const load = () => loadKnownApps(roots, settings, "development", [], cache)[0];
+  assert.equal(load()?.remotes[0].name, "one");
+  const read = t.mock.method(fs, "readFileSync");
+  assert.equal(load()?.remotes[0].name, "one");
+  assert.equal(read.mock.callCount(), 0, "unchanged import chains do not reread bytes");
+  rewrite(nested, 'export { federation } from "../new";');
+  assert.equal(load()?.remotes[0].name, "two");
+  assert.equal(load()?.configFile, path.join(app, "new.ts"));
+  fs.unlinkSync(nested);
+  assert.equal(load(), undefined);
+  rewrite(nested, 'export { federation } from "../old";');
+  assert.equal(load()?.remotes[0].name, "one");
+});
+
+test("creating a higher priority import candidate invalidates the parsed config", (t) => {
+  const { roots, settings, cache, config, app } = fixture(t);
+  fs.writeFileSync(path.join(app, "package.json"), "{}");
+  rewrite(
+    config,
+    'import { federation } from "./options"; createModuleFederationConfig(federation());',
+  );
+  rewrite(
+    path.join(app, "options.js"),
+    'export function federation() { return { name: "widget", dts: false }; }',
+  );
+  const load = () => loadKnownApps(roots, settings, "development", [], cache)[0];
+  assert.equal(load()?.generateTypes, false);
+  rewrite(
+    path.join(app, "options.ts"),
+    'export function federation() { return { name: "widget", dts: true }; }',
+  );
+  assert.equal(load()?.generateTypes, true);
+  assert.equal(load()?.configFile, path.join(app, "options.ts"));
+});
+
+test("changes in an earlier unsuccessful star re-export invalidate the chosen helper", (t) => {
+  const { roots, settings, cache, config, app } = fixture(t);
+  fs.writeFileSync(path.join(app, "package.json"), "{}");
+  rewrite(
+    config,
+    'import { federation } from "./barrel"; createModuleFederationConfig(federation());',
+  );
+  rewrite(path.join(app, "barrel.ts"), 'export * from "./first"; export * from "./second";');
+  rewrite(path.join(app, "first.ts"), "export const unrelated = 1;");
+  rewrite(
+    path.join(app, "second.ts"),
+    'export function federation() { return { name: "widget", dts: false }; }',
+  );
+  const load = () => loadKnownApps(roots, settings, "development", [], cache)[0];
+  assert.equal(load()?.generateTypes, false);
+  rewrite(
+    path.join(app, "first.ts"),
+    'export function federation() { return { name: "widget", dts: true }; }',
+  );
+  assert.equal(load()?.generateTypes, true);
+  assert.equal(load()?.configFile, path.join(app, "first.ts"));
+});
+
 test("two configured app names sharing a folder retain their own cached identity", (t) => {
   const { roots, config, cache, app } = fixture(t);
   rewrite(config, 'export default { name: "alpha", manifest: true };');

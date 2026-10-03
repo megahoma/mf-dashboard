@@ -468,7 +468,7 @@ function zipNet(body: () => Uint8Array, lastModified: number | null) {
   };
 }
 
-test("a probe cycle shares requests and forgets responses and failures before the next cycle", async () => {
+test("a probe cycle shares successful ZIP requests and retries failures in the next cycle", async () => {
   const url = "http://127.0.0.1:4100/mf-manifest.json";
   const book = createProbeBook();
   let requests = 0;

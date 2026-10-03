@@ -91,10 +91,21 @@ export function savedFileKind(
 
 export interface AppParseCache {
   lookup(key: string, folder: string, envMode: string): LocalApp | null;
-  store(key: string, folder: string, envMode: string, app: LocalApp): void;
+  store(
+    key: string,
+    folder: string,
+    envMode: string,
+    app: LocalApp,
+    dependencies?: readonly string[],
+  ): void;
 }
 
-export function appConfigStamp(folder: string, envMode: string, configFile: string | null): string {
+export function appConfigStamp(
+  folder: string,
+  envMode: string,
+  configFile: string | null,
+  dependencies: readonly string[] = [],
+): string {
   let names: string[] = [];
   try {
     names = fs
@@ -108,13 +119,15 @@ export function appConfigStamp(folder: string, envMode: string, configFile: stri
     ...names.map((name) => path.join(folder, name)),
     path.join(folder, `.env.${envMode}`),
     path.join(folder, `.env.${envMode}.local`),
+    ...dependencies,
   ];
   if (configFile) files.push(configFile);
-  return files
+  return [...new Set(files)]
+    .sort()
     .map((file) => {
       try {
         const stat = fs.statSync(file);
-        return `${file}\0${stat.size}\0${stat.mtimeMs}`;
+        return `${file}\0${fs.realpathSync(file)}\0${stat.size}\0${stat.mtimeMs}`;
       } catch {
         return `${file}\0missing`;
       }
@@ -123,15 +136,26 @@ export function appConfigStamp(folder: string, envMode: string, configFile: stri
 }
 
 export function createAppParseCache(): AppParseCache {
-  const stored = new Map<string, { stamp: string; app: LocalApp }>();
+  const stored = new Map<
+    string,
+    { stamp: string; app: LocalApp; dependencies: readonly string[] }
+  >();
   return {
     lookup(key, folder, envMode) {
       const hit = stored.get(key);
-      if (!hit || hit.stamp !== appConfigStamp(folder, envMode, hit.app.configFile)) return null;
+      if (
+        !hit ||
+        hit.stamp !== appConfigStamp(folder, envMode, hit.app.configFile, hit.dependencies)
+      )
+        return null;
       return hit.app;
     },
-    store(key, folder, envMode, app) {
-      stored.set(key, { stamp: appConfigStamp(folder, envMode, app.configFile), app });
+    store(key, folder, envMode, app, dependencies = []) {
+      stored.set(key, {
+        stamp: appConfigStamp(folder, envMode, app.configFile, dependencies),
+        app,
+        dependencies: [...dependencies],
+      });
     },
   };
 }
@@ -156,9 +180,10 @@ export function loadKnownApps(
       if (!abs) continue;
       const key = `${root.path}\0${abs}\0${envMode}\0${name}`;
       const cached = cache.lookup(key, abs, envMode);
-      const match = cached ?? readAppFolder(abs, envMode, name);
+      const dependencies = new Set<string>();
+      const match = cached ?? readAppFolder(abs, envMode, name, dependencies);
       if (!match) continue;
-      if (!cached) cache.store(key, abs, envMode, match);
+      if (!cached) cache.store(key, abs, envMode, match, [...dependencies]);
       fallback ??= match;
       if (match.name !== name) continue;
       const manifestPath =
