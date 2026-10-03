@@ -8,12 +8,16 @@ const REQUEST_TIMEOUT_MS = 10_000;
 
 export interface Net {
   connect(port: number): Promise<boolean>;
-  get(url: string): Promise<{
+  get(
+    url: string,
+    init?: { ifModifiedSince?: number },
+  ): Promise<{
     ok: boolean;
     status?: number;
     json: unknown | null;
     body: Uint8Array | null;
     lastModified: number | null;
+    notModified?: boolean;
   }>;
 }
 
@@ -47,6 +51,12 @@ export interface ProbeBook {
   apps: Map<string, ProbeResult>;
   links: Map<string, LinkProbeResult>;
   extras: Map<string, ArtifactProbe>;
+  zips: Map<string, ZipFact>;
+}
+
+export interface ZipFact {
+  zipMtime: number | null;
+  zipHash: string;
 }
 
 export interface ProbeCycleInput {
@@ -134,7 +144,7 @@ export function externalManifestId(url: string): string {
 }
 
 export function createProbeBook(): ProbeBook {
-  return { apps: new Map(), links: new Map(), extras: new Map() };
+  return { apps: new Map(), links: new Map(), extras: new Map(), zips: new Map() };
 }
 
 export function putAppResult(book: ProbeBook, name: string, result: ProbeResult): void {
@@ -162,18 +172,8 @@ export function createProbeCycle(
   return {
     start(input) {
       if (inflight) return Promise.resolve(false);
-      const manifests = new Map<string, ArtifactProbe>();
-      const zips = new Map<string, ZipProbe>();
-      const manifest = async (url: string | null): Promise<ArtifactProbe> => {
-        if (!isHttpUrl(url)) return emptyArtifact();
-        let result = manifests.get(url);
-        if (!result) {
-          result = await probeManifest(url, net, zips);
-          if (result.manifestReachable && (result.zipUrl == null || result.zipHash != null))
-            manifests.set(url, result);
-        }
-        return result;
-      };
+      const cache: ZipCache = { book, cycle: new Map(), seen: new Set() };
+      const manifest = (url: string | null) => probeManifest(url, net, cache);
       const run = (async () => {
         for (const app of input.apps)
           putAppResult(book, app.name, await probeConnectedApp(app, net, manifest));
@@ -181,6 +181,9 @@ export function createProbeCycle(
           putLinkResult(book, { link, ...(await manifest(link.url)) });
         for (const url of input.extraManifestUrls)
           putExternalResult(book, url, await manifest(url));
+        for (const url of book.zips.keys()) {
+          if (!cache.seen.has(url)) book.zips.delete(url);
+        }
       })();
       inflight = run.finally(() => {
         inflight = null;
@@ -239,19 +242,42 @@ export function resolveZipUrl(manifestUrl: string, manifest: unknown): string | 
 
 type ZipProbe = Pick<ArtifactProbe, "zipMtime" | "zipHash">;
 
-async function probeZip(url: string, net: Net): Promise<ZipProbe | null> {
-  const zip = await callNet(net.get(url));
+interface ZipCache {
+  book: ProbeBook;
+  cycle: Map<string, ZipFact>;
+  seen: Set<string>;
+}
+
+async function probeZip(url: string, net: Net, cache?: ZipCache): Promise<ZipProbe | null> {
+  cache?.seen.add(url);
+  const cached = cache?.cycle.get(url);
+  if (cached) return cached;
+  const previous = cache?.book.zips.get(url);
+  const zip = await callNet(
+    net.get(url, previous?.zipMtime != null ? { ifModifiedSince: previous.zipMtime } : undefined),
+  );
+  if (zip?.notModified || zip?.status === 304) {
+    if (!previous || previous.zipMtime == null) return null;
+    cache?.cycle.set(url, previous);
+    return previous;
+  }
   if (!zip?.ok) return null;
-  return {
+  const fact = {
     zipMtime: finiteMs(zip.lastModified),
     zipHash: zip.body ? sha256(zip.body) : null,
   };
+  if (fact.zipHash != null) {
+    const saved = { ...fact, zipHash: fact.zipHash };
+    cache?.cycle.set(url, saved);
+    cache?.book.zips.set(url, saved);
+  }
+  return fact;
 }
 
 async function probeManifest(
   url: string | null,
   net: Net,
-  zips?: Map<string, ZipProbe>,
+  cache?: ZipCache,
 ): Promise<ArtifactProbe> {
   const blank = emptyArtifact();
   if (!isHttpUrl(url)) return blank;
@@ -272,11 +298,7 @@ async function probeManifest(
   const modules = readManifestModules(response.json);
   const zipUrl = resolveZipUrl(url, response.json);
   if (!zipUrl) return { ...blank, manifestReachable: true, buildVersion, ...modules };
-  let zip = zips?.get(zipUrl) ?? null;
-  if (!zip) {
-    zip = await probeZip(zipUrl, net);
-    if (zip?.zipHash != null) zips?.set(zipUrl, zip);
-  }
+  const zip = await probeZip(zipUrl, net, cache);
   if (!zip) return { ...blank, manifestReachable: true, buildVersion, zipUrl, ...modules };
   return {
     manifestReachable: true,

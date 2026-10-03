@@ -1,6 +1,5 @@
 import type { LocalApp, ProbeBook } from "../../entities/microfrontend/index.ts";
-import { sourceSnapshot, type ConfirmationStore } from "../../entities/federated-types/index.ts";
-import { filesFingerprint } from "../../shared/fingerprint.ts";
+import { sourceIdentity, type ConfirmationStore } from "../../entities/federated-types/index.ts";
 import { fillTemplate, runShell } from "../../shared/shell.ts";
 import { localManifestUrl } from "../../shared/urls.ts";
 import { resolveManifestPath, type ScriptSettings } from "../init-settings/index.ts";
@@ -105,14 +104,9 @@ export async function rebuildTypes(
       ).zipHash;
     }
     published.set(app.name, zipHash);
-    const sources = sourceSnapshot(app.folder, app.tsconfig, app.typesFolder);
+    const sources = sourceIdentity(app.folder, app.tsconfig, app.typesFolder);
     const { dependencyZipHashes } = dependencyEvidence(app, apps, book, published);
-    confirmations.saveGeneration(
-      app.name,
-      filesFingerprint(sources.files),
-      zipHash,
-      dependencyZipHashes,
-    );
+    confirmations.saveGeneration(app.name, sources.fingerprint, zipHash, dependencyZipHashes);
     await context.persist();
     context.rebuilt(app.name);
   }

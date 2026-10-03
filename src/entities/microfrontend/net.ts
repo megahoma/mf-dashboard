@@ -28,9 +28,17 @@ export function createLoopbackNet(): Net {
         socket.once("error", () => finish(false));
       });
     },
-    async get(url) {
-      const response = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+    async get(url, init) {
+      const response = await fetch(url, {
+        signal: AbortSignal.timeout(10_000),
+        headers:
+          init?.ifModifiedSince != null
+            ? { "If-Modified-Since": new Date(init.ifModifiedSince).toUTCString() }
+            : undefined,
+      });
       const lastModified = httpDateMs(response.headers.get("last-modified"));
+      if (response.status === 304)
+        return { ok: true, status: 304, notModified: true, json: null, body: null, lastModified };
       if (!response.ok)
         return { ok: false, status: response.status, json: null, body: null, lastModified };
       const body = await readLimitedBody(response);

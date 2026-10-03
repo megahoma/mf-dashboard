@@ -79,7 +79,9 @@ test("shared producers are scanned once and invalidated with the link status cac
   };
   const linkB = { ...linkA, consumer: "b" };
   const read = t.mock.method(fs, "readFileSync");
+  const stat = t.mock.method(fs, "statSync");
   const count = () => read.mock.calls.filter((call) => String(call.arguments[0]) === source).length;
+  const scans = () => stat.mock.calls.filter((call) => String(call.arguments[0]) === source).length;
   provider.session.typesForLink(linkA);
   provider.session.typesForLink(linkB);
   assert.equal(count(), 1);
@@ -92,17 +94,19 @@ test("shared producers are scanned once and invalidated with the link status cac
   assert.equal(count(), 2);
   provider.session.onRefreshFailed();
   provider.session.typesForLink(linkA);
-  assert.equal(count(), 3);
+  assert.equal(count(), 2);
   fs.writeFileSync(source, "export const app = 3;");
   await provider.fileSaved(source);
   // fileSaved's notification observes both links; they share the new producer snapshot.
   provider.session.typesForLink(linkA);
   provider.session.typesForLink(linkB);
-  assert.equal(count(), 4);
+  assert.equal(count(), 3);
+  const beforeSettle = scans();
   t.mock.timers.tick(15_000);
   provider.session.typesForLink(linkA);
   provider.session.typesForLink(linkB);
-  assert.equal(count(), 5, "the settle timer invalidates both caches again");
+  assert.ok(scans() > beforeSettle, "the settle timer invalidates both provider caches again");
+  assert.equal(count(), 3, "unchanged source bytes remain cached after the settle timer");
 });
 
 test("manifest documents update in place and keep credentials out of their URI", () => {

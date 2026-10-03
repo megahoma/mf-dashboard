@@ -13,6 +13,26 @@ export interface ScanOptions {
 const CONFIG_FILE =
   /^(module-federation|webpack|rspack|rsbuild|vite)\.config\.(?:mjs|cjs|js|mts|cts|ts|jsx|tsx)$/;
 const ALWAYS_SKIP = new Set(["node_modules", ".git", "dist"]);
+
+export function readAppFolder(
+  folder: string,
+  envMode: string,
+  name?: string,
+  dependencies?: Set<string>,
+): LocalApp | null {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(folder, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  const files = entries
+    .filter((entry) => entry.isFile() && CONFIG_FILE.test(entry.name))
+    .map((entry) => path.join(folder, entry.name))
+    .sort();
+  const apps = discoverDirectory(path.resolve(folder), files, envMode, dependencies);
+  return apps.find((app) => app.name === name) ?? apps[0] ?? null;
+}
 export function readEnvFile(text: string): Record<string, string> {
   const env: Record<string, string> = {};
   for (const raw of text.split(/\r?\n/)) {
@@ -88,12 +108,18 @@ function shouldSkip(name: string, relPosix: string, extra: readonly string[]): b
   return false;
 }
 
-function discoverDirectory(dir: string, files: string[], envMode: string): LocalApp[] {
+function discoverDirectory(
+  dir: string,
+  files: string[],
+  envMode: string,
+  dependencies?: Set<string>,
+): LocalApp[] {
   if (files.length === 0) return [];
   const env = readModeEnv(dir, envMode);
   const apps: LocalApp[] = [];
   let loosePort: number | null = null;
   for (const file of files) {
+    dependencies?.add(file);
     let text: string;
     try {
       text = fs.readFileSync(file, "utf8");
@@ -105,7 +131,7 @@ function discoverDirectory(dir: string, files: string[], envMode: string): Local
       readPort(parsed.server, parsed.bindings, env) ??
       readPort(parsed.devServer, parsed.bindings, env);
     if (port !== null) loosePort = port;
-    const app = discoverProgram(parsed, text, file, env);
+    const app = discoverProgram(parsed, text, file, env, dependencies);
     if (!app) continue;
     const existing = apps.find((item) => item.name === app.name);
     if (!existing) apps.push(app);
