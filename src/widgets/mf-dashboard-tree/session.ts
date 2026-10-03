@@ -27,6 +27,7 @@ import {
 } from "../../entities/status/index.ts";
 import { mergeMissingApps } from "../../features/init-settings/index.ts";
 import { icons, terms, type DashboardTerms } from "../../shared/config/index.ts";
+import { resolveRowAction, withActionTokens } from "./targets.ts";
 
 export interface AppSetting {
   path: string;
@@ -479,6 +480,10 @@ export class DashboardSession {
     return entries;
   }
 
+  actionFor(node: unknown) {
+    return resolveRowAction(node, this.loaded, this.extraUrls);
+  }
+
   private appNode(
     app: LocalApp,
     byName: Map<string, LocalApp>,
@@ -509,6 +514,10 @@ export class DashboardSession {
       id: `app:${app.name}`,
       name: app.name,
       ...row,
+      contextValue: withActionTokens(
+        row.contextValue,
+        this.actionFor({ id: `app:${app.name}`, name: app.name, linkId: null })?.tokens ?? [],
+      ),
       linkId: null,
       children:
         this.structure === "flat"
@@ -606,6 +615,10 @@ export class DashboardSession {
       id,
       name: remote.name,
       ...row,
+      contextValue: withActionTokens(
+        row.contextValue,
+        this.actionFor({ id, name: remote.name, linkId })?.tokens ?? [],
+      ),
       linkId,
       children: nested,
     };
@@ -622,6 +635,10 @@ export class DashboardSession {
       id: `extra:${url}`,
       name: hostLabel(url),
       ...row,
+      contextValue: withActionTokens(
+        row.contextValue,
+        this.actionFor({ id: `extra:${url}`, name: hostLabel(url), linkId: null })?.tokens ?? [],
+      ),
       linkId: null,
       children: [],
     };

@@ -5,9 +5,10 @@ import test from "node:test";
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
   scripts?: Record<string, string>;
   contributes: {
-    commands?: { command: string; title: string }[];
+    commands?: { command: string; title: string; icon?: string }[];
     viewsWelcome?: { view: string; contents: string }[];
     menus?: {
+      commandPalette?: { command: string; when?: string }[];
       "view/title"?: { command: string; when?: string; group?: string }[];
       "view/item/context"?: { command: string; when?: string; group?: string }[];
     };
@@ -25,6 +26,16 @@ function welcomeContents(): string {
   assert.ok(entry, "viewsWelcome for mf-dashboard");
   return entry.contents;
 }
+
+test("row navigation commands stay out of the command palette", () => {
+  for (const name of ["openConfig", "openProducerConfig", "revealTypes", "openManifest"]) {
+    assert.equal(
+      pkg.contributes.menus?.commandPalette?.find((item) => item.command === `mf-dashboard.${name}`)
+        ?.when,
+      "false",
+    );
+  }
+});
 
 test("viewsWelcome localizes the entire contents with a discover link", () => {
   const contents = welcomeContents();
@@ -99,17 +110,45 @@ test("start, rebuild, and refetch are inline on silent, stale, and unfetched", (
   const byCommand = new Map(inline.map((item) => [item.command, item]));
   assert.deepEqual(byCommand.get("mf-dashboard.start"), {
     command: "mf-dashboard.start",
-    when: "view == mf-dashboard && viewItem == silent",
+    when: "view == mf-dashboard && viewItem =~ /^silent($| )/",
     group: "inline",
   });
   assert.deepEqual(byCommand.get("mf-dashboard.rebuildTypes"), {
     command: "mf-dashboard.rebuildTypes",
-    when: "view == mf-dashboard && viewItem == stale",
+    when: "view == mf-dashboard && viewItem =~ /^stale($| )/",
     group: "inline",
   });
   assert.deepEqual(byCommand.get("mf-dashboard.refetchTypes"), {
     command: "mf-dashboard.refetchTypes",
-    when: "view == mf-dashboard && viewItem == unfetched",
+    when: "view == mf-dashboard && viewItem =~ /^unfetched($| )/",
     group: "inline",
   });
+});
+
+test("row actions use navigation menus with token boundaries and no inline icons", () => {
+  const menus = pkg.contributes.menus?.["view/item/context"] ?? [];
+  for (const [name, token] of [
+    ["openConfig", "config"],
+    ["openProducerConfig", "producer"],
+    ["revealTypes", "types"],
+    ["openManifest", "manifest"],
+  ]) {
+    const command = `mf-dashboard.${name}`;
+    assert.deepEqual(
+      menus.filter((item) => item.command === command),
+      [
+        {
+          command,
+          when: `view == mf-dashboard && viewItem =~ /(^| )${token}($| )/`,
+          group: "navigation",
+        },
+      ],
+    );
+    const declared = pkg.contributes.commands?.find((item) => item.command === command);
+    assert.ok(declared);
+    assert.equal(declared.icon, undefined);
+    const key = declared.title.slice(1, -1);
+    assert.ok(en[key]);
+    assert.ok(ru[key]);
+  }
 });

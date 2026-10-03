@@ -1,4 +1,4 @@
-import fs from "node:fs";
+import fs, { existsSync } from "node:fs";
 import path from "node:path";
 import * as vscode from "vscode";
 import type { DashboardTerms } from "../../shared/config/index.ts";
@@ -36,6 +36,8 @@ import {
   rebuildPlan,
   type ChainNode,
 } from "../../features/rebuild-types/index.ts";
+import { MANIFEST_SCHEME, ManifestDocuments } from "../../features/open-manifest/documents.ts";
+import { manifestFailureMessage, manifestPreviewText } from "../../features/open-manifest/text.ts";
 import {
   lookupScript,
   resolvePackageManager,
@@ -51,7 +53,7 @@ import {
   type DashboardSettings,
   type WorkspaceRoot,
 } from "./session.ts";
-import { probeWorkspace } from "./net.ts";
+import { createLoopbackNet, probeWorkspace } from "./net.ts";
 
 const REBUILD_TIMEOUT_MS = 5 * 60_000;
 
@@ -141,6 +143,8 @@ export class MfDashboardProvider
   private timer: ReturnType<typeof setTimeout> | undefined;
   private readonly saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private disposed = false;
+  private readonly manifests = new ManifestDocuments();
+  private readonly manifestRegistration: vscode.Disposable;
 
   constructor(
     termsOf: () => DashboardTerms,
@@ -173,6 +177,10 @@ export class MfDashboardProvider
     this.session.onRefreshFailed = () => {
       this.typeCache.clear();
     };
+    this.manifestRegistration = vscode.workspace.registerTextDocumentContentProvider(
+      MANIFEST_SCHEME,
+      this.manifests,
+    );
   }
 
   dispose(): void {
@@ -180,6 +188,8 @@ export class MfDashboardProvider
     if (this.timer) clearTimeout(this.timer);
     for (const timer of this.saveTimers.values()) clearTimeout(timer);
     this.saveTimers.clear();
+    this.manifestRegistration.dispose();
+    this.manifests.dispose();
     this.diagnostics.dispose();
     this.change.dispose();
   }
@@ -381,6 +391,62 @@ export class MfDashboardProvider
     const terminal = vscode.window.createTerminal({ name: `MF ${app.name}`, cwd: invocation.cwd });
     terminal.sendText(`${invocation.command} ${invocation.args.join(" ")}`);
     if (settings.terminalReveal) terminal.show();
+  }
+
+  async openConfig(node?: DashboardNode): Promise<void> {
+    const action = this.session.actionFor(node);
+    if (!action?.configFile) return;
+    await this.showFile(action.configFile);
+  }
+
+  async openProducerConfig(node?: DashboardNode): Promise<void> {
+    const action = this.session.actionFor(node);
+    if (!action?.producerConfigFile) return;
+    await this.showFile(action.producerConfigFile);
+  }
+
+  async revealTypes(node?: DashboardNode): Promise<void> {
+    const action = this.session.actionFor(node);
+    if (!action?.typesDir) return;
+    await vscode.commands.executeCommand("revealInExplorer", vscode.Uri.file(action.typesDir));
+  }
+
+  async openManifest(node?: DashboardNode): Promise<void> {
+    const action = this.session.actionFor(node);
+    if (!node || !action?.manifestUrl) return;
+    let response;
+    try {
+      response = await createLoopbackNet().get(action.manifestUrl);
+    } catch (error) {
+      void vscode.window.showErrorMessage(manifestFailureMessage(error));
+      return;
+    }
+    if (!response.ok) {
+      void vscode.window.showErrorMessage(
+        manifestFailureMessage(new Error("http"), response.status),
+      );
+      return;
+    }
+    try {
+      const uri = this.manifests.uri(
+        node.name,
+        action.manifestUrl,
+        manifestPreviewText(response.json, response.body),
+      );
+      const document = await vscode.workspace.openTextDocument(uri);
+      await vscode.window.showTextDocument(document, { preview: true });
+    } catch {
+      void vscode.window.showErrorMessage("MF dashboard: could not open manifest preview");
+    }
+  }
+
+  private async showFile(file: string): Promise<void> {
+    if (!existsSync(file)) {
+      void vscode.window.showErrorMessage("MF dashboard: config file is missing");
+      return;
+    }
+    const document = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+    await vscode.window.showTextDocument(document, { preview: true });
   }
 
   rebuild(node?: DashboardNode): Promise<void> {
