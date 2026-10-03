@@ -1,10 +1,9 @@
 import { appProbeId, type LocalApp, type ProbeBook } from "../../entities/microfrontend/index.ts";
 import {
-  sourceSnapshot,
+  sourceIdentity,
   sourceFreshness,
   type ConfirmationStore,
 } from "../../entities/federated-types/index.ts";
-import { filesFingerprint } from "../../shared/fingerprint.ts";
 import { chainDependencies, type ChainNode } from "./plan.ts";
 
 export interface ProducerSnapshot extends ChainNode {
@@ -36,8 +35,8 @@ export function collectProducerEvidence(
   confirmations: ConfirmationStore,
 ): ProducerSnapshot {
   const probe = book.apps.get(appProbeId(app.name));
-  const sources = sourceSnapshot(app.folder, app.tsconfig, app.typesFolder);
-  const sourceFingerprint = filesFingerprint(sources.files);
+  const sources = sourceIdentity(app.folder, app.tsconfig, app.typesFolder);
+  const sourceFingerprint = sources.fingerprint;
   const { dependencies, dependencyZipHashes } = dependencyEvidence(app, apps, book);
   const generationConfirmed =
     probe?.zipHash != null &&

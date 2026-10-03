@@ -612,3 +612,32 @@ test("row actions resolve only current configured targets and reject malformed a
   session.loaded = [];
   assert.equal(session.actionFor(row), null);
 });
+
+test("refresh carries ZIP facts into staging and only commits them on success", async () => {
+  const book = createProbeBook();
+  const url = "https://example.com/types.zip";
+  const original = { zipHash: "old", zipMtime: 1000 };
+  book.zips.set(url, original);
+  let fail = true;
+  const session = new DashboardSession(
+    {
+      readSettings: () => settings(),
+      roots: () => [],
+      writeApps() {},
+      scan: () => ({}),
+      loadKnown: () => [],
+      async probe(staged) {
+        assert.deepEqual(staged.zips.get(url), original);
+        assert.notEqual(staged.zips, book.zips);
+        staged.zips.set(url, { zipHash: "new", zipMtime: 2000 });
+        if (fail) throw new Error("probe failed");
+      },
+    },
+    book,
+  );
+  await assert.rejects(() => session.refresh(), /probe failed/);
+  assert.deepEqual(book.zips.get(url), original);
+  fail = false;
+  await session.refresh();
+  assert.deepEqual(book.zips.get(url), { zipHash: "new", zipMtime: 2000 });
+});

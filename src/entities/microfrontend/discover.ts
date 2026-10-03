@@ -13,6 +13,21 @@ export interface ScanOptions {
 const CONFIG_FILE =
   /^(module-federation|webpack|rspack|rsbuild|vite)\.config\.(?:mjs|cjs|js|mts|cts|ts|jsx|tsx)$/;
 const ALWAYS_SKIP = new Set(["node_modules", ".git", "dist"]);
+
+export function readAppFolder(folder: string, envMode: string, name?: string): LocalApp | null {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(folder, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  const files = entries
+    .filter((entry) => entry.isFile() && CONFIG_FILE.test(entry.name))
+    .map((entry) => path.join(folder, entry.name))
+    .sort();
+  const apps = discoverDirectory(path.resolve(folder), files, envMode);
+  return apps.find((app) => app.name === name) ?? apps[0] ?? null;
+}
 export function readEnvFile(text: string): Record<string, string> {
   const env: Record<string, string> = {};
   for (const raw of text.split(/\r?\n/)) {

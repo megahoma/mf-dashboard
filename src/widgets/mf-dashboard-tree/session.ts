@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   createProbeBook,
-  scanWorkspace,
+  readAppFolder,
   type ArtifactProbe,
   type LinkProbeResult,
   type LocalApp,
@@ -54,6 +54,7 @@ export interface DashboardPorts {
     apps: Record<string, AppSetting>,
     envMode: string,
     ignorePaths: readonly string[],
+    cache?: AppParseCache,
   ): LocalApp[];
   probe(book: ProbeBook, input: ProbeCycleInput): Promise<void>;
   roots(): WorkspaceRoot[];
@@ -88,11 +89,59 @@ export function savedFileKind(
   return app.generateTypes && /\.tsx?$/.test(full) && !full.endsWith(".d.ts") ? "source" : null;
 }
 
+export interface AppParseCache {
+  lookup(key: string, folder: string, envMode: string): LocalApp | null;
+  store(key: string, folder: string, envMode: string, app: LocalApp): void;
+}
+
+export function appConfigStamp(folder: string, envMode: string, configFile: string | null): string {
+  let names: string[] = [];
+  try {
+    names = fs
+      .readdirSync(folder)
+      .filter((name) => /^(module-federation|webpack|rspack|rsbuild|vite)\.config\./.test(name))
+      .sort();
+  } catch {
+    /* A removed folder invalidates its cached parse. */
+  }
+  const files = [
+    ...names.map((name) => path.join(folder, name)),
+    path.join(folder, `.env.${envMode}`),
+    path.join(folder, `.env.${envMode}.local`),
+  ];
+  if (configFile) files.push(configFile);
+  return files
+    .map((file) => {
+      try {
+        const stat = fs.statSync(file);
+        return `${file}\0${stat.size}\0${stat.mtimeMs}`;
+      } catch {
+        return `${file}\0missing`;
+      }
+    })
+    .join("\n");
+}
+
+export function createAppParseCache(): AppParseCache {
+  const stored = new Map<string, { stamp: string; app: LocalApp }>();
+  return {
+    lookup(key, folder, envMode) {
+      const hit = stored.get(key);
+      if (!hit || hit.stamp !== appConfigStamp(folder, envMode, hit.app.configFile)) return null;
+      return hit.app;
+    },
+    store(key, folder, envMode, app) {
+      stored.set(key, { stamp: appConfigStamp(folder, envMode, app.configFile), app });
+    },
+  };
+}
+
 export function loadKnownApps(
   roots: readonly WorkspaceRoot[],
   apps: Record<string, AppSetting>,
   envMode: string,
-  ignorePaths: readonly string[] = [],
+  _ignorePaths: readonly string[] = [],
+  cache: AppParseCache = createAppParseCache(),
 ): LocalApp[] {
   const loaded: LocalApp[] = [];
   for (const [name, setting] of Object.entries(apps)) {
@@ -105,11 +154,13 @@ export function loadKnownApps(
     for (const root of candidates) {
       const abs = confinedAppPath(root.path, setting.path);
       if (!abs) continue;
-      const found = scanWorkspace(abs, { envMode, ignorePaths });
-      const inFolder = Object.values(found).filter((item) => path.resolve(item.folder) === abs);
-      const match = inFolder.find((item) => item.name === name);
-      fallback ??= inFolder[0];
+      const key = `${root.path}\0${abs}\0${envMode}\0${name}`;
+      const cached = cache.lookup(key, abs, envMode);
+      const match = cached ?? readAppFolder(abs, envMode, name);
       if (!match) continue;
+      if (!cached) cache.store(key, abs, envMode, match);
+      fallback ??= match;
+      if (match.name !== name) continue;
       const manifestPath =
         typeof setting.manifestPath === "string" && setting.manifestPath !== ""
           ? setting.manifestPath
@@ -181,6 +232,7 @@ export class DashboardSession {
   readonly scriptGaps = new Set<string>();
   readonly rebuildErrors = new Map<string, string>();
   private readonly ports: DashboardPorts;
+  private readonly appCache = createAppParseCache();
   readonly book: ProbeBook;
   private readonly onChange: () => void;
 
@@ -204,7 +256,13 @@ export class DashboardSession {
       const loaded =
         roots.length === 0 || current.apps === undefined
           ? []
-          : this.ports.loadKnown(roots, current.apps, current.envMode, current.ignorePaths);
+          : this.ports.loadKnown(
+              roots,
+              current.apps,
+              current.envMode,
+              current.ignorePaths,
+              this.appCache,
+            );
       const names = new Set<string>();
       for (const app of loaded) {
         if (names.has(app.name)) throw new Error(`duplicate federation name: ${app.name}`);
@@ -212,6 +270,7 @@ export class DashboardSession {
       }
       // The probe writes `staged`. The visible book stays put until the swap below.
       const staged = createProbeBook();
+      staged.zips = new Map(this.book.zips);
       await this.ports.probe(staged, {
         apps: loaded,
         links: linksOf(loaded),
@@ -225,6 +284,8 @@ export class DashboardSession {
         extraUrls,
         structure: this.structure,
       });
+      this.book.zips.clear();
+      for (const [url, fact] of staged.zips) this.book.zips.set(url, fact);
     } catch (error) {
       const toggledDuringProbe = this.structure !== structureAtProbe;
       this.applyRefreshState({

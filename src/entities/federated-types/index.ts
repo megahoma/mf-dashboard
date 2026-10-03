@@ -4,8 +4,9 @@ export { confirmInstalledArchive, installTypesArchive, readTree } from "./instal
 export type { InstallTypesInput, InstallTypesResult } from "./install.ts";
 export { installedFreshness, sourceFreshness } from "./freshness.ts";
 export type { InstallConfirmationView } from "./freshness.ts";
-export { sourceSnapshot, sourceContains } from "./sources.ts";
-export type { SourceFile, SourceSnapshot } from "./sources.ts";
+export { sourceSnapshot, sourceContains, sourceIdentity } from "./sources.ts";
+export type { SourceFile, SourceSnapshot, SourceIdentity } from "./sources.ts";
+export { treeFingerprint } from "./tree-fingerprint.ts";
 export { typesState } from "./state.ts";
 export type { TypesStateInput, TypesStatus } from "./state.ts";
 

@@ -55,7 +55,7 @@ test("shared producers are scanned once and invalidated with the link status cac
   assert.equal(count(), 2);
   provider.session.onRefreshFailed();
   provider.session.typesForLink(linkA);
-  assert.equal(count(), 3);
+  assert.equal(count(), 2);
 });
 
 test("manifest documents update in place and keep credentials out of their URI", () => {

@@ -104,7 +104,7 @@ A new entry gets `path` relative to the workspace root, `manifestPath` from the 
 
 ## Refresh and discover
 
-**Refresh** re-reads settings and the configs of apps already in `mf-dashboard.apps`, then checks ports, manifests, and zips again. Configs that are not saved yet stay out of this pass. Changing `mf-dashboard.envMode`, `mf-dashboard.ignorePaths`, `mf-dashboard.extraManifestUrls`, `mf-dashboard.typesSettleMs`, or `mf-dashboard.apps` runs the same refresh.
+**Refresh** re-reads settings and the configs of apps already in `mf-dashboard.apps`, then checks ports, manifests, and zips again. Configs that are not saved yet stay out of this pass. A types zip is downloaded once per URL in that pass. The next pass sends `If-Modified-Since` and skips the body when the server answers 304. A server that omits `Last-Modified` still sends the body. Refresh reads each known app directory for its config and env files. It parses them again when one of those files changes size or mtime. The full workspace walk remains on Find microfrontends. Changing `mf-dashboard.envMode`, `mf-dashboard.ignorePaths`, `mf-dashboard.extraManifestUrls`, `mf-dashboard.typesSettleMs`, or `mf-dashboard.apps` runs the same refresh.
 
 Saving a known producer's `.ts` or `.tsx` file in VS Code refreshes the local types estimate immediately and again after `typesSettleMs`. That save sends no network requests. Saving its config or the active `.env.<mode>` file re-reads the app and repeats the checks. The timer still covers edits made outside the editor, and the state of ports, manifests, and zips.
 

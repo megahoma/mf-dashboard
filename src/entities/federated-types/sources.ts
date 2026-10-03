@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { filesFingerprint } from "../../shared/fingerprint.ts";
 
 const SKIP_DIRS = new Set(["node_modules", ".git"]);
 const ROOT_OUTPUT_DIRS = ["dist", "build", "out", "coverage", ".mf", ".turbo"];
@@ -13,6 +14,14 @@ export interface SourceSnapshot {
   savedAt: number | null;
   files: SourceFile[];
 }
+
+export interface SourceIdentity {
+  savedAt: number | null;
+  fingerprint: string;
+  names: string[];
+}
+
+const sourceCache = new Map<string, { stamp: string; identity: SourceIdentity }>();
 
 interface IncludePattern {
   base: string;
@@ -30,6 +39,38 @@ interface SourceEntry {
   name: string;
   fullPath: string;
   savedAt: number;
+  size: number;
+}
+
+// Same-size edits that preserve mtime reuse the fingerprint, matching the freshness clock.
+export function sourceIdentity(
+  folder: string,
+  tsconfig: string | null,
+  typesFolder: string,
+): SourceIdentity {
+  const entries = sourceEntries(folder, tsconfig, typesFolder);
+  const stamp = entries
+    .map((entry) => `${entry.name}\0${entry.size}\0${entry.savedAt}`)
+    .sort()
+    .join("\n");
+  const key = `${path.resolve(folder)}\0${tsconfig ?? ""}\0${typesFolder}`;
+  const hit = sourceCache.get(key);
+  if (hit?.stamp === stamp) return { ...hit.identity, names: [...hit.identity.names] };
+  const identity: SourceIdentity = {
+    savedAt: entries.reduce<number | null>(
+      (latest, entry) => (latest == null || entry.savedAt > latest ? entry.savedAt : latest),
+      null,
+    ),
+    fingerprint: filesFingerprint(
+      entries.map((entry) => ({
+        name: entry.name,
+        bytes: new Uint8Array(fs.readFileSync(entry.fullPath)),
+      })),
+    ),
+    names: entries.map((entry) => entry.name).sort(),
+  };
+  sourceCache.set(key, { stamp, identity });
+  return { ...identity, names: [...identity.names] };
 }
 
 // Own .ts/.tsx from the producer's tsconfig. Downloaded types and emit directories are not sources.
@@ -180,6 +221,7 @@ function walk(
       name: path.relative(root, full).split(path.sep).join("/"),
       fullPath: full,
       savedAt: saved.mtimeMs,
+      size: saved.size,
     });
   }
 }
@@ -349,5 +391,6 @@ function addFile(
     name: rel.split(path.sep).join("/"),
     fullPath: full,
     savedAt: saved.mtimeMs,
+    size: saved.size,
   });
 }

@@ -1,7 +1,6 @@
 import fs from "node:fs";
-import { filesFingerprint } from "../../shared/fingerprint.ts";
 import { installedFreshness, sourceFreshness, type InstallConfirmationView } from "./freshness.ts";
-import { readTree } from "./install.ts";
+import { treeFingerprint } from "./tree-fingerprint.ts";
 import { typesState, type TypesStatus } from "./state.ts";
 
 export interface ProducerEvidence {
@@ -25,7 +24,7 @@ export function readInstalledEvidence(destination: string | null): InstalledEvid
   }
   if (!folderExists || destination == null) return { folderExists: false, filesFingerprint: null };
   try {
-    return { folderExists: true, filesFingerprint: filesFingerprint(readTree(destination)) };
+    return { folderExists: true, filesFingerprint: treeFingerprint(destination) };
   } catch {
     return { folderExists: true, filesFingerprint: "" };
   }
