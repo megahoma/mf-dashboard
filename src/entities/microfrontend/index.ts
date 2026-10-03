@@ -4,11 +4,9 @@ export { manifestTooltipLines, readManifestModules } from "./manifest-modules.ts
 export type { ManifestLineTerms, ManifestModules, ManifestShared } from "./manifest-modules.ts";
 export {
   appProbeId,
-  createConfirmationStore,
   createProbeBook,
   createProbeCycle,
   externalManifestId,
-  filesFingerprint,
   httpDateMs,
   linkProbeId,
   probeApp,
@@ -20,10 +18,6 @@ export {
 } from "./probe.ts";
 export type {
   ArtifactProbe,
-  ConfirmationSnapshot,
-  ConfirmationStore,
-  GenerationConfirmation,
-  InstallConfirmation,
   LinkProbeResult,
   Net,
   ProbeBook,

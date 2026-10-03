@@ -37,6 +37,16 @@ export const languages = {
   createDiagnosticCollection: () => ({ dispose() {} }),
 };
 export const workspace = {
+  getConfiguration() {
+    return {
+      inspect() {
+        return undefined;
+      },
+      get<T>(_key: string): T | undefined {
+        return undefined;
+      },
+    };
+  },
   registerTextDocumentContentProvider: () => ({ dispose() {} }),
   async openTextDocument(uri: Uri) {
     return { uri };

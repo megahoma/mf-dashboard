@@ -1,9 +1,7 @@
+import { localManifestUrl, isHttpUrl } from "../../shared/urls.ts";
 import { createHash } from "node:crypto";
-import { filesFingerprint } from "../../shared/fingerprint.ts";
 import type { LocalApp } from "./discover.ts";
 import { readManifestModules, type ManifestShared } from "./manifest-modules.ts";
-
-export { filesFingerprint };
 
 // Manifest requests in the proved 2.9.1 path use a 10s timeout.
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -55,45 +53,6 @@ export interface ProbeCycleInput {
   apps: readonly LocalApp[];
   links: readonly RemoteLink[];
   extraManifestUrls: readonly string[];
-}
-
-export interface InstallConfirmation {
-  consumer: string;
-  alias: string;
-  remoteName: string;
-  url: string;
-  zipHash: string;
-  filesFingerprint: string;
-}
-
-export interface GenerationConfirmation {
-  name: string;
-  zipHash: string;
-  sourceFingerprint: string;
-  builtDependencyHashes: Record<string, string>;
-}
-
-export interface ConfirmationSnapshot {
-  installs: InstallConfirmation[];
-  generations: GenerationConfirmation[];
-}
-
-export interface ConfirmationStore {
-  saveInstall(link: RemoteLink, filesFingerprint: string, zipHash: string): void;
-  installConfirmed(link: RemoteLink, filesFingerprint: string, zipHash: string): boolean;
-  saveGeneration(
-    name: string,
-    sourceFingerprint: string,
-    zipHash: string,
-    builtDependencyHashes: Record<string, string>,
-  ): void;
-  generationConfirmed(
-    name: string,
-    sourceFingerprint: string,
-    zipHash: string,
-    builtDependencyHashes: Record<string, string>,
-  ): boolean;
-  snapshot(): ConfirmationSnapshot;
 }
 
 const MONTHS: Record<string, number> = {
@@ -195,59 +154,6 @@ export function putExternalResult(book: ProbeBook, url: string, result: Artifact
   book.extras.set(externalManifestId(url), result);
 }
 
-export function createConfirmationStore(snapshot?: ConfirmationSnapshot): ConfirmationStore {
-  const installs = new Map<string, InstallConfirmation>();
-  const generations = new Map<string, GenerationConfirmation>();
-  for (const record of snapshot?.installs ?? []) installs.set(edgeKey(record), copyInstall(record));
-  for (const record of snapshot?.generations ?? [])
-    generations.set(record.name, copyGeneration(record));
-  return {
-    saveInstall(link, fingerprint, zipHash) {
-      if (link.url == null || link.url.trim() === "") return;
-      installs.set(edgeKey(link), {
-        consumer: link.consumer,
-        alias: link.alias,
-        remoteName: link.remoteName,
-        url: link.url,
-        filesFingerprint: fingerprint,
-        zipHash,
-      });
-    },
-    installConfirmed(link, fingerprint, zipHash) {
-      const record = installs.get(edgeKey(link));
-      if (!record || link.url == null) return false;
-      return (
-        record.url === link.url &&
-        record.filesFingerprint === fingerprint &&
-        record.zipHash === zipHash
-      );
-    },
-    saveGeneration(name, sourceFingerprint, zipHash, builtDependencyHashes) {
-      generations.set(name, {
-        name,
-        sourceFingerprint,
-        zipHash,
-        builtDependencyHashes: { ...builtDependencyHashes },
-      });
-    },
-    generationConfirmed(name, sourceFingerprint, zipHash, builtDependencyHashes) {
-      const record = generations.get(name);
-      if (!record) return false;
-      return (
-        record.zipHash === zipHash &&
-        record.sourceFingerprint === sourceFingerprint &&
-        sameHashes(record.builtDependencyHashes, builtDependencyHashes)
-      );
-    },
-    snapshot() {
-      return {
-        installs: [...installs.values()].map(copyInstall),
-        generations: [...generations.values()].map(copyGeneration),
-      };
-    },
-  };
-}
-
 export function createProbeCycle(
   net: Net,
   book: ProbeBook,
@@ -256,11 +162,25 @@ export function createProbeCycle(
   return {
     start(input) {
       if (inflight) return Promise.resolve(false);
+      const manifests = new Map<string, ArtifactProbe>();
+      const zips = new Map<string, ZipProbe>();
+      const manifest = async (url: string | null): Promise<ArtifactProbe> => {
+        if (!isHttpUrl(url)) return emptyArtifact();
+        let result = manifests.get(url);
+        if (!result) {
+          result = await probeManifest(url, net, zips);
+          if (result.manifestReachable && (result.zipUrl == null || result.zipHash != null))
+            manifests.set(url, result);
+        }
+        return result;
+      };
       const run = (async () => {
-        for (const app of input.apps) putAppResult(book, app.name, await probeApp(app, net));
-        for (const link of input.links) putLinkResult(book, await probeLink(link, net));
+        for (const app of input.apps)
+          putAppResult(book, app.name, await probeConnectedApp(app, net, manifest));
+        for (const link of input.links)
+          putLinkResult(book, { link, ...(await manifest(link.url)) });
         for (const url of input.extraManifestUrls)
-          putExternalResult(book, url, await probeManifest(url, net));
+          putExternalResult(book, url, await manifest(url));
       })();
       inflight = run.finally(() => {
         inflight = null;
@@ -272,11 +192,19 @@ export function createProbeCycle(
 
 // connect(port) is a loopback check on 127.0.0.1. The host is not a remote URL.
 export async function probeApp(app: LocalApp, net: Net): Promise<ProbeResult> {
+  return probeConnectedApp(app, net, (url) => probeManifest(url, net));
+}
+
+async function probeConnectedApp(
+  app: LocalApp,
+  net: Net,
+  manifest: (url: string) => Promise<ArtifactProbe>,
+): Promise<ProbeResult> {
   if (app.port == null) return emptyResult(false);
   const opened = await callNet(net.connect(app.port));
   const portOpen = opened === true;
   if (!portOpen || !app.manifest) return emptyResult(portOpen);
-  return { portOpen, ...(await probeManifest(localManifestUrl(app.port, app.manifestPath), net)) };
+  return { portOpen, ...(await manifest(localManifestUrl(app.port, app.manifestPath))) };
 }
 
 export async function probeLink(link: RemoteLink, net: Net): Promise<LinkProbeResult> {
@@ -309,7 +237,22 @@ export function resolveZipUrl(manifestUrl: string, manifest: unknown): string | 
   return resolved.href;
 }
 
-async function probeManifest(url: string | null, net: Net): Promise<ArtifactProbe> {
+type ZipProbe = Pick<ArtifactProbe, "zipMtime" | "zipHash">;
+
+async function probeZip(url: string, net: Net): Promise<ZipProbe | null> {
+  const zip = await callNet(net.get(url));
+  if (!zip?.ok) return null;
+  return {
+    zipMtime: finiteMs(zip.lastModified),
+    zipHash: zip.body ? sha256(zip.body) : null,
+  };
+}
+
+async function probeManifest(
+  url: string | null,
+  net: Net,
+  zips?: Map<string, ZipProbe>,
+): Promise<ArtifactProbe> {
   const blank = emptyArtifact();
   if (!isHttpUrl(url)) return blank;
   let response: Awaited<ReturnType<Net["get"]>>;
@@ -329,21 +272,19 @@ async function probeManifest(url: string | null, net: Net): Promise<ArtifactProb
   const modules = readManifestModules(response.json);
   const zipUrl = resolveZipUrl(url, response.json);
   if (!zipUrl) return { ...blank, manifestReachable: true, buildVersion, ...modules };
-  const zip = await callNet(net.get(zipUrl));
-  if (!zip?.ok) return { ...blank, manifestReachable: true, buildVersion, zipUrl, ...modules };
+  let zip = zips?.get(zipUrl) ?? null;
+  if (!zip) {
+    zip = await probeZip(zipUrl, net);
+    if (zip?.zipHash != null) zips?.set(zipUrl, zip);
+  }
+  if (!zip) return { ...blank, manifestReachable: true, buildVersion, zipUrl, ...modules };
   return {
     manifestReachable: true,
     buildVersion,
     zipUrl,
-    zipMtime: finiteMs(zip.lastModified),
-    zipHash: zip.body ? sha256(zip.body) : null,
+    ...zip,
     ...modules,
   };
-}
-
-function localManifestUrl(port: number, manifestPath: string): string {
-  const path = manifestPath.startsWith("/") ? manifestPath : `/${manifestPath}`;
-  return `http://127.0.0.1:${port}${path}`;
 }
 
 function publicPathOf(meta: Record<string, unknown>, manifestUrl: string): string {
@@ -409,39 +350,12 @@ function sha256(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-function isHttpUrl(url: string | null): url is string {
-  if (url == null) return false;
-  const trimmed = url.trim();
-  if (trimmed === "" || trimmed.includes("${")) return false;
-  try {
-    const parsed = new URL(trimmed);
-    return (parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.hostname !== "";
-  } catch {
-    return false;
-  }
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function edgeKey(link: { consumer: string; alias: string; remoteName: string }): string {
   return `${link.consumer}\0${link.alias}\0${link.remoteName}`;
-}
-
-function sameHashes(left: Record<string, string>, right: Record<string, string>): boolean {
-  const leftKeys = Object.keys(left).sort();
-  const rightKeys = Object.keys(right).sort();
-  if (leftKeys.length !== rightKeys.length) return false;
-  return leftKeys.every((key, index) => key === rightKeys[index] && left[key] === right[key]);
-}
-
-function copyInstall(record: InstallConfirmation): InstallConfirmation {
-  return { ...record };
-}
-
-function copyGeneration(record: GenerationConfirmation): GenerationConfirmation {
-  return { ...record, builtDependencyHashes: { ...record.builtDependencyHashes } };
 }
 
 function utcDate(

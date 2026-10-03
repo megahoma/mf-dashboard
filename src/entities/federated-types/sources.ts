@@ -26,12 +26,46 @@ interface TsConfigInfo {
   hasInclude: boolean;
 }
 
+interface SourceEntry {
+  name: string;
+  fullPath: string;
+  savedAt: number;
+}
+
 // Own .ts/.tsx from the producer's tsconfig. Downloaded types and emit directories are not sources.
 export function sourceSnapshot(
   folder: string,
   tsconfig: string | null,
   typesFolder: string,
 ): SourceSnapshot {
+  const entries = sourceEntries(folder, tsconfig, typesFolder);
+  return {
+    savedAt: entries.reduce<number | null>(
+      (latest, entry) => (latest == null || entry.savedAt > latest ? entry.savedAt : latest),
+      null,
+    ),
+    files: entries.map((entry) => ({
+      name: entry.name,
+      bytes: new Uint8Array(fs.readFileSync(entry.fullPath)),
+    })),
+  };
+}
+
+export function sourceContains(
+  folder: string,
+  tsconfig: string | null,
+  typesFolder: string,
+  file: string,
+): boolean {
+  const full = path.resolve(file);
+  return sourceEntries(folder, tsconfig, typesFolder).some((entry) => entry.fullPath === full);
+}
+
+function sourceEntries(
+  folder: string,
+  tsconfig: string | null,
+  typesFolder: string,
+): SourceEntry[] {
   const root = path.resolve(folder);
   const config = readTsconfig(root, tsconfig);
   const skip = SKIP_DIRS;
@@ -50,18 +84,23 @@ export function sourceSnapshot(
         ? globMatch(normalized, rel)
         : rel === normalized || rel.startsWith(`${normalized}/`);
     });
-  const files: Array<SourceFile & { savedAt: number }> = [];
+  const pruneDirectory = (full: string): boolean =>
+    outputPaths.some((target) => full === target || full.startsWith(`${target}${path.sep}`)) ||
+    config.exclude.some(({ base, pattern }) => {
+      const normalized = pattern.replaceAll("\\", "/").replace(/\/$/, "");
+      if (/[*?]/.test(normalized)) return false;
+      const rel = path.relative(base, full).split(path.sep).join("/");
+      if (rel === ".." || rel.startsWith("../")) return false;
+      return rel === normalized || rel.startsWith(`${normalized}/`);
+    });
+  const files: SourceEntry[] = [];
   if (!config.hasInclude) walk(root, root, skip, excluded, files);
   else {
     for (const item of config.include)
-      collectIncluded(root, item.base, item.pattern, skip, excluded, files);
+      collectIncluded(root, item.base, item.pattern, skip, excluded, pruneDirectory, files);
   }
   const unique = [...new Map(files.map((file) => [file.name, file])).values()];
-  let savedAt: number | null = null;
-  for (const file of unique) {
-    if (savedAt == null || file.savedAt > savedAt) savedAt = file.savedAt;
-  }
-  return { savedAt, files: unique.map((file) => ({ name: file.name, bytes: file.bytes })) };
+  return unique;
 }
 
 function collectIncluded(
@@ -70,7 +109,8 @@ function collectIncluded(
   pattern: string,
   skip: ReadonlySet<string>,
   excluded: (full: string) => boolean,
-  files: Array<SourceFile & { savedAt: number }>,
+  pruneDirectory: (full: string) => boolean,
+  files: SourceEntry[],
 ): void {
   const normalized = pattern.replaceAll("\\", "/");
   if (!/[*?]/.test(normalized)) {
@@ -95,8 +135,16 @@ function collectIncluded(
   const start = path.resolve(base, prefix.endsWith("/") ? prefix : path.dirname(prefix));
   if (!isInside(root, start)) return;
   if (fs.existsSync(start) && !isInside(fs.realpathSync(root), fs.realpathSync(start))) return;
+  if (
+    pruneDirectory(start) ||
+    path
+      .relative(root, start)
+      .split(path.sep)
+      .some((part) => skip.has(part))
+  )
+    return;
   const matched: string[] = [];
-  walkPaths(start, (full) => {
+  walkPaths(start, skip, pruneDirectory, (full) => {
     const rel = path.relative(base, full).split(path.sep).join("/");
     if (globMatch(normalized, rel)) matched.push(full);
   });
@@ -108,7 +156,7 @@ function walk(
   dir: string,
   skip: ReadonlySet<string>,
   excluded: (full: string) => boolean,
-  files: Array<SourceFile & { savedAt: number }>,
+  files: SourceEntry[],
 ): void {
   let entries: fs.Dirent[];
   try {
@@ -130,7 +178,7 @@ function walk(
     const saved = fs.statSync(full);
     files.push({
       name: path.relative(root, full).split(path.sep).join("/"),
-      bytes: new Uint8Array(fs.readFileSync(full)),
+      fullPath: full,
       savedAt: saved.mtimeMs,
     });
   }
@@ -256,7 +304,12 @@ function globMatch(pattern: string, rel: string): boolean {
   return new RegExp(`^${body}$`).test(rel);
 }
 
-function walkPaths(dir: string, visit: (full: string) => void): void {
+function walkPaths(
+  dir: string,
+  skip: ReadonlySet<string>,
+  excluded: (full: string) => boolean,
+  visit: (full: string) => void,
+): void {
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -266,8 +319,10 @@ function walkPaths(dir: string, visit: (full: string) => void): void {
   for (const entry of entries) {
     if (entry.isSymbolicLink()) continue;
     const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) walkPaths(full, visit);
-    else if (entry.isFile()) visit(full);
+    if (skip.has(entry.name)) continue;
+    if (entry.isDirectory()) {
+      if (!excluded(full)) walkPaths(full, skip, excluded, visit);
+    } else if (entry.isFile()) visit(full);
   }
 }
 
@@ -276,7 +331,7 @@ function addFile(
   full: string,
   skip: ReadonlySet<string>,
   excluded: (full: string) => boolean,
-  files: Array<SourceFile & { savedAt: number }>,
+  files: SourceEntry[],
 ): void {
   if (!isInside(root, full)) return;
   if (
@@ -292,7 +347,7 @@ function addFile(
   const saved = fs.statSync(full);
   files.push({
     name: rel.split(path.sep).join("/"),
-    bytes: new Uint8Array(fs.readFileSync(full)),
+    fullPath: full,
     savedAt: saved.mtimeMs,
   });
 }

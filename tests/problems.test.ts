@@ -9,8 +9,8 @@ import {
 } from "../src/entities/status/problems.ts";
 
 test("extra manifest diagnostics follow the workspace value", () => {
-  const folder = "/repo/app";
-  const workspace = "/repo/app.code-workspace";
+  const folder = "/app";
+  const workspace = "/app.code-workspace";
   const settingsFile = path.join(folder, ".vscode", "settings.json");
   assert.equal(
     extraManifestSettingsFile({
@@ -51,7 +51,7 @@ test("an untitled workspace does not fall back to folder settings", () => {
     extraManifestSettingsFile({
       workspaceValueDefined: true,
       workspaceFile: { scheme: "untitled", fsPath: "1555503116870" },
-      singleFolderPath: "/repo/app",
+      singleFolderPath: "/app",
     }),
     null,
   );
@@ -77,10 +77,10 @@ test("a link draft names the consumer and the alias", () => {
       owner: "shell",
       alias: "widget",
       label: "types not updated",
-      file: "/repo/apps/shell/module-federation.config.ts",
+      file: "/apps/shell/module-federation.config.ts",
     }),
     {
-      file: "/repo/apps/shell/module-federation.config.ts",
+      file: "/apps/shell/module-federation.config.ts",
       message: "shell → widget: types not updated",
       severity: "information",
       kind: "unfetched",
@@ -96,7 +96,7 @@ test("an extra draft uses the host label", () => {
       owner: "static.example",
       alias: null,
       label: "unreachable",
-      file: "/repo/.vscode/settings.json",
+      file: "/.vscode/settings.json",
     })?.message,
     "static.example: unreachable",
   );
@@ -110,7 +110,7 @@ test("a healthy kind or a missing file produces nothing", () => {
       owner: "shell",
       alias: "widget",
       label: "listening",
-      file: "/repo/apps/shell/module-federation.config.ts",
+      file: "/apps/shell/module-federation.config.ts",
     }),
     null,
   );

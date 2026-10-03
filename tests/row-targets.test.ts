@@ -47,14 +47,14 @@ test("a link with a types directory exposes config, producer, types, and manifes
   const action = rowAction(
     {
       configFile: "/apps/shell/module-federation.config.ts",
-      producerConfigFile: "/repo/apps/widget/module-federation.config.ts",
+      producerConfigFile: "/apps/widget/module-federation.config.ts",
       typesDir: "/apps/shell/@mf-types",
       manifestUrl: "http://127.0.0.1:3002/mf-manifest.json",
     },
     exists,
   );
   assert.equal(action.configFile, "/apps/shell/module-federation.config.ts");
-  assert.equal(action.producerConfigFile, "/repo/apps/widget/module-federation.config.ts");
+  assert.equal(action.producerConfigFile, "/apps/widget/module-federation.config.ts");
   assert.equal(action.typesDir, "/apps/shell/@mf-types");
   assert.equal(action.manifestUrl, "http://127.0.0.1:3002/mf-manifest.json");
   assert.deepEqual(action.tokens, ["config", "producer", "types", "manifest"]);

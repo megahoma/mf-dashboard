@@ -1,10 +1,10 @@
-import { readFileSync } from "node:fs";
-import * as vscode from "vscode";
 import {
   createConfirmationStore,
-  scanWorkspace,
   type ConfirmationSnapshot,
-} from "../entities/microfrontend/index.ts";
+} from "../entities/federated-types/index.ts";
+import { readFileSync } from "node:fs";
+import * as vscode from "vscode";
+import { scanWorkspace } from "../entities/microfrontend/index.ts";
 import {
   defaultWorkspaceSettings,
   settingsSeed,
@@ -154,7 +154,7 @@ async function ensureWorkspaceSettings(): Promise<void> {
   );
   const config = vscode.workspace.getConfiguration();
   const defined: string[] = [];
-  for (const key of Object.keys(defaultWorkspaceSettings("auto"))) {
+  for (const key of Object.keys(defaultWorkspaceSettings())) {
     const inspected = config.inspect(key);
     if (!inspected) continue;
     if (

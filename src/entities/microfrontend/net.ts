@@ -5,7 +5,7 @@ import {
   type Net,
   type ProbeBook,
   type ProbeCycleInput,
-} from "../../entities/microfrontend/index.ts";
+} from "./probe.ts";
 import { readLimitedBody } from "../../shared/http-body.ts";
 
 const CONNECT_TIMEOUT_MS = 500;

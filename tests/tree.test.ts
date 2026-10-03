@@ -12,7 +12,7 @@ import {
   type ArtifactProbe,
   type LocalApp,
 } from "../src/entities/microfrontend/index.ts";
-import { icons, terms } from "../src/shared/config/index.ts";
+import { terms } from "../src/shared/config/index.ts";
 import {
   beginRefetch,
   endRefetch,

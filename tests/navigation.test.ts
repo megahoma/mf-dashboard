@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { localApp } from "./support/app.ts";
 import * as vscode from "./support/vscode.ts";
 import { terms } from "../src/shared/config/index.ts";
 
@@ -14,6 +18,45 @@ registerHooks({
 });
 const { ManifestDocuments } = await import("../src/features/open-manifest/documents.ts");
 const { MfDashboardProvider } = await import("../src/widgets/mf-dashboard-tree/provider.ts");
+
+test("shared producers are scanned once and invalidated with the link status cache", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-producer-cache-"));
+  const producer = localApp("producer", root);
+  const source = path.join(root, "app.ts");
+  fs.writeFileSync(source, "export const app = 1;");
+  const provider = new MfDashboardProvider(() => terms);
+  t.after(() => {
+    provider.dispose();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  provider.session.loaded = [
+    producer,
+    localApp("a", "/a", { consumeTypes: true }),
+    localApp("b", "/b", { consumeTypes: true }),
+  ];
+  const linkA = {
+    consumer: "a",
+    alias: "producer",
+    remoteName: "producer",
+    url: "http://localhost:4100/mf-manifest.json",
+  };
+  const linkB = { ...linkA, consumer: "b" };
+  const read = t.mock.method(fs, "readFileSync");
+  const count = () => read.mock.calls.filter((call) => String(call.arguments[0]) === source).length;
+  provider.session.typesForLink(linkA);
+  provider.session.typesForLink(linkB);
+  assert.equal(count(), 1);
+  provider.session.typesForLink(linkA);
+  assert.equal(count(), 1);
+  fs.writeFileSync(source, "export const app = 2;");
+  provider.session.beforeRefreshChange();
+  provider.session.typesForLink(linkB);
+  provider.session.typesForLink(linkA);
+  assert.equal(count(), 2);
+  provider.session.onRefreshFailed();
+  provider.session.typesForLink(linkA);
+  assert.equal(count(), 3);
+});
 
 test("manifest documents update in place and keep credentials out of their URI", () => {
   const documents = new ManifestDocuments();

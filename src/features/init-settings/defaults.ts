@@ -28,9 +28,8 @@ export interface ScriptSettings {
   >;
 }
 
-// The argument records which manager was seen. The stored value stays auto and is resolved at start.
-export function defaultWorkspaceSettings(packageManager: string): WorkspaceDefaults {
-  void packageManager;
+// The manager is resolved from the workspace when starting an app.
+export function defaultWorkspaceSettings(): WorkspaceDefaults {
   return {
     "mf-dashboard.scripts.start": "dev",
     "mf-dashboard.packageManager": "auto",
@@ -73,7 +72,7 @@ export function mergeMissingApps<T extends AppConfig>(
 
 export function missingSettingKeys(
   defined: readonly string[],
-  defaults: WorkspaceDefaults = defaultWorkspaceSettings("auto"),
+  defaults: WorkspaceDefaults = defaultWorkspaceSettings(),
 ): string[] {
   const present = new Set(defined);
   return Object.keys(defaults).filter((key) => !present.has(key));
@@ -90,7 +89,7 @@ export function settingsSeed(
   definedKeys: readonly string[],
 ): Partial<WorkspaceDefaults> {
   if (foundConfigNames.length === 0) return {};
-  const defaults = defaultWorkspaceSettings("auto");
+  const defaults = defaultWorkspaceSettings();
   const seed: Partial<WorkspaceDefaults> = { ...defaults };
   for (const key of definedKeys) delete seed[key as keyof WorkspaceDefaults];
   return seed;

@@ -2,15 +2,33 @@ import fs from "node:fs";
 import { filesFingerprint } from "../../shared/fingerprint.ts";
 import { installedFreshness, sourceFreshness, type InstallConfirmationView } from "./freshness.ts";
 import { readTree } from "./install.ts";
-import { sourceSnapshot } from "./sources.ts";
 import { typesState, type TypesStatus } from "./state.ts";
 
 export interface ProducerEvidence {
-  name: string;
-  folder: string;
   generateTypes: boolean;
-  tsconfig: string | null;
-  typesFolder: string;
+  sourceSavedAt: number | null;
+}
+
+export interface InstalledEvidence {
+  folderExists: boolean;
+  filesFingerprint: string | null;
+}
+
+export function readInstalledEvidence(destination: string | null): InstalledEvidence {
+  let folderExists: boolean;
+  try {
+    folderExists = destination != null && fs.statSync(destination).isDirectory();
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT")
+      return { folderExists: false, filesFingerprint: null };
+    throw error;
+  }
+  if (!folderExists || destination == null) return { folderExists: false, filesFingerprint: null };
+  try {
+    return { folderExists: true, filesFingerprint: filesFingerprint(readTree(destination)) };
+  } catch {
+    return { folderExists: true, filesFingerprint: "" };
+  }
 }
 
 export function describeLink(input: {
@@ -24,7 +42,7 @@ export function describeLink(input: {
   installConfirmation: InstallConfirmationView | null;
   checkedAt: number;
   typesSettleMs: number;
-  destination?: string | null;
+  installed: InstalledEvidence;
 }): TypesStatus {
   const producer = input.producer;
   if (!input.consumeTypes) {
@@ -40,29 +58,15 @@ export function describeLink(input: {
       typesSettleMs: input.typesSettleMs,
     });
   }
-  const sources = producer
-    ? sourceSnapshot(producer.folder, producer.tsconfig, producer.typesFolder)
-    : { savedAt: null, files: [] };
   const source = sourceFreshness({
     zipMtime: input.producerZipMtime,
-    sourceSavedAt: sources.savedAt,
+    sourceSavedAt: producer?.sourceSavedAt ?? null,
     generationConfirmed: input.generationConfirmed,
   });
-  const destination = input.destination ?? null;
-  const folderExists =
-    destination != null && fs.existsSync(destination) && fs.statSync(destination).isDirectory();
-  let fingerprint: string | null = null;
-  if (folderExists && destination != null) {
-    try {
-      fingerprint = filesFingerprint(readTree(destination));
-    } catch {
-      fingerprint = "";
-    }
-  }
   const installed = installedFreshness({
-    folderExists,
+    folderExists: input.installed.folderExists,
     zipHash: input.linkZipHash,
-    filesFingerprint: fingerprint,
+    filesFingerprint: input.installed.filesFingerprint,
     url: input.linkUrl,
     confirmation: input.installConfirmation,
   });
@@ -72,8 +76,8 @@ export function describeLink(input: {
     sourceFreshness: source,
     installedFreshness: installed,
     zipReachable: input.linkZipReachable,
-    folderExists,
-    sourceSavedAt: sources.savedAt,
+    folderExists: input.installed.folderExists,
+    sourceSavedAt: producer?.sourceSavedAt ?? null,
     checkedAt: input.checkedAt,
     typesSettleMs: input.typesSettleMs,
   });
