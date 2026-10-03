@@ -1,33 +1,29 @@
 import fs from "node:fs";
 import path from "node:path";
 import {
-  appProbeId,
   createProbeBook,
-  externalManifestId,
-  linkProbeId,
-  manifestTooltipLines,
   scanWorkspace,
   type ArtifactProbe,
   type LinkProbeResult,
   type LocalApp,
-  type ManifestModules,
   type ProbeBook,
   type ProbeCycleInput,
   type ProbeResult,
   type RemoteLink,
   type ScanOptions,
 } from "../../entities/microfrontend/index.ts";
-import {
-  classify,
-  problemDraft,
-  rowModel,
-  type ProblemDraft,
-  type StatusInput,
-  type StatusKind,
-} from "../../entities/status/index.ts";
+import { type ProblemDraft, type StatusInput } from "../../entities/status/index.ts";
 import { mergeMissingApps } from "../../features/init-settings/index.ts";
-import { icons, terms, type DashboardTerms } from "../../shared/config/index.ts";
-import { resolveRowAction, withActionTokens } from "./targets.ts";
+import { terms, type DashboardTerms } from "../../shared/config/index.ts";
+import { resolveRowAction } from "./targets.ts";
+import {
+  dashboardNodes,
+  dashboardProblemDrafts,
+  type DashboardNode,
+  type DashboardStructure,
+} from "./presentation.ts";
+export { linkRowId, rowContextValue } from "./presentation.ts";
+export type { DashboardNode, DashboardStructure } from "./presentation.ts";
 
 export interface AppSetting {
   path: string;
@@ -40,8 +36,6 @@ export interface WorkspaceRoot {
   name: string;
   path: string;
 }
-
-export type DashboardStructure = "flat" | "tree";
 
 export interface DashboardSettings {
   apps: Record<string, AppSetting> | undefined;
@@ -65,17 +59,6 @@ export interface DashboardPorts {
   roots(): WorkspaceRoot[];
 }
 
-export interface DashboardNode {
-  id: string;
-  name: string;
-  kind: StatusKind;
-  description: string;
-  tooltip: string;
-  contextValue: string;
-  children: DashboardNode[];
-  linkId: string | null;
-}
-
 export function beginRefetch(pending: Set<string>, linkId: string): boolean {
   if (pending.has(linkId)) return false;
   pending.add(linkId);
@@ -84,15 +67,6 @@ export function beginRefetch(pending: Set<string>, linkId: string): boolean {
 
 export function endRefetch(pending: Set<string>, linkId: string): void {
   pending.delete(linkId);
-}
-
-export function linkRowId(link: Pick<RemoteLink, "consumer" | "alias" | "remoteName">): string {
-  return `${link.consumer}\0${link.alias}\0${link.remoteName}`;
-}
-
-export function rowContextValue(kind: string, pending: boolean): string {
-  if (pending && kind === "unfetched") return "unfetched.pending";
-  return kind;
 }
 
 export function savedFileKind(
@@ -112,20 +86,6 @@ export function savedFileKind(
     if (name === `.env.${envMode}` || name === `.env.${envMode}.local`) return "config";
   }
   return app.generateTypes && /\.tsx?$/.test(full) && !full.endsWith(".d.ts") ? "source" : null;
-}
-
-export function presentRow(node: DashboardNode): {
-  description: string;
-  iconId: string;
-  contextValue: string;
-  tooltip: string;
-} {
-  return {
-    description: node.description,
-    iconId: icons[node.kind],
-    contextValue: node.contextValue,
-    tooltip: node.tooltip,
-  };
 }
 
 export function loadKnownApps(
@@ -205,18 +165,6 @@ function linksOf(apps: readonly LocalApp[]): RemoteLink[] {
     }
   }
   return links;
-}
-
-function hostLabel(url: string): string {
-  const trimmed = url.trim();
-  try {
-    const parsed = new URL(trimmed);
-    if ((parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.hostname !== "")
-      return parsed.hostname;
-  } catch {
-    // Keep the raw value when the external address cannot be parsed.
-  }
-  return trimmed || "external";
 }
 
 export class DashboardSession {
@@ -410,263 +358,15 @@ export class DashboardSession {
     this.structure = snapshot.structure;
   }
 
-  nodes(): DashboardNode[] {
-    const byName = new Map(this.loaded.map((item) => [item.name, item]));
-    const roots = this.rootApps(byName).map((item) => this.appNode(item, byName, new Set()));
-    for (const url of this.extraUrls) roots.push(this.extraNode(url));
-    return roots;
-  }
-
-  problemDrafts(settingsFile: string | null): ProblemDraft[] {
-    const drafts: ProblemDraft[] = [];
-    const byName = new Map(this.loaded.map((item) => [item.name, item]));
-    for (const app of this.loaded) {
-      for (const remote of app.remotes) {
-        const kind = classify(this.linkStatusInput(app, remote, byName));
-        const draft = problemDraft({
-          kind,
-          surface: "link",
-          owner: app.name,
-          alias: remote.alias,
-          label: this.terms[kind],
-          file: app.configFile,
-        });
-        if (draft) drafts.push(draft);
-      }
-    }
-    for (const url of this.extraUrls) {
-      const kind = classify(this.extraStatusInput(url));
-      const draft = problemDraft({
-        kind,
-        surface: "extra",
-        owner: hostLabel(url),
-        alias: null,
-        label: this.terms[kind],
-        file: settingsFile,
-      });
-      if (draft) drafts.push(draft);
-    }
-    return drafts;
-  }
-
-  private rootApps(byName: Map<string, LocalApp>): LocalApp[] {
-    const sorted = [...this.loaded].sort((left, right) =>
-      left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
-    );
-    if (this.structure === "flat") return sorted;
-    const consumed = new Set<string>();
-    for (const app of this.loaded) {
-      for (const remote of app.remotes) {
-        if (byName.has(remote.name)) consumed.add(remote.name);
-      }
-    }
-    const entries = sorted.filter((app) => !consumed.has(app.name));
-    const reached = new Set<string>();
-    const visit = (app: LocalApp): void => {
-      if (reached.has(app.name)) return;
-      reached.add(app.name);
-      for (const remote of app.remotes) {
-        const child = byName.get(remote.name);
-        if (child) visit(child);
-      }
-    };
-    for (const app of entries) visit(app);
-    for (const app of sorted) {
-      if (!reached.has(app.name)) {
-        entries.push(app);
-        visit(app);
-      }
-    }
-    return entries;
-  }
-
   actionFor(node: unknown) {
     return resolveRowAction(node, this.loaded, this.extraUrls);
   }
 
-  private appNode(
-    app: LocalApp,
-    byName: Map<string, LocalApp>,
-    stack: ReadonlySet<string>,
-  ): DashboardNode {
-    const probe = this.book.apps.get(appProbeId(app.name));
-    const row = this.model(
-      {
-        role: "app",
-        port: app.port,
-        portOpen: probe?.portOpen ?? false,
-        manifestEnabled: app.manifest,
-        buildVersion: probe?.buildVersion ?? null,
-        requestFailure: probe?.requestFailure,
-        url: null,
-        typesState: "none",
-        folder: app.folder,
-      },
-      false,
-      null,
-      app.name,
-      {
-        exposes: probe?.exposes ?? [],
-        shared: probe?.shared ?? [],
-      },
-    );
-    return {
-      id: `app:${app.name}`,
-      name: app.name,
-      ...row,
-      contextValue: withActionTokens(
-        row.contextValue,
-        this.actionFor({ id: `app:${app.name}`, name: app.name, linkId: null })?.tokens ?? [],
-      ),
-      linkId: null,
-      children:
-        this.structure === "flat"
-          ? []
-          : app.remotes.map((remote) =>
-              this.linkNode(app, remote, byName, new Set(stack).add(app.name), `app:${app.name}`),
-            ),
-    };
+  nodes(): DashboardNode[] {
+    return dashboardNodes(this);
   }
 
-  private linkStatusInput(
-    parent: LocalApp,
-    remote: LocalApp["remotes"][number],
-    byName: Map<string, LocalApp>,
-  ): StatusInput {
-    const link: RemoteLink = {
-      consumer: parent.name,
-      alias: remote.alias,
-      remoteName: remote.name,
-      url: remote.url,
-    };
-    const producer = byName.get(remote.name);
-    const local = producer !== undefined && producer.port !== null;
-    if (local) {
-      return {
-        role: "link",
-        port: producer.port,
-        portOpen: this.book.apps.get(appProbeId(producer.name))?.portOpen ?? false,
-        manifestEnabled: producer.manifest,
-        buildVersion: this.book.apps.get(appProbeId(producer.name))?.buildVersion ?? null,
-        requestFailure: this.book.links.get(linkProbeId(link))?.requestFailure,
-        url: remote.url,
-        typesState: this.typesForLink(link),
-      };
-    }
-    return {
-      role: "external",
-      port: null,
-      portOpen: this.book.links.get(linkProbeId(link))?.manifestReachable ?? false,
-      manifestEnabled: true,
-      buildVersion: this.book.links.get(linkProbeId(link))?.buildVersion ?? null,
-      requestFailure: this.book.links.get(linkProbeId(link))?.requestFailure,
-      url: remote.url,
-      typesState: "none",
-    };
-  }
-
-  private extraStatusInput(url: string): StatusInput {
-    const result = this.book.extras.get(externalManifestId(url));
-    return {
-      role: "external",
-      port: null,
-      portOpen: result?.manifestReachable ?? false,
-      manifestEnabled: true,
-      buildVersion: result?.buildVersion ?? null,
-      requestFailure: result?.requestFailure,
-      url,
-      typesState: "none",
-    };
-  }
-
-  private linkNode(
-    parent: LocalApp,
-    remote: LocalApp["remotes"][number],
-    byName: Map<string, LocalApp>,
-    stack: ReadonlySet<string>,
-    parentId: string,
-  ): DashboardNode {
-    const link: RemoteLink = {
-      consumer: parent.name,
-      alias: remote.alias,
-      remoteName: remote.name,
-      url: remote.url,
-    };
-    const linkProbe = this.book.links.get(linkProbeId(link));
-    const status = this.linkStatusInput(parent, remote, byName);
-    const producer = byName.get(remote.name);
-    const input: StatusInput & { folder?: string } =
-      producer !== undefined && producer.port !== null
-        ? { ...status, folder: producer.folder }
-        : status;
-    const linkId = linkRowId(link);
-    const row = this.model(input, this.pending.has(linkId), linkId, remote.name, {
-      exposes: linkProbe?.exposes ?? [],
-      shared: linkProbe?.shared ?? [],
-    });
-    const id = JSON.stringify([parentId, linkId]);
-    const nested =
-      producer !== undefined && producer.port !== null && !stack.has(producer.name)
-        ? producer.remotes.map((child) =>
-            this.linkNode(producer, child, byName, new Set(stack).add(producer.name), id),
-          )
-        : [];
-    return {
-      id,
-      name: remote.name,
-      ...row,
-      contextValue: withActionTokens(
-        row.contextValue,
-        this.actionFor({ id, name: remote.name, linkId })?.tokens ?? [],
-      ),
-      linkId,
-      children: nested,
-    };
-  }
-
-  private extraNode(url: string): DashboardNode {
-    const result = this.book.extras.get(externalManifestId(url));
-    const input: StatusInput = this.extraStatusInput(url);
-    const row = this.model(input, false, null, hostLabel(url), {
-      exposes: result?.exposes ?? [],
-      shared: result?.shared ?? [],
-    });
-    return {
-      id: `extra:${url}`,
-      name: hostLabel(url),
-      ...row,
-      contextValue: withActionTokens(
-        row.contextValue,
-        this.actionFor({ id: `extra:${url}`, name: hostLabel(url), linkId: null })?.tokens ?? [],
-      ),
-      linkId: null,
-      children: [],
-    };
-  }
-
-  private model(
-    input: StatusInput & { folder?: string },
-    pending: boolean,
-    linkId: string | null,
-    name: string,
-    modules: ManifestModules = { exposes: [], shared: [] },
-  ): Pick<DashboardNode, "kind" | "description" | "tooltip" | "contextValue"> {
-    const row = rowModel(input, this.terms);
-    const contextValue = rowContextValue(row.kind, pending);
-    let tooltip = row.tooltip;
-    if (input.role === "external" && !input.folder)
-      tooltip = `${this.terms.folder}: ${this.terms.noWorkspace}\n${tooltip}`;
-    if (input.role === "link" && input.typesState === "unknown")
-      tooltip = `${tooltip}\n${this.terms.typesUnknown}`;
-    if (input.role === "link" && input.typesState === "none")
-      tooltip = `${tooltip}\n${this.terms.typesDisabled}`;
-    if (contextValue === "unfetched.pending") tooltip = `${tooltip}\n${this.terms.refetchPending}`;
-    if (linkId && this.refetchErrors.has(linkId))
-      tooltip = `${tooltip}\n${this.terms.refetchFailed}`;
-    if (this.scriptGaps.has(name)) tooltip = `${tooltip}\n${this.terms.scriptMissing}`;
-    const rebuildError = this.rebuildErrors.get(name);
-    if (rebuildError) tooltip = `${tooltip}\n${rebuildError}`;
-    for (const line of manifestTooltipLines(modules, this.terms)) tooltip = `${tooltip}\n${line}`;
-    return { kind: row.kind, description: row.description, tooltip, contextValue };
+  problemDrafts(settingsFile: string | null): ProblemDraft[] {
+    return dashboardProblemDrafts(this, settingsFile);
   }
 }

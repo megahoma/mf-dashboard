@@ -1,3 +1,5 @@
+import { localManifestUrl, parseHttpUrl } from "../../shared/urls.ts";
+export { localManifestUrl } from "../../shared/urls.ts";
 import { statSync } from "node:fs";
 import type { LocalApp } from "../../entities/microfrontend/index.ts";
 import { refetchTarget, typesRootTarget } from "../../features/refetch-types/refetch.ts";
@@ -15,11 +17,6 @@ export interface RowAction {
   typesDir: string | null;
   manifestUrl: string | null;
   tokens: string[];
-}
-
-export function localManifestUrl(port: number, manifestPath: string): string {
-  const pathName = manifestPath.startsWith("/") ? manifestPath : `/${manifestPath}`;
-  return `http://127.0.0.1:${port}${pathName}`;
 }
 
 export function linkTypesDir(folder: string, alias: string, typesFolder: string): string | null {
@@ -124,15 +121,5 @@ export function withActionTokens(contextValue: string, tokens: readonly string[]
 }
 
 function httpManifestUrl(url: string | null): string | null {
-  if (url == null) return null;
-  const trimmed = url.trim();
-  if (trimmed === "" || trimmed.includes("${")) return null;
-  try {
-    const parsed = new URL(trimmed);
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
-    if (parsed.hostname === "") return null;
-    return trimmed;
-  } catch {
-    return null;
-  }
+  return url != null && parseHttpUrl(url) ? url.trim() : null;
 }

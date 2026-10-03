@@ -1,3 +1,4 @@
+import { localManifestUrl } from "../../shared/urls.ts";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -147,15 +148,12 @@ export async function assertPublished(input: {
   manifestPath: string;
   zipHash: string;
 }): Promise<string> {
-  const manifestPath = input.manifestPath.startsWith("/")
-    ? input.manifestPath
-    : `/${input.manifestPath}`;
   const published = await hashManifestZip({
     appDir: input.appDir,
     hostName: input.hostName,
     remoteName: input.remoteName,
     alias: input.alias,
-    manifestUrl: `http://127.0.0.1:${input.port}${manifestPath}`,
+    manifestUrl: localManifestUrl(input.port, input.manifestPath),
   });
   if (published.zipHash !== input.zipHash)
     throw new Error("published zip does not match the generated archive");

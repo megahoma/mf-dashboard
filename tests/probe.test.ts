@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
   appProbeId,
@@ -11,7 +13,47 @@ import {
   putAppResult,
 } from "../src/entities/microfrontend/index.ts";
 import type { LocalApp, RemoteLink } from "../src/entities/microfrontend/index.ts";
-import { createLoopbackNet } from "../src/widgets/mf-dashboard-tree/net.ts";
+import { createLoopbackNet } from "../src/entities/microfrontend/net.ts";
+
+test("a running probe cycle releases processed archive bodies", () => {
+  execFileSync(
+    process.execPath,
+    [
+      "--experimental-strip-types",
+      "--expose-gc",
+      fileURLToPath(new URL("./support/probe-memory.ts", import.meta.url)),
+    ],
+    { timeout: 15000, stdio: "pipe" },
+  );
+});
+
+test("distinct manifests sharing an archive download it once per cycle", async () => {
+  let downloads = 0;
+  const book = createProbeBook();
+  const cycle = createProbeCycle(
+    {
+      connect: async () => false,
+      get: async (url: string) => {
+        const archive = url.endsWith(".zip");
+        if (archive) downloads++;
+        return {
+          ok: true,
+          json: archive
+            ? null
+            : { metaData: { publicPath: "https://example.com/", types: { zip: "types.zip" } } },
+          body: archive ? OLD_ZIP : null,
+          lastModified: null,
+        };
+      },
+    },
+    book,
+  );
+  const urls = ["https://example.com/a.json", "https://example.com/b.json"];
+  await cycle.start({ apps: [], links: [], extraManifestUrls: urls });
+  assert.equal(downloads, 1);
+  for (const url of urls)
+    assert.equal(book.extras.get(externalManifestId(url))?.zipHash, OLD_ZIP_HASH);
+});
 
 const app: LocalApp = {
   name: "app",
@@ -424,4 +466,86 @@ function zipNet(body: () => Uint8Array, lastModified: number | null) {
       };
     },
   };
+}
+
+test("a probe cycle shares requests and forgets responses and failures before the next cycle", async () => {
+  const url = "http://127.0.0.1:4100/mf-manifest.json";
+  const book = createProbeBook();
+  let requests = 0;
+  let fail = false;
+  let body = OLD_ZIP;
+  const cycle = createProbeCycle(
+    {
+      connect: async () => true,
+      get: async (requested: string) => {
+        requests++;
+        if (fail) throw new Error("offline");
+        return {
+          ok: true,
+          json:
+            requested === url
+              ? manifestJson("1.0.0", { publicPath: "auto", types: { zip: "types.zip" } })
+              : null,
+          body: requested === url ? null : body,
+          lastModified: null,
+        };
+      },
+    },
+    book,
+  );
+  const input = { apps: [app], links: [link(url)], extraManifestUrls: [url] };
+  await cycle.start(input);
+  assert.equal(requests, 2);
+  assert.equal(book.apps.get(appProbeId(app.name))?.zipHash, OLD_ZIP_HASH);
+  body = NEW_ZIP;
+  await cycle.start(input);
+  assert.equal(requests, 4);
+  assert.equal(book.extras.get(externalManifestId(url))?.zipHash, NEW_ZIP_HASH);
+  fail = true;
+  await cycle.start(input);
+  assert.equal(requests, 7);
+  assert.equal(book.extras.get(externalManifestId(url))?.requestFailure, "network");
+  fail = false;
+  await cycle.start(input);
+  assert.equal(requests, 9);
+  assert.equal(book.apps.get(appProbeId(app.name))?.manifestReachable, true);
+});
+
+for (const target of ["manifest", "zip"]) {
+  for (const failure of ["network", "http"]) {
+    test(`a transient ${failure} ${target} failure does not poison neighbouring rows`, async () => {
+      const url = "http://127.0.0.1:4100/mf-manifest.json";
+      const book = createProbeBook();
+      let failed = false;
+      let requests = 0;
+      const cycle = createProbeCycle(
+        {
+          connect: async () => true,
+          get: async (requested: string) => {
+            requests++;
+            const archive = requested.endsWith(".zip");
+            if (!failed && archive === (target === "zip")) {
+              failed = true;
+              if (failure === "network") throw new Error("transient failure");
+              return { ok: false, status: 503, json: null, body: null, lastModified: null };
+            }
+            return {
+              ok: true,
+              json: archive
+                ? null
+                : manifestJson("1.0.0", { publicPath: "auto", types: { zip: "types.zip" } }),
+              body: archive ? OLD_ZIP : null,
+              lastModified: null,
+            };
+          },
+        },
+        book,
+      );
+      await cycle.start({ apps: [app], links: [link(url)], extraManifestUrls: [url] });
+      assert.equal(book.apps.get(appProbeId(app.name))?.zipHash, null);
+      assert.equal([...book.links.values()][0].zipHash, OLD_ZIP_HASH);
+      assert.equal(book.extras.get(externalManifestId(url))?.zipHash, OLD_ZIP_HASH);
+      assert.equal(requests, target === "manifest" ? 3 : 4);
+    });
+  }
 }

@@ -1,41 +1,33 @@
+import {
+  collectProducerEvidence,
+  type ProducerSnapshot,
+} from "../../features/rebuild-types/evidence.ts";
 import fs, { existsSync } from "node:fs";
 import path from "node:path";
 import * as vscode from "vscode";
 import type { DashboardTerms } from "../../shared/config/index.ts";
 import { icons } from "../../shared/config/index.ts";
 import { createSerialQueue } from "../../shared/queue.ts";
-import { fillTemplate, runShell } from "../../shared/shell.ts";
+import { installRemoteTypes } from "../../features/refetch-types/remote.ts";
+import { rebuildTypes } from "../../features/rebuild-types/workflow.ts";
 import {
   appProbeId,
-  createConfirmationStore,
   createProbeBook,
-  filesFingerprint,
   linkProbeId,
   scanWorkspace,
-  type ConfirmationStore,
-  type LocalApp,
   type RemoteLink,
 } from "../../entities/microfrontend/index.ts";
 import { diagnosticUpdates, extraManifestSettingsFile } from "../../entities/status/index.ts";
 import {
+  createConfirmationStore,
+  type ConfirmationStore,
   describeLink,
-  sourceFreshness,
-  sourceSnapshot,
+  readInstalledEvidence,
+  type InstalledEvidence,
+  sourceContains,
 } from "../../entities/federated-types/index.ts";
-import { resolveManifestPath, resolveStartScript } from "../../features/init-settings/index.ts";
-import {
-  dependencyRefetchCommand,
-  refetchInstalled,
-  refetchTarget,
-} from "../../features/refetch-types/index.ts";
-import {
-  chainDependencies,
-  generateFederatedTypes,
-  hashManifestZip,
-  manifestZipUrl,
-  rebuildPlan,
-  type ChainNode,
-} from "../../features/rebuild-types/index.ts";
+import { resolveStartScript } from "../../features/init-settings/index.ts";
+import { refetchTarget } from "../../features/refetch-types/index.ts";
 import { MANIFEST_SCHEME, ManifestDocuments } from "../../features/open-manifest/documents.ts";
 import { manifestFailureMessage, manifestPreviewText } from "../../features/open-manifest/text.ts";
 import {
@@ -53,9 +45,7 @@ import {
   type DashboardSettings,
   type WorkspaceRoot,
 } from "./session.ts";
-import { createLoopbackNet, probeWorkspace } from "./net.ts";
-
-const REBUILD_TIMEOUT_MS = 5 * 60_000;
+import { createLoopbackNet, probeWorkspace } from "../../entities/microfrontend/net.ts";
 
 function stringList(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
@@ -138,8 +128,9 @@ export class MfDashboardProvider
   private readonly termsOf: () => DashboardTerms;
   private readonly confirmations: ConfirmationStore;
   private readonly persistConfirmations: () => void | PromiseLike<void>;
-  private readonly typeCache = new Map<string, ReturnType<typeof describeLink>>();
+  private readonly producerCache = new Map<string, ProducerSnapshot>();
   private readonly publishedZipHashes = new Map<string, string>();
+  private readonly typeCache = new Map<string, ReturnType<typeof describeLink>>();
   private timer: ReturnType<typeof setTimeout> | undefined;
   private readonly saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private disposed = false;
@@ -172,10 +163,10 @@ export class MfDashboardProvider
     this.session.terms = termsOf();
     this.session.typesForLink = (link) => this.cachedTypes(link);
     this.session.beforeRefreshChange = () => {
-      this.typeCache.clear();
+      this.clearTypeCache();
     };
     this.session.onRefreshFailed = () => {
-      this.typeCache.clear();
+      this.clearTypeCache();
     };
     this.manifestRegistration = vscode.workspace.registerTextDocumentContentProvider(
       MANIFEST_SCHEME,
@@ -258,18 +249,16 @@ export class MfDashboardProvider
         return;
       }
       if (kind !== "source") continue;
-      const included = sourceSnapshot(app.folder, app.tsconfig, app.typesFolder).files.some(
-        (item) => path.resolve(app.folder, item.name) === path.resolve(file),
-      );
+      const included = sourceContains(app.folder, app.tsconfig, app.typesFolder, file);
       if (!included) continue;
-      this.typeCache.clear();
+      this.clearTypeCache();
       this.notify();
       const previous = this.saveTimers.get(app.name);
       if (previous) clearTimeout(previous);
       const timer = setTimeout(() => {
         this.saveTimers.delete(app.name);
         if (this.disposed) return;
-        this.typeCache.clear();
+        this.clearTypeCache();
         this.notify();
       }, settings.typesSettleMs);
       this.saveTimers.set(app.name, timer);
@@ -322,38 +311,16 @@ export class MfDashboardProvider
       url: remote.url,
     };
     const settings = readWorkspaceSettings();
-    let zipUrl: string;
     try {
-      zipUrl = await manifestZipUrl({
-        appDir: consumer.folder,
-        hostName: consumer.name,
-        remoteName: remote.name,
-        alias: remote.alias,
-        manifestUrl: remote.url,
-      });
-    } catch {
-      this.session.failRefetch(linkId);
-      return;
-    }
-    try {
-      const installed = await refetchInstalled({
-        consumerFolder: consumer.folder,
-        remoteAlias: remote.alias,
-        typesFolder: consumer.typesFolder,
-        url: zipUrl,
-        command: dependencyRefetchCommand(settings.refetchCommand, {
-          folder: consumer.folder,
-          name: consumer.name,
-          port: consumer.port,
-          tsconfig: consumer.tsconfig,
-          typesFolder: consumer.typesFolder,
-          alias: remote.alias,
-        }),
-        runCommand: runShell,
-      });
+      const installed = await installRemoteTypes(
+        consumer,
+        remote,
+        remote.url,
+        settings.refetchCommand,
+      );
       this.confirmations.saveInstall(link, installed.filesFingerprint, installed.zipHash);
       await this.persistConfirmations();
-      this.typeCache.clear();
+      this.clearTypeCache();
     } catch {
       this.session.failRefetch(linkId);
       return;
@@ -457,29 +424,21 @@ export class MfDashboardProvider
     if (!node) return;
     const rootName = node.name;
     const settings = readWorkspaceSettings();
-    const local = new Map(
-      this.session.loaded.map((app) => [app.name, { generateTypes: app.generateTypes }]),
-    );
-    const nodes = this.session.loaded
-      .filter((app) => app.generateTypes)
-      .map((app) => this.chainNode(app, local));
-    let plan: { name: string; action: "rebuild" | "skip" }[];
     try {
-      plan = rebuildPlan(rootName, nodes);
-    } catch (error) {
-      this.session.noteRebuildError(rootName, errorText(error));
-      return;
-    }
-    try {
-      for (const step of plan) {
-        if (step.action === "skip") continue;
-        const app = this.session.loaded.find((item) => item.name === step.name);
-        if (!app) throw new Error(`missing local node: ${step.name}`);
-        await this.installBeforeGenerate(app);
-        const zipHash = await this.generateOne(app, settings);
-        await this.rememberGeneration(app, zipHash, local);
-        this.session.clearRebuildError(app.name);
-      }
+      await rebuildTypes(rootName, {
+        apps: this.session.loaded,
+        book: this.session.book,
+        confirmations: this.confirmations,
+        published: this.publishedZipHashes,
+        settings: {
+          "mf-dashboard.scripts.start": settings.startScript,
+          "mf-dashboard.apps": settings.apps,
+          rebuildCommand: settings.rebuildCommand,
+        },
+        refetchCommand: () => readWorkspaceSettings().refetchCommand,
+        persist: this.persistConfirmations,
+        rebuilt: (name) => this.session.clearRebuildError(name),
+      });
       this.session.clearRebuildError(rootName);
     } catch (error) {
       this.session.noteRebuildError(rootName, errorText(error));
@@ -518,242 +477,61 @@ export class MfDashboardProvider
     return status;
   }
 
+  private clearTypeCache(): void {
+    this.typeCache.clear();
+    this.producerCache.clear();
+  }
+
   private observe(link: RemoteLink): ReturnType<typeof describeLink> {
     const consumer = this.session.loaded.find((app) => app.name === link.consumer);
     const producer = this.session.loaded.find(
       (app) => app.name === link.remoteName && app.port != null,
     );
     if (!consumer) return "unknown";
-    const settings = readWorkspaceSettings();
-    const producerProbe = producer
-      ? this.session.book.apps.get(appProbeId(producer.name))
-      : undefined;
-    const linkProbe = this.session.book.links.get(linkProbeId(link));
-    let destination: string | null;
-    try {
-      destination = refetchTarget(consumer.folder, link.alias, consumer.typesFolder);
-    } catch {
-      destination = null;
-    }
-    const dependencyZipHashes: Record<string, string> = {};
-    if (producer) {
-      for (const name of chainDependencies(producer.remotes, localMap(this.session.loaded))) {
-        const hash = this.session.book.apps.get(appProbeId(name))?.zipHash;
-        if (hash) dependencyZipHashes[name] = hash;
+    const probe = this.session.book.links.get(linkProbeId(link));
+    let evidence: ProducerSnapshot | undefined;
+    if (producer && consumer.consumeTypes) {
+      evidence = this.producerCache.get(producer.name);
+      if (!evidence) {
+        evidence = collectProducerEvidence(
+          producer,
+          this.session.loaded,
+          this.session.book,
+          this.confirmations,
+        );
+        this.producerCache.set(producer.name, evidence);
       }
     }
-    const producerEvidence = producer
-      ? {
-          name: producer.name,
-          folder: producer.folder,
-          generateTypes: producer.generateTypes,
-          tsconfig: producer.tsconfig,
-          typesFolder: producer.typesFolder,
-        }
-      : null;
-    const sources = producerEvidence
-      ? sourceSnapshot(
-          producerEvidence.folder,
-          producerEvidence.tsconfig,
-          producerEvidence.typesFolder,
-        )
-      : null;
-    const savedInstall = this.confirmations
-      .snapshot()
-      .installs.find(
-        (record) =>
-          record.consumer === link.consumer &&
-          record.alias === link.alias &&
-          record.remoteName === link.remoteName,
-      );
+    let destination: string | null = null;
+    if (consumer.consumeTypes) {
+      try {
+        destination = refetchTarget(consumer.folder, link.alias, consumer.typesFolder);
+      } catch {
+        /* Invalid targets carry no installed evidence. */
+      }
+    }
+    let installed: InstalledEvidence;
+    try {
+      installed = readInstalledEvidence(destination);
+    } catch {
+      installed = { folderExists: true, filesFingerprint: "" };
+    }
     return describeLink({
       consumeTypes: consumer.consumeTypes,
-      producer: producerEvidence,
-      producerZipMtime: producerProbe?.zipMtime ?? null,
-      linkZipHash: linkProbe?.zipHash ?? null,
-      linkZipReachable: linkProbe?.zipUrl != null && linkProbe.zipHash != null,
-      linkUrl: link.url,
-      generationConfirmed:
-        producerEvidence != null &&
-        sources != null &&
-        producerProbe?.zipHash != null &&
-        this.confirmations.generationConfirmed(
-          producerEvidence.name,
-          filesFingerprint(sources.files),
-          producerProbe.zipHash,
-          dependencyZipHashes,
-        ),
-      installConfirmation: savedInstall
-        ? {
-            zipHash: savedInstall.zipHash,
-            filesFingerprint: savedInstall.filesFingerprint,
-            url: savedInstall.url,
-          }
+      producer: producer
+        ? { generateTypes: producer.generateTypes, sourceSavedAt: evidence?.sourceSavedAt ?? null }
         : null,
+      producerZipMtime: evidence?.zipMtime ?? null,
+      linkZipHash: probe?.zipHash ?? null,
+      linkZipReachable: probe?.zipUrl != null && probe.zipHash != null,
+      linkUrl: link.url,
+      generationConfirmed: evidence?.generationConfirmed ?? false,
+      installConfirmation: this.confirmations.install(link),
       checkedAt: Date.now(),
-      typesSettleMs: settings.typesSettleMs,
-      destination,
+      typesSettleMs: readWorkspaceSettings().typesSettleMs,
+      installed,
     });
   }
-
-  private chainNode(
-    app: LocalApp,
-    local: ReadonlyMap<string, { generateTypes: boolean }>,
-  ): ChainNode {
-    const probe = this.session.book.apps.get(appProbeId(app.name));
-    const sources = sourceSnapshot(app.folder, app.tsconfig, app.typesFolder);
-    const dependencies = chainDependencies(app.remotes, local);
-    const dependencyZipHashes: Record<string, string> = {};
-    for (const name of dependencies) {
-      const hash = this.session.book.apps.get(appProbeId(name))?.zipHash;
-      if (hash) dependencyZipHashes[name] = hash;
-    }
-    const saved = this.confirmations
-      .snapshot()
-      .generations.find((record) => record.name === app.name);
-    return {
-      name: app.name,
-      dependencies,
-      zipMtime: probe?.zipMtime ?? null,
-      sourceSavedAt: sources.savedAt,
-      zipReachable: probe?.zipUrl != null && probe.zipHash != null,
-      sourceFreshness: sourceFreshness({
-        zipMtime: probe?.zipMtime ?? null,
-        sourceSavedAt: sources.savedAt,
-        generationConfirmed:
-          probe?.zipHash != null &&
-          this.confirmations.generationConfirmed(
-            app.name,
-            filesFingerprint(sources.files),
-            probe.zipHash,
-            dependencyZipHashes,
-          ),
-      }),
-      zipHash: probe?.zipHash ?? null,
-      builtDependencyHashes: saved?.builtDependencyHashes,
-    };
-  }
-
-  private async installBeforeGenerate(app: LocalApp): Promise<void> {
-    if (!app.consumeTypes) return;
-    for (const remote of app.remotes) {
-      const producer = this.session.loaded.find((item) => item.name === remote.name);
-      const manifestUrl =
-        producer?.generateTypes && producer.port != null
-          ? localManifest(producer.port, producer.manifestPath)
-          : remote.url;
-      if (manifestUrl == null) throw new Error(`unreachable dependency: ${remote.name}`);
-      let zipUrl: string;
-      try {
-        zipUrl = await manifestZipUrl({
-          appDir: app.folder,
-          hostName: app.name,
-          remoteName: remote.name,
-          alias: remote.alias,
-          manifestUrl,
-        });
-      } catch {
-        throw new Error(`unreachable dependency: ${remote.name}`);
-      }
-      const installed = await refetchInstalled({
-        consumerFolder: app.folder,
-        remoteAlias: remote.alias,
-        typesFolder: app.typesFolder,
-        url: zipUrl,
-        command: dependencyRefetchCommand(readWorkspaceSettings().refetchCommand, {
-          folder: app.folder,
-          name: app.name,
-          port: app.port,
-          tsconfig: app.tsconfig,
-          typesFolder: app.typesFolder,
-          alias: remote.alias,
-        }),
-        runCommand: runShell,
-      });
-      const link: RemoteLink = {
-        consumer: app.name,
-        alias: remote.alias,
-        remoteName: remote.name,
-        url: remote.url ?? manifestUrl,
-      };
-      this.confirmations.saveInstall(link, installed.filesFingerprint, installed.zipHash);
-    }
-    await this.persistConfirmations();
-  }
-
-  private async generateOne(
-    app: LocalApp,
-    settings: ReturnType<typeof readWorkspaceSettings>,
-  ): Promise<string> {
-    const manifestPath = resolveManifestPath(
-      {
-        "mf-dashboard.scripts.start": settings.startScript,
-        "mf-dashboard.apps": settings.apps,
-      },
-      app.name,
-    );
-    if (settings.rebuildCommand.trim() !== "") {
-      const code = await runShell(
-        fillTemplate(settings.rebuildCommand, {
-          folder: app.folder,
-          name: app.name,
-          port: app.port == null ? "" : String(app.port),
-          tsconfig: app.tsconfig ?? "",
-        }),
-        app.folder,
-        REBUILD_TIMEOUT_MS,
-      );
-      if (code !== 0) throw new Error(`rebuild command exited ${code}`);
-      if (app.port == null) throw new Error("generated zip is not published by a manifest");
-      const published = await hashManifestZip({
-        appDir: app.folder,
-        hostName: app.name,
-        remoteName: app.name,
-        alias: app.name,
-        manifestUrl: localManifest(app.port, manifestPath),
-      });
-      this.publishedZipHashes.set(app.name, published.zipHash);
-      return published.zipHash;
-    }
-    const generated = await generateFederatedTypes({
-      appDir: app.folder,
-      configFile: app.configFile,
-      port: app.port,
-      manifestPath,
-    });
-    this.publishedZipHashes.set(app.name, generated.zipHash);
-    return generated.zipHash;
-  }
-
-  private async rememberGeneration(
-    app: LocalApp,
-    zipHash: string,
-    local: ReadonlyMap<string, { generateTypes: boolean }>,
-  ): Promise<void> {
-    const sources = sourceSnapshot(app.folder, app.tsconfig, app.typesFolder);
-    const builtDependencyHashes: Record<string, string> = {};
-    for (const name of chainDependencies(app.remotes, local)) {
-      const hash =
-        this.publishedZipHashes.get(name) ?? this.session.book.apps.get(appProbeId(name))?.zipHash;
-      if (hash) builtDependencyHashes[name] = hash;
-    }
-    this.confirmations.saveGeneration(
-      app.name,
-      filesFingerprint(sources.files),
-      zipHash,
-      builtDependencyHashes,
-    );
-    await this.persistConfirmations();
-  }
-}
-
-function localManifest(port: number, manifestPath: string): string {
-  const pathName = manifestPath.startsWith("/") ? manifestPath : `/${manifestPath}`;
-  return `http://127.0.0.1:${port}${pathName}`;
-}
-
-function localMap(apps: readonly LocalApp[]): Map<string, { generateTypes: boolean }> {
-  return new Map(apps.map((app) => [app.name, { generateTypes: app.generateTypes }]));
 }
 
 function workspaceRootFor(folder: string): string {

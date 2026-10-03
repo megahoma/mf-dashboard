@@ -4,7 +4,6 @@ export {
   endRefetch,
   linkRowId,
   loadKnownApps,
-  presentRow,
   rowContextValue,
   DashboardSession,
 } from "./session.ts";

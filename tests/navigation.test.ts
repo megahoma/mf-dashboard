@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { localApp } from "./support/app.ts";
 import * as vscode from "./support/vscode.ts";
 import { terms } from "../src/shared/config/index.ts";
 
@@ -14,6 +18,92 @@ registerHooks({
 });
 const { ManifestDocuments } = await import("../src/features/open-manifest/documents.ts");
 const { MfDashboardProvider } = await import("../src/widgets/mf-dashboard-tree/provider.ts");
+
+test("stat failures in installed types do not prevent rendering the dashboard", (t) => {
+  const producer = localApp("producer", "/producer", { generateTypes: false });
+  const consumer = localApp("consumer", "/consumer", {
+    consumeTypes: true,
+    remotes: [{ alias: "producer", name: "producer", url: null }],
+  });
+  const provider = new MfDashboardProvider(() => terms);
+  t.after(() => provider.dispose());
+  provider.session.loaded = [consumer, producer, localApp("other", "/other")];
+  for (const code of ["EACCES", "EIO", "ENOTDIR"]) {
+    const stat = t.mock.method(fs, "statSync", () => {
+      throw Object.assign(new Error(code), { code });
+    });
+    try {
+      provider.session.beforeRefreshChange();
+      const rows = provider.getChildren();
+      assert.deepEqual(
+        rows.map((row) => row.name),
+        ["consumer", "other"],
+      );
+      assert.equal(rows[0].children[0].name, "producer");
+      assert.equal(
+        provider.session.typesForLink({
+          consumer: "consumer",
+          alias: "producer",
+          remoteName: "producer",
+          url: null,
+        }),
+        "manual",
+      );
+    } finally {
+      stat.mock.restore();
+    }
+  }
+});
+
+test("shared producers are scanned once and invalidated with the link status cache", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-producer-cache-"));
+  const producer = localApp("producer", root);
+  const source = path.join(root, "app.ts");
+  fs.writeFileSync(source, "export const app = 1;");
+  const provider = new MfDashboardProvider(() => terms);
+  t.after(() => {
+    provider.dispose();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  provider.session.loaded = [
+    producer,
+    localApp("a", "/a", { consumeTypes: true }),
+    localApp("b", "/b", { consumeTypes: true }),
+  ];
+  const linkA = {
+    consumer: "a",
+    alias: "producer",
+    remoteName: "producer",
+    url: "http://localhost:4100/mf-manifest.json",
+  };
+  const linkB = { ...linkA, consumer: "b" };
+  const read = t.mock.method(fs, "readFileSync");
+  const count = () => read.mock.calls.filter((call) => String(call.arguments[0]) === source).length;
+  provider.session.typesForLink(linkA);
+  provider.session.typesForLink(linkB);
+  assert.equal(count(), 1);
+  provider.session.typesForLink(linkA);
+  assert.equal(count(), 1);
+  fs.writeFileSync(source, "export const app = 2;");
+  provider.session.beforeRefreshChange();
+  provider.session.typesForLink(linkB);
+  provider.session.typesForLink(linkA);
+  assert.equal(count(), 2);
+  provider.session.onRefreshFailed();
+  provider.session.typesForLink(linkA);
+  assert.equal(count(), 3);
+  fs.writeFileSync(source, "export const app = 3;");
+  await provider.fileSaved(source);
+  // fileSaved's notification observes both links; they share the new producer snapshot.
+  provider.session.typesForLink(linkA);
+  provider.session.typesForLink(linkB);
+  assert.equal(count(), 4);
+  t.mock.timers.tick(15_000);
+  provider.session.typesForLink(linkA);
+  provider.session.typesForLink(linkB);
+  assert.equal(count(), 5, "the settle timer invalidates both caches again");
+});
 
 test("manifest documents update in place and keep credentials out of their URI", () => {
   const documents = new ManifestDocuments();

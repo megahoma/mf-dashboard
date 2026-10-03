@@ -28,27 +28,6 @@ export function chainDependencies(
   return names;
 }
 
-export function externalDependencies(
-  remotes: readonly { name: string; zipReachable: boolean }[],
-  local: ReadonlyMap<string, { generateTypes: boolean }>,
-  consumeTypes: boolean,
-): { name: string; zipReachable: boolean }[] {
-  if (!consumeTypes) return [];
-  const found: { name: string; zipReachable: boolean }[] = [];
-  for (const remote of remotes) {
-    const app = local.get(remote.name);
-    if (app?.generateTypes) continue;
-    found.push({ name: remote.name, zipReachable: remote.zipReachable });
-  }
-  return found;
-}
-
-export function unreachableDependency(
-  items: readonly { name: string; zipReachable: boolean }[],
-): string | null {
-  return items.find((item) => !item.zipReachable)?.name ?? null;
-}
-
 // The reachable graph is checked before any step is returned, so a cycle never starts a process.
 export function rebuildPlan(root: string, nodes: ChainNode[]): PlannedStep[] {
   const byName = new Map(nodes.map((node) => [node.name, node]));
@@ -61,13 +40,6 @@ export function rebuildPlan(root: string, nodes: ChainNode[]): PlannedStep[] {
     actions.set(name, canSkip(node, byName, actions) ? "skip" : "rebuild");
   }
   return order.map((name) => ({ name, action: actions.get(name) ?? "rebuild" }));
-}
-
-export function startChain(root: string, nodes: ChainNode[], start: (name: string) => void): void {
-  const plan = rebuildPlan(root, nodes);
-  for (const step of plan) {
-    if (step.action === "rebuild") start(step.name);
-  }
 }
 
 function assertAcyclic(root: string, byName: ReadonlyMap<string, ChainNode>): void {

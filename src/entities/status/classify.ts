@@ -1,3 +1,4 @@
+import { parseHttpUrl as httpUrl } from "../../shared/urls.ts";
 import { terms, type DashboardTerms } from "../../shared/config/index.ts";
 
 export type StatusKind =
@@ -26,19 +27,6 @@ const localHosts = new Set(["localhost", "127.0.0.1"]);
 
 function blankUrl(url: string | null): boolean {
   return url == null || url.trim() === "";
-}
-
-function httpUrl(url: string | null): URL | null {
-  // The URL parser accepts some unsubstituted env tokens, such as http://${HOST}/...
-  if (url == null || url.trim() === "" || url.includes("${")) return null;
-  try {
-    const parsed = new URL(url.trim());
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
-    if (parsed.hostname === "") return null;
-    return parsed;
-  } catch {
-    return null;
-  }
 }
 
 function urlPort(url: URL): number {
