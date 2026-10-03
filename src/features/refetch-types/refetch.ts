@@ -15,15 +15,21 @@ export function refetchTarget(
   typesFolder: string,
 ): string {
   assertAlias(remoteAlias);
+  const consumer = path.resolve(consumerFolder);
+  const typesRoot = typesRootTarget(consumer, typesFolder);
+  const destination = path.resolve(typesRoot, remoteAlias);
+  assertInside(consumer, destination);
+  assertNoSymlinkEscape(consumer, destination);
+  return destination;
+}
+
+export function typesRootTarget(consumerFolder: string, typesFolder: string): string {
   assertRelativeFolder(typesFolder);
   const consumer = path.resolve(consumerFolder);
   const typesRoot = path.resolve(consumer, typesFolder);
   assertInside(consumer, typesRoot);
   assertNoSymlinkEscape(consumer, typesRoot);
-  const destination = path.resolve(typesRoot, remoteAlias);
-  assertInside(consumer, destination);
-  assertNoSymlinkEscape(consumer, destination);
-  return destination;
+  return typesRoot;
 }
 
 export function dependencyRefetchCommand(

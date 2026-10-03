@@ -54,7 +54,6 @@ import {
   type WorkspaceRoot,
 } from "./session.ts";
 import { createLoopbackNet, probeWorkspace } from "./net.ts";
-import { linkTypesDir, localManifestUrl, rowAction, type RowAction } from "./targets.ts";
 
 const REBUILD_TIMEOUT_MS = 5 * 60_000;
 
@@ -395,34 +394,40 @@ export class MfDashboardProvider
   }
 
   async openConfig(node?: DashboardNode): Promise<void> {
-    const action = this.actionFor(node);
+    const action = this.session.actionFor(node);
     if (!action?.configFile) return;
     await this.showFile(action.configFile);
   }
 
   async openProducerConfig(node?: DashboardNode): Promise<void> {
-    const action = this.actionFor(node);
+    const action = this.session.actionFor(node);
     if (!action?.producerConfigFile) return;
     await this.showFile(action.producerConfigFile);
   }
 
   async revealTypes(node?: DashboardNode): Promise<void> {
-    const action = this.actionFor(node);
+    const action = this.session.actionFor(node);
     if (!action?.typesDir) return;
     await vscode.commands.executeCommand("revealInExplorer", vscode.Uri.file(action.typesDir));
   }
 
   async openManifest(node?: DashboardNode): Promise<void> {
-    const action = this.actionFor(node);
+    const action = this.session.actionFor(node);
     if (!node || !action?.manifestUrl) return;
+    let response;
     try {
-      const response = await createLoopbackNet().get(action.manifestUrl);
-      if (!response.ok) {
-        void vscode.window.showErrorMessage(
-          manifestFailureMessage(new Error("http"), response.status),
-        );
-        return;
-      }
+      response = await createLoopbackNet().get(action.manifestUrl);
+    } catch (error) {
+      void vscode.window.showErrorMessage(manifestFailureMessage(error));
+      return;
+    }
+    if (!response.ok) {
+      void vscode.window.showErrorMessage(
+        manifestFailureMessage(new Error("http"), response.status),
+      );
+      return;
+    }
+    try {
       const uri = this.manifests.uri(
         node.name,
         action.manifestUrl,
@@ -430,8 +435,8 @@ export class MfDashboardProvider
       );
       const document = await vscode.workspace.openTextDocument(uri);
       await vscode.window.showTextDocument(document, { preview: true });
-    } catch (error) {
-      void vscode.window.showErrorMessage(manifestFailureMessage(error));
+    } catch {
+      void vscode.window.showErrorMessage("MF dashboard: could not open manifest preview");
     }
   }
 
@@ -442,42 +447,6 @@ export class MfDashboardProvider
     }
     const document = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
     await vscode.window.showTextDocument(document, { preview: true });
-  }
-
-  private actionFor(node?: DashboardNode): RowAction | null {
-    if (!node) return null;
-    if (node.linkId) {
-      const [consumerName, alias, remoteName] = node.linkId.split("\0");
-      const consumer = this.session.loaded.find((app) => app.name === consumerName);
-      if (!consumer) return null;
-      const remote = consumer.remotes.find(
-        (item) => item.alias === alias && item.name === remoteName,
-      );
-      const producer = this.session.loaded.find((app) => app.name === remoteName);
-      return rowAction({
-        configFile: consumer.configFile,
-        producerConfigFile: producer?.configFile ?? null,
-        typesDir: linkTypesDir(consumer.folder, alias, consumer.typesFolder),
-        manifestUrl: remote?.url ?? null,
-      });
-    }
-    if (node.id.startsWith("extra:")) {
-      return rowAction({
-        configFile: null,
-        producerConfigFile: null,
-        typesDir: null,
-        manifestUrl: node.id.slice("extra:".length),
-      });
-    }
-    const app = this.session.loaded.find((item) => item.name === node.name);
-    if (!app) return null;
-    return rowAction({
-      configFile: app.configFile,
-      producerConfigFile: null,
-      typesDir: path.resolve(app.folder, app.typesFolder),
-      manifestUrl:
-        app.manifest && app.port != null ? localManifestUrl(app.port, app.manifestPath) : null,
-    });
   }
 
   rebuild(node?: DashboardNode): Promise<void> {

@@ -5,7 +5,7 @@ import test from "node:test";
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
   scripts?: Record<string, string>;
   contributes: {
-    commands?: { command: string; title: string }[];
+    commands?: { command: string; title: string; icon?: string }[];
     viewsWelcome?: { view: string; contents: string }[];
     menus?: {
       commandPalette?: { command: string; when?: string }[];
@@ -123,4 +123,32 @@ test("start, rebuild, and refetch are inline on silent, stale, and unfetched", (
     when: "view == mf-dashboard && viewItem =~ /^unfetched($| )/",
     group: "inline",
   });
+});
+
+test("row actions use navigation menus with token boundaries and no inline icons", () => {
+  const menus = pkg.contributes.menus?.["view/item/context"] ?? [];
+  for (const [name, token] of [
+    ["openConfig", "config"],
+    ["openProducerConfig", "producer"],
+    ["revealTypes", "types"],
+    ["openManifest", "manifest"],
+  ]) {
+    const command = `mf-dashboard.${name}`;
+    assert.deepEqual(
+      menus.filter((item) => item.command === command),
+      [
+        {
+          command,
+          when: `view == mf-dashboard && viewItem =~ /(^| )${token}($| )/`,
+          group: "navigation",
+        },
+      ],
+    );
+    const declared = pkg.contributes.commands?.find((item) => item.command === command);
+    assert.ok(declared);
+    assert.equal(declared.icon, undefined);
+    const key = declared.title.slice(1, -1);
+    assert.ok(en[key]);
+    assert.ok(ru[key]);
+  }
 });

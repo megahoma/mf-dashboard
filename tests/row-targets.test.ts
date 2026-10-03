@@ -10,10 +10,7 @@ import {
   withActionTokens,
 } from "../src/widgets/mf-dashboard-tree/targets.ts";
 
-const files = new Set([
-  "/apps/shell/module-federation.config.ts",
-  "/apps/shell/@mf-types",
-]);
+const files = new Set(["/apps/shell/module-federation.config.ts", "/apps/shell/@mf-types"]);
 
 test("types actions require a directory, not a file", () => {
   const root = mkdtempSync(path.join(tmpdir(), "mf-row-targets-"));
@@ -94,10 +91,7 @@ test("config stays available when the file is not on disk", () => {
 });
 
 test("link types dir stays inside the consumer and rejects a parent segment", () => {
-  assert.equal(
-    linkTypesDir("/apps/shell", "widget", "@mf-types"),
-    "/apps/shell/@mf-types/widget",
-  );
+  assert.equal(linkTypesDir("/apps/shell", "widget", "@mf-types"), "/apps/shell/@mf-types/widget");
   assert.equal(linkTypesDir("/apps/shell", "../widget", "@mf-types"), null);
 });
 

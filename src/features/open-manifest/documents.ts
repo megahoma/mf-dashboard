@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import * as vscode from "vscode";
 import { manifestDocumentPath } from "./text.ts";
 
@@ -16,7 +17,7 @@ export class ManifestDocuments implements vscode.TextDocumentContentProvider, vs
     const uri = vscode.Uri.from({
       scheme: MANIFEST_SCHEME,
       path: manifestDocumentPath(name),
-      query: url,
+      query: createHash("sha256").update(url).digest("hex"),
     });
     this.text.set(uri.toString(), body);
     this.change.fire(uri);
@@ -24,6 +25,7 @@ export class ManifestDocuments implements vscode.TextDocumentContentProvider, vs
   }
 
   dispose(): void {
+    this.text.clear();
     this.change.dispose();
   }
 }

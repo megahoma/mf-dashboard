@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import {
   appProbeId,
   createProbeBook,
@@ -512,4 +514,101 @@ test("the provider registers the tree without a view message", () => {
   assert.match(extension, /mf-dashboard\.refetchTypes/);
   assert.match(extension, /mf-dashboard\.useFlat/);
   assert.match(extension, /mf-dashboard\.useTree/);
+});
+
+function navigationSession(): DashboardSession {
+  return new DashboardSession(
+    {
+      readSettings: () => settings(),
+      writeApps() {},
+      scan: () => ({}),
+      loadKnown: () => [],
+      async probe() {},
+      roots: () => [],
+    },
+    createProbeBook(),
+    () => {},
+  );
+}
+
+test("menu and click require a types directory inside the app for apps and links", () => {
+  const root = fs.mkdtempSync(path.join(tmpdir(), "mf-tree-actions-"));
+  try {
+    const folder = path.join(root, "app");
+    fs.mkdirSync(folder);
+    const typesRoot = path.join(folder, "@mf-types");
+    const session = navigationSession();
+    session.loaded = [
+      app({ name: "app", folder, remotes: [{ alias: "dep", name: "dep", url: null }] }),
+    ];
+    const assertTypes = (appExpected: boolean, linkExpected: boolean) => {
+      const row = session.nodes()[0];
+      const link = row.children[0];
+      for (const [node, expected] of [
+        [row, appExpected],
+        [link, linkExpected],
+      ] as const) {
+        assert.equal(node.contextValue.split(" ").includes("types"), expected);
+        assert.equal(session.actionFor(node)?.typesDir != null, expected);
+      }
+    };
+    assertTypes(false, false);
+    fs.writeFileSync(typesRoot, "file");
+    assertTypes(false, false);
+    fs.rmSync(typesRoot);
+    fs.mkdirSync(typesRoot);
+    fs.writeFileSync(path.join(typesRoot, "dep"), "file");
+    assertTypes(true, false);
+    fs.rmSync(path.join(typesRoot, "dep"));
+    fs.mkdirSync(path.join(typesRoot, "dep"));
+    assertTypes(true, true);
+    const oldRow = session.nodes()[0];
+    fs.rmSync(typesRoot, { recursive: true });
+    assert.equal(session.actionFor(oldRow)?.typesDir, null);
+    for (const typesFolder of [root, "../", "../app/@mf-types"]) {
+      session.loaded[0].typesFolder = typesFolder;
+      assertTypes(false, false);
+    }
+    session.loaded[0].typesFolder = "@mf-types";
+    fs.symlinkSync(root, typesRoot, "dir");
+    assertTypes(false, false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("row actions resolve only current configured targets and reject malformed arguments", () => {
+  const session = navigationSession();
+  const url = "https://configured.example/mf-manifest.json";
+  const remote = { alias: "dep", name: "dep", url };
+  session.loaded = [app({ name: "app", remotes: [remote] }), app({ name: "dep" })];
+  session.extraUrls = [url];
+  const row = session.nodes()[0];
+  const link = row.children[0];
+  const extra = session.nodes().find((node) => node.id === `extra:${url}`);
+  assert.ok(extra);
+  assert.equal(session.actionFor(row)?.configFile, session.loaded[0].configFile);
+  assert.equal(session.actionFor(link)?.manifestUrl, url);
+  assert.equal(session.actionFor(extra)?.manifestUrl, url);
+  for (const node of [
+    undefined,
+    null,
+    "wrong",
+    {},
+    { id: 1, name: "app" },
+    { ...extra, id: "extra:https://unconfigured.example/secret" },
+    { ...row, id: "app:missing" },
+    { ...link, linkId: "app\0missing\0dep" },
+    { ...link, linkId: "app\0dep\0dep\0suffix" },
+  ]) {
+    assert.equal(session.actionFor(node), null);
+  }
+  remote.url = "https://new.example/mf-manifest.json";
+  assert.equal(session.actionFor(link)?.manifestUrl, remote.url);
+  session.loaded[0].remotes = [];
+  assert.equal(session.actionFor(link), null);
+  session.extraUrls = [];
+  assert.equal(session.actionFor(extra), null);
+  session.loaded = [];
+  assert.equal(session.actionFor(row), null);
 });
