@@ -1,3 +1,4 @@
+import { noLog, safeError, type LogContext } from "../../shared/logging.ts";
 import fs from "node:fs";
 import path from "node:path";
 import { discoverProgram, readPort, type LocalApp } from "./config.ts";
@@ -8,6 +9,7 @@ export type { LocalApp } from "./config.ts";
 export interface ScanOptions {
   ignorePaths?: readonly string[];
   envMode?: string;
+  log?: LogContext;
 }
 
 const CONFIG_FILE =
@@ -19,6 +21,7 @@ export function readAppFolder(
   envMode: string,
   name?: string,
   dependencies?: Set<string>,
+  log: LogContext = noLog,
 ): LocalApp | null {
   let entries: fs.Dirent[];
   try {
@@ -30,7 +33,7 @@ export function readAppFolder(
     .filter((entry) => entry.isFile() && CONFIG_FILE.test(entry.name))
     .map((entry) => path.join(folder, entry.name))
     .sort();
-  const apps = discoverDirectory(path.resolve(folder), files, envMode, dependencies);
+  const apps = discoverDirectory(path.resolve(folder), files, envMode, dependencies, log);
   return apps.find((app) => app.name === name) ?? apps[0] ?? null;
 }
 export function readEnvFile(text: string): Record<string, string> {
@@ -58,7 +61,14 @@ export function readEnvFile(text: string): Record<string, string> {
 export function scanWorkspace(root: string, options: ScanOptions = {}): Record<string, LocalApp> {
   const found: Record<string, LocalApp> = {};
   const rootAbs = path.resolve(root);
-  walk(rootAbs, rootAbs, options.ignorePaths ?? [], options.envMode ?? "development", found);
+  walk(
+    rootAbs,
+    rootAbs,
+    options.ignorePaths ?? [],
+    options.envMode ?? "development",
+    found,
+    options.log ?? noLog,
+  );
   return found;
 }
 
@@ -68,6 +78,7 @@ function walk(
   ignorePaths: readonly string[],
   envMode: string,
   found: Record<string, LocalApp>,
+  log: LogContext,
 ): void {
   let entries: fs.Dirent[];
   try {
@@ -82,16 +93,19 @@ function walk(
     const abs = path.join(dir, entry.name);
     const rel = path.relative(root, abs).split(path.sep).join("/");
     if (entry.isDirectory()) {
-      if (shouldSkip(entry.name, rel, ignorePaths)) continue;
+      if (shouldSkip(entry.name, rel, ignorePaths)) {
+        log.event("trace", "discovery.skipped", { path: rel, reason: "excluded-directory" });
+        continue;
+      }
       children.push(abs);
       continue;
     }
     if (entry.isFile() && CONFIG_FILE.test(entry.name)) configs.push(abs);
   }
-  for (const app of discoverDirectory(dir, configs, envMode)) {
+  for (const app of discoverDirectory(dir, configs, envMode, undefined, log)) {
     if (!(app.name in found)) found[app.name] = app;
   }
-  for (const child of children) walk(child, root, ignorePaths, envMode, found);
+  for (const child of children) walk(child, root, ignorePaths, envMode, found, log);
 }
 
 function shouldSkip(name: string, relPosix: string, extra: readonly string[]): boolean {
@@ -113,17 +127,24 @@ function discoverDirectory(
   files: string[],
   envMode: string,
   dependencies?: Set<string>,
+  log: LogContext = noLog,
 ): LocalApp[] {
   if (files.length === 0) return [];
   const env = readModeEnv(dir, envMode);
   const apps: LocalApp[] = [];
   let loosePort: number | null = null;
   for (const file of files) {
+    log.event("trace", "discovery.candidate", { file });
     dependencies?.add(file);
     let text: string;
     try {
       text = fs.readFileSync(file, "utf8");
-    } catch {
+    } catch (error) {
+      log.event("trace", "discovery.skipped", {
+        file,
+        reason: "unreadable-config",
+        ...safeError(error),
+      });
       continue;
     }
     const parsed = parseProgram(text);
@@ -131,8 +152,15 @@ function discoverDirectory(
       readPort(parsed.server, parsed.bindings, env) ??
       readPort(parsed.devServer, parsed.bindings, env);
     if (port !== null) loosePort = port;
-    const app = discoverProgram(parsed, text, file, env, dependencies);
-    if (!app) continue;
+    const app = discoverProgram(parsed, text, file, env, dependencies, log);
+    if (!app) {
+      log.event("trace", "discovery.skipped", {
+        file,
+        reason: "no-resolved-federation-name-or-options",
+      });
+      continue;
+    }
+    log.event("trace", "discovery.found", { app: app.name, file });
     const existing = apps.find((item) => item.name === app.name);
     if (!existing) apps.push(app);
     else if (existing.port === null && app.port !== null) existing.port = app.port;

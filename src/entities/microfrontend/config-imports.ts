@@ -1,3 +1,4 @@
+import { noLog, type LogContext } from "../../shared/logging.ts";
 import fs from "node:fs";
 import path from "node:path";
 import { parseProgram, objectAst, type Ast, type Program } from "./syntax.ts";
@@ -15,13 +16,23 @@ export function loadCallee(
   parsed: Program,
   callee: string,
   dependencies?: Set<string>,
+  log: LogContext = noLog,
 ): Loaded | null {
   const local = objectAst(parsed.bindings.get(callee));
   if (local) return { file: filePath, options: local, bindings: parsed.bindings };
   const imported = parsed.imports.get(callee);
-  if (!imported?.from.startsWith(".")) return null;
+  if (!imported?.from.startsWith(".")) {
+    log.event("trace", "config.helper.unresolved", { file: filePath, reason: "not-local-import" });
+    return null;
+  }
   const resolved = resolveSpecifier(filePath, imported.from, dependencies);
-  if (!resolved) return null;
+  if (!resolved) {
+    log.event("trace", "config.helper.unresolved", {
+      file: filePath,
+      reason: "missing-or-unconfined-import",
+    });
+    return null;
+  }
   const exported = imported.exported === "*" ? callee : imported.exported;
   return resolveExport(resolved, exported, 0, new Set([path.resolve(filePath)]), dependencies);
 }

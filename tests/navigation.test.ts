@@ -1,3 +1,4 @@
+import { createLogger } from "../src/shared/logging.ts";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
@@ -187,4 +188,45 @@ test("manifest command rejects unconfigured extra URLs and separates fetch and e
   } finally {
     provider.dispose();
   }
+});
+
+test("unchanged status and unreadable-type warnings stay quiet until recovery", (t) => {
+  const events: { level: string; text: string }[] = [];
+  const log = createLogger({
+    enabled: () => true,
+    write: (level, text) => events.push({ level, text }),
+  });
+  const provider = new MfDashboardProvider(() => terms, undefined, undefined, log);
+  t.after(() => provider.dispose());
+  provider.session.loaded = [
+    localApp("consumer", "/consumer", {
+      consumeTypes: true,
+      remotes: [{ alias: "remote", name: "remote", url: null }],
+    }),
+    localApp("remote", "/remote", { generateTypes: false }),
+  ];
+  let broken = true;
+  const original = fs.statSync;
+  t.mock.method(fs, "statSync", (...args: Parameters<typeof fs.statSync>) => {
+    if (broken && String(args[0]).includes("@mf-types"))
+      throw Object.assign(new Error("SECRET"), { code: "EACCES" });
+    return Reflect.apply(original, fs, args);
+  });
+  const render = () => {
+    provider.session.beforeRefreshChange();
+    provider.session.relabel(terms);
+  };
+  render();
+  render();
+  assert.equal(events.filter((event) => event.level === "warn").length, 1);
+  assert.equal(events.filter((event) => event.text.startsWith("status.changed")).length, 2);
+  broken = false;
+  render();
+  broken = true;
+  render();
+  assert.equal(events.filter((event) => event.level === "warn").length, 2);
+  assert.equal(
+    events.some((event) => event.text.includes("SECRET")),
+    false,
+  );
 });

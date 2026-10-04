@@ -1,3 +1,4 @@
+import { noLog, type LogContext } from "../../shared/logging.ts";
 import fs from "node:fs";
 import path from "node:path";
 import { filesFingerprint } from "../../shared/fingerprint.ts";
@@ -47,6 +48,7 @@ export function sourceIdentity(
   folder: string,
   tsconfig: string | null,
   typesFolder: string,
+  log: LogContext = noLog,
 ): SourceIdentity {
   const entries = sourceEntries(folder, tsconfig, typesFolder);
   const stamp = entries
@@ -55,7 +57,21 @@ export function sourceIdentity(
     .join("\n");
   const key = `${path.resolve(folder)}\0${tsconfig ?? ""}\0${typesFolder}`;
   const hit = sourceCache.get(key);
-  if (hit?.stamp === stamp) return { ...hit.identity, names: [...hit.identity.names] };
+  if (hit?.stamp === stamp) {
+    log.event("debug", "fingerprint.sources.hit", {
+      folder,
+      scans: 1,
+      reads: 0,
+      files: entries.length,
+    });
+    return { ...hit.identity, names: [...hit.identity.names] };
+  }
+  log.event("debug", "fingerprint.sources.miss", {
+    folder,
+    scans: 1,
+    reads: entries.length,
+    files: entries.length,
+  });
   const identity: SourceIdentity = {
     savedAt: entries.reduce<number | null>(
       (latest, entry) => (latest == null || entry.savedAt > latest ? entry.savedAt : latest),

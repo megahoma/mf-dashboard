@@ -1,3 +1,4 @@
+import { noLog, safeError, type LogContext } from "../../shared/logging.ts";
 import type { LocalApp, ProbeBook } from "../../entities/microfrontend/index.ts";
 import { sourceIdentity, type ConfirmationStore } from "../../entities/federated-types/index.ts";
 import { fillTemplate, runShell } from "../../shared/shell.ts";
@@ -12,6 +13,7 @@ import { hashManifestZip } from "./zip-url.ts";
 const REBUILD_TIMEOUT_MS = 5 * 60_000;
 
 export interface RebuildContext {
+  log?: LogContext;
   apps: readonly LocalApp[];
   book: ProbeBook;
   confirmations: ConfirmationStore;
@@ -34,11 +36,34 @@ export async function rebuildTypes(
   },
 ): Promise<void> {
   const { apps, book, confirmations, published } = context;
+  const log = context.log ?? noLog;
+  const persist = async () => {
+    try {
+      await context.persist();
+    } catch (error) {
+      log.event("error", "confirmations.save.failed", safeError(error));
+      throw error;
+    }
+  };
   const nodes = apps
     .filter((app) => app.generateTypes)
-    .map((app) => operations.collectProducerEvidence(app, apps, book, confirmations));
+    .map((app) => operations.collectProducerEvidence(app, apps, book, confirmations, log));
   const plan = rebuildPlan(root, nodes);
+  log.event("debug", "types.rebuild.plan", () => ({
+    order: plan.map((step) => step.name).join(" -> "),
+  }));
   for (const step of plan) {
+    const evidence = nodes.find((node) => node.name === step.name);
+    log.event("debug", "types.rebuild.step", {
+      app: step.name,
+      action: step.action,
+      sourceFreshness: evidence?.sourceFreshness,
+      zipReachable: evidence?.zipReachable,
+      reason:
+        step.action === "skip"
+          ? "sources-and-dependencies-fresh"
+          : "sources-zip-or-dependencies-not-fresh",
+    });
     if (step.action === "skip") continue;
     const app = apps.find((item) => item.name === step.name);
     if (!app) throw new Error(`missing local node: ${step.name}`);
@@ -55,6 +80,8 @@ export async function rebuildTypes(
           remote,
           manifestUrl,
           context.refetchCommand(),
+          undefined,
+          log,
         );
         confirmations.saveInstall(
           {
@@ -67,11 +94,13 @@ export async function rebuildTypes(
           installed.zipHash,
         );
       }
-      await context.persist();
+      await persist();
     }
     const manifestPath = resolveManifestPath(context.settings, app.name);
     let zipHash: string;
     if (context.settings.rebuildCommand.trim() !== "") {
+      const started = Date.now();
+      log.event("debug", "shell.started", { app: app.name, kind: "rebuild" });
       const code = await operations.runShell(
         fillTemplate(context.settings.rebuildCommand, {
           folder: app.folder,
@@ -82,6 +111,12 @@ export async function rebuildTypes(
         app.folder,
         REBUILD_TIMEOUT_MS,
       );
+      log.event("debug", "shell.completed", {
+        app: app.name,
+        kind: "rebuild",
+        code,
+        durationMs: Date.now() - started,
+      });
       if (code !== 0) throw new Error(`rebuild command exited ${code}`);
       if (app.port == null) throw new Error("generated zip is not published by a manifest");
       zipHash = (
@@ -103,11 +138,12 @@ export async function rebuildTypes(
         })
       ).zipHash;
     }
+    log.event("debug", "types.generate.completed", { app: app.name });
     published.set(app.name, zipHash);
-    const sources = sourceIdentity(app.folder, app.tsconfig, app.typesFolder);
+    const sources = sourceIdentity(app.folder, app.tsconfig, app.typesFolder, log);
     const { dependencyZipHashes } = dependencyEvidence(app, apps, book, published);
     confirmations.saveGeneration(app.name, sources.fingerprint, zipHash, dependencyZipHashes);
-    await context.persist();
+    await persist();
     context.rebuilt(app.name);
   }
 }

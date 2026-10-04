@@ -90,6 +90,10 @@
       {
         "command": "mf-dashboard.openManifest",
         "title": "%command.openManifest%"
+      },
+      {
+        "command": "mf-dashboard.showLogs",
+        "title": "%command.showLogs%"
       }
     ],
     "menus": {

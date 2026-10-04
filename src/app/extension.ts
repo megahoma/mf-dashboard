@@ -1,3 +1,4 @@
+import { createLogger, safeError, type LogContext } from "../shared/logging.ts";
 import {
   createConfirmationStore,
   type ConfirmationSnapshot,
@@ -26,6 +27,27 @@ export function selectedTerms(): DashboardTerms {
 }
 
 export function activate(context: vscode.ExtensionContext): void {
+  const channel = vscode.window.createOutputChannel("MF Dashboard", { log: true });
+  context.subscriptions.push(channel);
+  const levels = {
+    trace: vscode.LogLevel.Trace,
+    debug: vscode.LogLevel.Debug,
+    info: vscode.LogLevel.Info,
+    warn: vscode.LogLevel.Warning,
+    error: vscode.LogLevel.Error,
+  };
+  const log = createLogger({
+    enabled: (level) => channel.logLevel <= levels[level],
+    write: (level, message) => channel[level](message),
+  });
+  log.event("info", "extension.activated", {
+    version: context.extension.packageJSON.version as string,
+    mode: context.extensionMode,
+    workspaces: vscode.workspace.workspaceFolders?.length ?? 0,
+  });
+  context.subscriptions.push(
+    vscode.commands.registerCommand("mf-dashboard.showLogs", () => channel.show()),
+  );
   const bundle = vscode.Uri.joinPath(context.extensionUri, "l10n", "bundle.l10n.ru.json");
   russian = JSON.parse(readFileSync(bundle.fsPath, "utf8")) as Record<string, string>;
   const store = createConfirmationStore(readConfirmations(context));
@@ -35,6 +57,7 @@ export function activate(context: vscode.ExtensionContext): void {
     () => {
       return context.workspaceState.update(CONFIRMATIONS, store.snapshot());
     },
+    log,
   );
   context.subscriptions.push(
     provider,
@@ -43,7 +66,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (document.uri.scheme !== "file") return;
       void provider
         .fileSaved(document.uri.fsPath)
-        .catch((error: unknown) => console.error("MF dashboard save refresh failed", error));
+        .catch((error: unknown) => log.event("error", "save.refresh.failed", safeError(error)));
     }),
     vscode.workspace.onDidChangeWorkspaceFolders(() => {
       void provider
@@ -70,7 +93,9 @@ export function activate(context: vscode.ExtensionContext): void {
       ) {
         void provider
           .refresh()
-          .catch((error: unknown) => console.error("MF dashboard refresh failed", error));
+          .catch((error: unknown) =>
+            log.event("error", "settings.refresh.failed", safeError(error)),
+          );
       }
     }),
     vscode.window.registerTreeDataProvider("mf-dashboard", provider),
@@ -107,14 +132,15 @@ export function activate(context: vscode.ExtensionContext): void {
       provider.openManifest(node),
     ),
   );
-  void openPanel(provider).catch((error: unknown) =>
-    vscode.window.showErrorMessage(`MF dashboard: ${String(error)}`),
-  );
+  void openPanel(provider, log).catch((error: unknown) => {
+    log.event("error", "startup.failed", safeError(error));
+    void vscode.window.showErrorMessage(`MF dashboard: ${String(error)}`);
+  });
 }
 
-async function openPanel(provider: MfDashboardProvider): Promise<void> {
+async function openPanel(provider: MfDashboardProvider, log: LogContext): Promise<void> {
   try {
-    await ensureWorkspaceSettings();
+    await ensureWorkspaceSettings(log.operation("startup"));
     const inspected = vscode.workspace.getConfiguration("mf-dashboard").inspect("apps");
     const appsDefined =
       inspected != null &&
@@ -136,7 +162,7 @@ function setStructure(structure: "flat" | "tree"): Thenable<void> {
     .update("structure", structure, vscode.ConfigurationTarget.Workspace);
 }
 
-async function ensureWorkspaceSettings(): Promise<void> {
+async function ensureWorkspaceSettings(log: LogContext): Promise<void> {
   const folders = vscode.workspace.workspaceFolders ?? [];
   if (folders.length === 0) return;
   const mf = vscode.workspace.getConfiguration("mf-dashboard");
@@ -149,6 +175,7 @@ async function ensureWorkspaceSettings(): Promise<void> {
       scanWorkspace(folder.uri.fsPath, {
         envMode: mf.get<string>("envMode") ?? "development",
         ignorePaths,
+        log,
       }),
     ),
   );

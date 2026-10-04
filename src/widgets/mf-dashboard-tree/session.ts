@@ -1,3 +1,4 @@
+import { noLog, safeError, type LogContext } from "../../shared/logging.ts";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -55,6 +56,7 @@ export interface DashboardPorts {
     envMode: string,
     ignorePaths: readonly string[],
     cache?: AppParseCache,
+    log?: LogContext,
   ): LocalApp[];
   probe(book: ProbeBook, input: ProbeCycleInput): Promise<void>;
   roots(): WorkspaceRoot[];
@@ -135,7 +137,7 @@ export function appConfigStamp(
     .join("\n");
 }
 
-export function createAppParseCache(): AppParseCache {
+export function createAppParseCache(log: LogContext = noLog): AppParseCache {
   const stored = new Map<
     string,
     { stamp: string; app: LocalApp; dependencies: readonly string[] }
@@ -143,11 +145,34 @@ export function createAppParseCache(): AppParseCache {
   return {
     lookup(key, folder, envMode) {
       const hit = stored.get(key);
-      if (
-        !hit ||
-        hit.stamp !== appConfigStamp(folder, envMode, hit.app.configFile, hit.dependencies)
-      )
+      const stamp = hit
+        ? appConfigStamp(folder, envMode, hit.app.configFile, hit.dependencies)
+        : "";
+      if (!hit || hit.stamp !== stamp) {
+        log.event("debug", "config.cache.miss", () => {
+          const oldRows = new Set(hit?.stamp.split("\n") ?? []);
+          const newRows = new Set(stamp.split("\n"));
+          const changed = [...oldRows, ...newRows]
+            .filter((row) => !oldRows.has(row) || !newRows.has(row))
+            .map((row) => row.split("\0")[0]);
+          const kinds = [
+            ...new Set(
+              changed.map((file) =>
+                path.basename(file).startsWith(".env.")
+                  ? "env-changed"
+                  : /^(module-federation|webpack|rspack|rsbuild|vite)\.config\./.test(
+                        path.basename(file),
+                      )
+                    ? "root-config-changed"
+                    : "import-dependency-changed",
+              ),
+            ),
+          ];
+          return { folder, reason: hit ? kinds.join(",") : "not-cached" };
+        });
         return null;
+      }
+      log.event("debug", "config.cache.hit", { folder });
       return hit.app;
     },
     store(key, folder, envMode, app, dependencies = []) {
@@ -166,6 +191,7 @@ export function loadKnownApps(
   envMode: string,
   _ignorePaths: readonly string[] = [],
   cache: AppParseCache = createAppParseCache(),
+  log: LogContext = noLog,
 ): LocalApp[] {
   const loaded: LocalApp[] = [];
   for (const [name, setting] of Object.entries(apps)) {
@@ -177,11 +203,14 @@ export function loadKnownApps(
     let matched = false;
     for (const root of candidates) {
       const abs = confinedAppPath(root.path, setting.path);
-      if (!abs) continue;
+      if (!abs) {
+        log.event("warn", "config.path.invalid", { app: name });
+        continue;
+      }
       const key = `${root.path}\0${abs}\0${envMode}\0${name}`;
       const cached = cache.lookup(key, abs, envMode);
       const dependencies = new Set<string>();
-      const match = cached ?? readAppFolder(abs, envMode, name, dependencies);
+      const match = cached ?? readAppFolder(abs, envMode, name, dependencies, log);
       if (!match) continue;
       if (!cached) cache.store(key, abs, envMode, match, [...dependencies]);
       fallback ??= match;
@@ -249,7 +278,7 @@ export class DashboardSession {
   structure: DashboardStructure = "tree";
   terms: DashboardTerms = terms;
   typesForLink: (link: RemoteLink) => StatusInput["typesState"] = () => "unknown";
-  beforeRefreshChange: () => void = () => {};
+  beforeRefreshChange: (log?: LogContext) => void = () => {};
   onRefreshFailed: () => void = () => {};
   probeRunning = false;
   readonly pending = new Set<string>();
@@ -257,17 +286,46 @@ export class DashboardSession {
   readonly scriptGaps = new Set<string>();
   readonly rebuildErrors = new Map<string, string>();
   private readonly ports: DashboardPorts;
-  private readonly appCache = createAppParseCache();
+  private readonly appCache: AppParseCache;
+  private readonly log: LogContext;
+  private activeLog: LogContext = noLog;
+  private pathWarnings = new Set<string>();
   readonly book: ProbeBook;
   private readonly onChange: () => void;
 
-  constructor(ports: DashboardPorts, book: ProbeBook, onChange: () => void = () => {}) {
+  constructor(
+    ports: DashboardPorts,
+    book: ProbeBook,
+    onChange: () => void = () => {},
+    log: LogContext = noLog,
+  ) {
+    this.log = log;
+    this.appCache = createAppParseCache({
+      event: (...args) => this.activeLog.event(...args),
+      operation: (source) => this.activeLog.operation(source),
+    });
     this.ports = ports;
     this.book = book;
     this.onChange = onChange;
   }
 
-  async refresh(): Promise<void> {
+  async refresh(source = "manual", log = this.log.operation(source)): Promise<void> {
+    this.activeLog = log;
+    const seenWarnings = new Set<string>();
+    const loadLog: LogContext = {
+      operation: (source) => log.operation(source),
+      event: (level, event, fields) => {
+        if (level === "warn" && event === "config.path.invalid") {
+          const values = typeof fields === "function" ? fields() : fields;
+          const key = String(values?.app);
+          seenWarnings.add(key);
+          if (this.pathWarnings.has(key)) return;
+          log.event(level, event, values);
+        } else log.event(level, event, fields);
+      },
+    };
+    const started = Date.now();
+    log.event(source === "timer" ? "debug" : "info", "refresh.started");
     const snapshot = this.captureRefreshState();
     this.probeRunning = true;
     let structureAtProbe = this.structure;
@@ -287,7 +345,12 @@ export class DashboardSession {
               current.envMode,
               current.ignorePaths,
               this.appCache,
+              loadLog,
             );
+      log.event("debug", "config.loaded", {
+        configured: Object.keys(current.apps ?? {}).length,
+        loaded: loaded.length,
+      });
       const names = new Set<string>();
       for (const app of loaded) {
         if (names.has(app.name)) throw new Error(`duplicate federation name: ${app.name}`);
@@ -300,6 +363,7 @@ export class DashboardSession {
         apps: loaded,
         links: linksOf(loaded),
         extraManifestUrls: extraUrls,
+        log,
       });
       this.applyRefreshState({
         apps: staged.apps,
@@ -318,42 +382,68 @@ export class DashboardSession {
         structure: toggledDuringProbe ? this.structure : snapshot.structure,
       });
       this.probeRunning = false;
+      log.event(source === "timer" ? "debug" : "error", "refresh.failed", {
+        ...safeError(error),
+        rolledBack: true,
+        durationMs: Date.now() - started,
+      });
+      this.pathWarnings = seenWarnings;
       this.onRefreshFailed();
       if (toggledDuringProbe) this.onChange();
       throw error;
     }
+    this.pathWarnings = seenWarnings;
     this.probeRunning = false;
-    this.beforeRefreshChange();
+    log.event(source === "timer" ? "debug" : "info", "refresh.completed", {
+      apps: this.loaded.length,
+      links: this.book.links.size,
+      extras: this.extraUrls.length,
+      durationMs: Date.now() - started,
+    });
+    this.beforeRefreshChange(log);
     this.onChange();
   }
 
   async discover(): Promise<void> {
-    const current = this.ports.readSettings();
-    const roots = this.ports.roots();
-    if (roots.length > 0) {
-      if (new Set(roots.map((root) => root.name)).size !== roots.length)
-        throw new Error("workspace folder names must be unique");
-      const foundApps: Record<string, AppSetting> = {};
-      for (const root of roots) {
-        const found = this.ports.scan(root.path, {
-          envMode: current.envMode,
-          ignorePaths: current.ignorePaths,
-        });
-        for (const [name, foundApp] of Object.entries(found)) {
-          if (foundApps[name]) throw new Error(`duplicate federation name: ${name}`);
-          foundApps[name] = {
-            path: workspaceRelative(root.path, foundApp.folder),
-            ...(roots.length > 1 ? { workspaceFolder: root.name } : {}),
-            manifestPath: foundApp.manifestPath,
-            scripts: { start: "dev" },
-          };
+    const log = this.log.operation("discovery");
+    const started = Date.now();
+    log.event("info", "discovery.started");
+    try {
+      const current = this.ports.readSettings();
+      const roots = this.ports.roots();
+      if (roots.length > 0) {
+        if (new Set(roots.map((root) => root.name)).size !== roots.length)
+          throw new Error("workspace folder names must be unique");
+        const foundApps: Record<string, AppSetting> = {};
+        for (const root of roots) {
+          const found = this.ports.scan(root.path, {
+            envMode: current.envMode,
+            ignorePaths: current.ignorePaths,
+            log,
+          });
+          for (const [name, foundApp] of Object.entries(found)) {
+            if (foundApps[name]) throw new Error(`duplicate federation name: ${name}`);
+            foundApps[name] = {
+              path: workspaceRelative(root.path, foundApp.folder),
+              ...(roots.length > 1 ? { workspaceFolder: root.name } : {}),
+              manifestPath: foundApp.manifestPath,
+              scripts: { start: "dev" },
+            };
+          }
         }
+        const apps = mergeMissingApps(current.apps, foundApps);
+        const changed = Object.keys(foundApps).some((name) => current.apps?.[name] == null);
+        if (changed) await this.ports.writeApps(apps);
       }
-      const apps = mergeMissingApps(current.apps, foundApps);
-      const changed = Object.keys(foundApps).some((name) => current.apps?.[name] == null);
-      if (changed) await this.ports.writeApps(apps);
+      await this.refresh("discovery", log);
+      log.event("info", "discovery.completed", {
+        apps: this.loaded.length,
+        durationMs: Date.now() - started,
+      });
+    } catch (error) {
+      log.event("error", "discovery.failed", safeError(error));
+      throw error;
     }
-    await this.refresh();
   }
 
   relabel(next: DashboardTerms): void {

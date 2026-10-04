@@ -1,3 +1,4 @@
+import { createLogger } from "../src/shared/logging.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -42,7 +43,13 @@ test("rebuild installs dependencies before generation and saves the newly built 
     exposes: [],
     shared: [],
   });
+  const logMessages: string[] = [];
+  const log = createLogger({
+    enabled: () => true,
+    write: (_level, text) => logMessages.push(text),
+  }).operation("rebuild");
   const context: RebuildContext = {
+    log,
     apps: [parent, child],
     book,
     confirmations,
@@ -128,6 +135,15 @@ test("rebuild installs dependencies before generation and saves the newly built 
   events.length = 0;
   await rebuildTypes("parent", context, operations);
   assert.equal(events.length, 0, "unchanged confirmed generations should be skipped");
+  assert.ok(
+    logMessages.some(
+      (text) =>
+        text.includes("action=skip") && text.includes("reason=sources-and-dependencies-fresh"),
+    ),
+  );
+  assert.ok(
+    logMessages.some((text) => text.includes("types.rebuild.plan") && text.includes("operation=1")),
+  );
   book.apps.clear();
 
   events.length = 0;
