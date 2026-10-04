@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { DiagnosticError } from "./diagnostic-error.ts";
 
 const TOKENS = ["folder", "name", "port", "tsconfig", "typesFolder"] as const;
 
@@ -40,7 +41,13 @@ export function runShell(command: string, cwd: string, timeoutMs: number): Promi
           child.kill("SIGTERM");
         }
       } else child.kill("SIGTERM");
-      reject(new Error(`timeout ${timeoutMs}`));
+      reject(
+        new DiagnosticError(`timeout ${timeoutMs}`, {
+          stage: "shell",
+          reason: "timeout",
+          timeoutMs,
+        }),
+      );
     }, timeoutMs);
     child.once("error", (error) => {
       if (settled) return;

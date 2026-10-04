@@ -152,3 +152,18 @@ test("row actions use navigation menus with token boundaries and no inline icons
     assert.ok(ru[key]);
   }
 });
+
+test("Show Logs is localized and available in the palette", () => {
+  const declared = pkg.contributes.commands?.find(
+    (item) => item.command === "mf-dashboard.showLogs",
+  );
+  assert.equal(declared?.title, "%command.showLogs%");
+  assert.ok(en["command.showLogs"]);
+  assert.ok(ru["command.showLogs"]);
+  assert.equal(
+    pkg.contributes.menus?.commandPalette?.some(
+      (item) => item.command === "mf-dashboard.showLogs" && item.when === "false",
+    ),
+    false,
+  );
+});

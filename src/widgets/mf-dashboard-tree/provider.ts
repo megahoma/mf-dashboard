@@ -1,3 +1,4 @@
+import { noLog, safeError, type LogContext } from "../../shared/logging.ts";
 import {
   collectProducerEvidence,
   type ProducerSnapshot,
@@ -134,6 +135,10 @@ export class MfDashboardProvider
   private timer: ReturnType<typeof setTimeout> | undefined;
   private readonly saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private disposed = false;
+  private readonly log: LogContext;
+  private observationLog: LogContext;
+  private readonly warnings = new Set<string>();
+  private statuses = new Map<string, string>();
   private readonly manifests = new ManifestDocuments();
   private readonly manifestRegistration: vscode.Disposable;
 
@@ -141,7 +146,10 @@ export class MfDashboardProvider
     termsOf: () => DashboardTerms,
     confirmations: ConfirmationStore = createConfirmationStore(),
     persistConfirmations: () => void | PromiseLike<void> = () => {},
+    log: LogContext = noLog,
   ) {
+    this.log = log;
+    this.observationLog = log;
     this.termsOf = termsOf;
     this.confirmations = confirmations;
     this.persistConfirmations = persistConfirmations;
@@ -159,10 +167,12 @@ export class MfDashboardProvider
       () => {
         this.notify();
       },
+      log,
     );
     this.session.terms = termsOf();
     this.session.typesForLink = (link) => this.cachedTypes(link);
-    this.session.beforeRefreshChange = () => {
+    this.session.beforeRefreshChange = (log) => {
+      this.observationLog = log ?? this.log;
       this.clearTypeCache();
     };
     this.session.onRefreshFailed = () => {
@@ -187,7 +197,37 @@ export class MfDashboardProvider
 
   private notify(): void {
     if (this.disposed) return;
-    if (!this.session.probeRunning) this.publishProblems();
+    if (!this.session.probeRunning) {
+      this.publishProblems();
+      const next = new Map<string, string>();
+      const visit = (rows: DashboardNode[]) => {
+        for (const row of rows) {
+          const status = row.contextValue.split(" ")[0];
+          const key = row.linkId ?? row.id;
+          if (!next.has(key) && this.statuses.get(key) !== status)
+            this.observationLog.event("info", "status.changed", {
+              app: row.name,
+              status,
+              previous: this.statuses.get(key),
+              consumer: row.linkId?.split("\0")[0],
+              alias: row.linkId?.split("\0")[1],
+            });
+          next.set(key, status);
+          visit(row.children);
+        }
+      };
+      visit(this.session.nodes());
+      this.statuses = next;
+      const warningKeys = new Set(
+        this.session.loaded.flatMap((app) =>
+          app.remotes.flatMap((remote) => [
+            `${app.name}\0${remote.alias}\0path`,
+            `${app.name}\0${remote.alias}\0read`,
+          ]),
+        ),
+      );
+      for (const key of this.warnings) if (!warningKeys.has(key)) this.warnings.delete(key);
+    }
     this.change.fire();
   }
 
@@ -225,14 +265,14 @@ export class MfDashboardProvider
     if (this.timer) clearTimeout(this.timer);
     const ms = Math.max(1000, readWorkspaceSettings().probeIntervalMs);
     this.timer = setTimeout(() => {
-      void this.refresh()
-        .catch((error: unknown) => console.error("MF dashboard probe failed", error))
+      void this.refresh("timer")
+        .catch(() => {})
         .finally(() => this.armProbe());
     }, ms);
   }
 
-  refresh(): Promise<void> {
-    return this.run(() => this.reload());
+  refresh(source = "manual"): Promise<void> {
+    return this.run(() => this.session.refresh(source));
   }
 
   discover(): Promise<void> {
@@ -265,8 +305,8 @@ export class MfDashboardProvider
     }
   }
 
-  private async reload(): Promise<void> {
-    await this.session.refresh();
+  private async reload(source: string, log: LogContext): Promise<void> {
+    await this.session.refresh(source, log);
   }
 
   relabel(next: DashboardTerms = this.termsOf()): void {
@@ -311,29 +351,44 @@ export class MfDashboardProvider
       url: remote.url,
     };
     const settings = readWorkspaceSettings();
+    const log = this.log.operation("fetch");
+    const started = Date.now();
+    log.event("info", "types.fetch.started", { app: consumer.name, alias: remote.alias });
     try {
       const installed = await installRemoteTypes(
         consumer,
         remote,
         remote.url,
         settings.refetchCommand,
+        undefined,
+        log,
       );
       this.confirmations.saveInstall(link, installed.filesFingerprint, installed.zipHash);
       await this.persistConfirmations();
       this.clearTypeCache();
-    } catch {
+      log.event("info", "types.fetch.completed", {
+        app: consumer.name,
+        durationMs: Date.now() - started,
+      });
+    } catch (error) {
+      log.event("error", "types.fetch.failed", { app: consumer.name, ...safeError(error) });
       this.session.failRefetch(linkId);
       return;
     }
-    await this.reload();
+    await this.reload("fetch", log);
   }
 
   async start(node?: DashboardNode): Promise<void> {
     if (!node) return;
     const app = this.session.loaded.find((item) => item.name === node.name);
     if (!app) return;
+    const log = this.log.operation("start");
+    log.event("info", "start.started", { app: app.name });
     const portOpen = this.session.book.apps.get(appProbeId(app.name))?.portOpen === true;
-    if (portOpen) return;
+    if (portOpen) {
+      log.event("info", "start.skipped", { app: app.name, reason: "port-open" });
+      return;
+    }
     const settings = readWorkspaceSettings();
     const scriptKey = resolveStartScript(
       {
@@ -351,13 +406,23 @@ export class MfDashboardProvider
       portOpen,
     });
     if (!invocation) {
+      log.event("warn", "start.skipped", { app: app.name, reason: "script-missing" });
       this.session.noteScriptMissing(app.name);
       return;
     }
     this.session.clearScriptMissing(app.name);
-    const terminal = vscode.window.createTerminal({ name: `MF ${app.name}`, cwd: invocation.cwd });
-    terminal.sendText(`${invocation.command} ${invocation.args.join(" ")}`);
-    if (settings.terminalReveal) terminal.show();
+    try {
+      const terminal = vscode.window.createTerminal({
+        name: `MF ${app.name}`,
+        cwd: invocation.cwd,
+      });
+      terminal.sendText(`${invocation.command} ${invocation.args.join(" ")}`);
+      if (settings.terminalReveal) terminal.show();
+      log.event("info", "start.completed", { app: app.name, result: "terminal-command-sent" });
+    } catch (error) {
+      log.event("error", "start.failed", { app: app.name, ...safeError(error) });
+      throw error;
+    }
   }
 
   async openConfig(node?: DashboardNode): Promise<void> {
@@ -381,14 +446,19 @@ export class MfDashboardProvider
   async openManifest(node?: DashboardNode): Promise<void> {
     const action = this.session.actionFor(node);
     if (!node || !action?.manifestUrl) return;
+    const log = this.log.operation("open-manifest");
+    const started = Date.now();
+    log.event("info", "manifest.open.started", { app: node.name, url: action.manifestUrl });
     let response;
     try {
       response = await createLoopbackNet().get(action.manifestUrl);
     } catch (error) {
+      log.event("error", "manifest.open.failed", { reason: "network", ...safeError(error) });
       void vscode.window.showErrorMessage(manifestFailureMessage(error));
       return;
     }
     if (!response.ok) {
+      log.event("error", "manifest.open.failed", { reason: "http", status: response.status });
       void vscode.window.showErrorMessage(
         manifestFailureMessage(new Error("http"), response.status),
       );
@@ -402,7 +472,12 @@ export class MfDashboardProvider
       );
       const document = await vscode.workspace.openTextDocument(uri);
       await vscode.window.showTextDocument(document, { preview: true });
-    } catch {
+      log.event("info", "manifest.open.completed", {
+        app: node.name,
+        durationMs: Date.now() - started,
+      });
+    } catch (error) {
+      log.event("error", "manifest.open.failed", { reason: "editor", ...safeError(error) });
       void vscode.window.showErrorMessage("MF dashboard: could not open manifest preview");
     }
   }
@@ -423,9 +498,13 @@ export class MfDashboardProvider
   private async rebuildNow(node?: DashboardNode): Promise<void> {
     if (!node) return;
     const rootName = node.name;
+    const log = this.log.operation("rebuild");
+    const started = Date.now();
+    log.event("info", "types.rebuild.started", { app: rootName });
     const settings = readWorkspaceSettings();
     try {
       await rebuildTypes(rootName, {
+        log,
         apps: this.session.loaded,
         book: this.session.book,
         confirmations: this.confirmations,
@@ -440,11 +519,16 @@ export class MfDashboardProvider
         rebuilt: (name) => this.session.clearRebuildError(name),
       });
       this.session.clearRebuildError(rootName);
+      log.event("info", "types.rebuild.completed", {
+        app: rootName,
+        durationMs: Date.now() - started,
+      });
     } catch (error) {
+      log.event("error", "types.rebuild.failed", { app: rootName, ...safeError(error) });
       this.session.noteRebuildError(rootName, errorText(error));
       return;
     }
-    await this.reload();
+    await this.reload("rebuild", log);
   }
 
   getTreeItem(element: DashboardNode): vscode.TreeItem {
@@ -482,6 +566,16 @@ export class MfDashboardProvider
     this.producerCache.clear();
   }
 
+  private warnOnce(
+    key: string,
+    event: string,
+    fields: import("../../shared/logging.ts").LogFields,
+  ): void {
+    if (this.warnings.has(key)) return;
+    this.warnings.add(key);
+    this.observationLog.event("warn", event, fields);
+  }
+
   private observe(link: RemoteLink): ReturnType<typeof describeLink> {
     const consumer = this.session.loaded.find((app) => app.name === link.consumer);
     const producer = this.session.loaded.find(
@@ -498,6 +592,7 @@ export class MfDashboardProvider
           this.session.loaded,
           this.session.book,
           this.confirmations,
+          this.observationLog,
         );
         this.producerCache.set(producer.name, evidence);
       }
@@ -506,31 +601,63 @@ export class MfDashboardProvider
     if (consumer.consumeTypes) {
       try {
         destination = refetchTarget(consumer.folder, link.alias, consumer.typesFolder);
-      } catch {
-        /* Invalid targets carry no installed evidence. */
+        this.warnings.delete(`${consumer.name}\0${link.alias}\0path`);
+      } catch (error) {
+        this.warnOnce(`${consumer.name}\0${link.alias}\0path`, "types.path.invalid", {
+          consumer: consumer.name,
+          alias: link.alias,
+          ...safeError(error),
+        });
       }
     }
     let installed: InstalledEvidence;
     try {
-      installed = readInstalledEvidence(destination);
-    } catch {
+      installed = readInstalledEvidence(destination, this.observationLog);
+      if (installed.filesFingerprint === "")
+        this.warnOnce(`${consumer.name}\0${link.alias}\0read`, "types.installed.unreadable", {
+          consumer: consumer.name,
+          alias: link.alias,
+        });
+      if (installed.filesFingerprint !== "")
+        this.warnings.delete(`${consumer.name}\0${link.alias}\0read`);
+    } catch (error) {
+      this.warnOnce(`${consumer.name}\0${link.alias}\0read`, "types.installed.unreadable", {
+        consumer: consumer.name,
+        alias: link.alias,
+        ...safeError(error),
+      });
       installed = { folderExists: true, filesFingerprint: "" };
     }
-    return describeLink({
-      consumeTypes: consumer.consumeTypes,
-      producer: producer
-        ? { generateTypes: producer.generateTypes, sourceSavedAt: evidence?.sourceSavedAt ?? null }
-        : null,
-      producerZipMtime: evidence?.zipMtime ?? null,
-      linkZipHash: probe?.zipHash ?? null,
-      linkZipReachable: probe?.zipUrl != null && probe.zipHash != null,
-      linkUrl: link.url,
-      generationConfirmed: evidence?.generationConfirmed ?? false,
-      installConfirmation: this.confirmations.install(link),
-      checkedAt: Date.now(),
-      typesSettleMs: readWorkspaceSettings().typesSettleMs,
-      installed,
-    });
+    return describeLink(
+      {
+        consumeTypes: consumer.consumeTypes,
+        producer: producer
+          ? {
+              generateTypes: producer.generateTypes,
+              sourceSavedAt: evidence?.sourceSavedAt ?? null,
+            }
+          : null,
+        producerZipMtime: evidence?.zipMtime ?? null,
+        linkZipHash: probe?.zipHash ?? null,
+        linkZipReachable: probe?.zipUrl != null && probe.zipHash != null,
+        linkUrl: link.url,
+        generationConfirmed: evidence?.generationConfirmed ?? false,
+        installConfirmation: this.confirmations.install(link),
+        checkedAt: Date.now(),
+        typesSettleMs: readWorkspaceSettings().typesSettleMs,
+        installed,
+      },
+      {
+        operation: (source) => this.observationLog.operation(source),
+        event: (level, event, fields) =>
+          this.observationLog.event(level, event, () => ({
+            consumer: link.consumer,
+            alias: link.alias,
+            remote: link.remoteName,
+            ...(typeof fields === "function" ? fields() : fields),
+          })),
+      },
+    );
   }
 }
 

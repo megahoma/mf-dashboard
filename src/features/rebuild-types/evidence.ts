@@ -1,3 +1,4 @@
+import { noLog, type LogContext } from "../../shared/logging.ts";
 import { appProbeId, type LocalApp, type ProbeBook } from "../../entities/microfrontend/index.ts";
 import {
   sourceIdentity,
@@ -33,9 +34,10 @@ export function collectProducerEvidence(
   apps: readonly LocalApp[],
   book: ProbeBook,
   confirmations: ConfirmationStore,
+  log: LogContext = noLog,
 ): ProducerSnapshot {
   const probe = book.apps.get(appProbeId(app.name));
-  const sources = sourceIdentity(app.folder, app.tsconfig, app.typesFolder);
+  const sources = sourceIdentity(app.folder, app.tsconfig, app.typesFolder, log);
   const sourceFingerprint = sources.fingerprint;
   const { dependencies, dependencyZipHashes } = dependencyEvidence(app, apps, book);
   const generationConfirmed =

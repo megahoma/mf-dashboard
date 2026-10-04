@@ -51,7 +51,7 @@ export function createLoopbackNet(): Net {
           json = null;
         }
       }
-      return { ok: true, json, body, lastModified };
+      return { ok: true, status: response.status, json, body, lastModified };
     },
   };
 }

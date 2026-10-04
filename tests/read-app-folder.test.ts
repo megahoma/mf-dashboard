@@ -1,3 +1,4 @@
+import { createLogger } from "../src/shared/logging.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -234,4 +235,30 @@ test("known app paths cannot leave the workspace through traversal or symlinks",
     )[0]?.name,
     "widget",
   );
+});
+
+test("cache diagnostics observe changed reexports without reading unchanged bytes", (t) => {
+  const { roots, settings, config, app } = fixture(t);
+  const messages: string[] = [];
+  const log = createLogger({ enabled: () => true, write: (_level, text) => messages.push(text) });
+  const cache = createAppParseCache(log);
+  fs.writeFileSync(path.join(app, "package.json"), "{}");
+  rewrite(
+    config,
+    'import { federation } from "./barrel"; createModuleFederationConfig(federation());',
+  );
+  const barrel = path.join(app, "barrel.ts");
+  rewrite(barrel, 'export { federation } from "./one";');
+  rewrite(path.join(app, "one.ts"), 'export function federation() { return { name: "widget" }; }');
+  rewrite(path.join(app, "two.ts"), 'export function federation() { return { name: "renamed" }; }');
+  const load = () => loadKnownApps(roots, settings, "development", [], cache, log)[0];
+  assert.equal(load()?.name, "widget");
+  const read = t.mock.method(fs, "readFileSync");
+  assert.equal(load()?.name, "widget");
+  assert.equal(read.mock.callCount(), 0);
+  rewrite(barrel, 'export { federation } from "./two";');
+  assert.equal(load()?.name, "renamed");
+  assert.equal(messages.filter((text) => text.startsWith("config.cache.miss")).length, 2);
+  assert.equal(messages.filter((text) => text.startsWith("config.cache.hit")).length, 1);
+  assert.ok(messages.some((text) => text.includes("reason=import-dependency-changed")));
 });

@@ -28,5 +28,6 @@
   "command.openConfig": "Открыть конфиг",
   "command.openProducerConfig": "Открыть конфиг производителя",
   "command.revealTypes": "Показать типы",
-  "command.openManifest": "Открыть манифест"
+  "command.openManifest": "Открыть манифест",
+  "command.showLogs": "MF Dashboard: Показать логи"
 }

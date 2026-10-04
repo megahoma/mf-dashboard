@@ -28,5 +28,6 @@
   "command.openConfig": "Open config",
   "command.openProducerConfig": "Open producer config",
   "command.revealTypes": "Reveal types",
-  "command.openManifest": "Open manifest"
+  "command.openManifest": "Open manifest",
+  "command.showLogs": "MF Dashboard: Show Logs"
 }

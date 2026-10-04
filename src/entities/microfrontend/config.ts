@@ -1,3 +1,4 @@
+import { noLog, type LogContext } from "../../shared/logging.ts";
 import path from "node:path";
 import { parseProgram, objectAst, prop, type Ast, type Program } from "./syntax.ts";
 import { loadCallee } from "./config-imports.ts";
@@ -39,6 +40,7 @@ export function discoverProgram(
   filePath: string,
   env: Record<string, string>,
   dependencies?: Set<string>,
+  log: LogContext = noLog,
 ): LocalApp | null {
   let options = parsed.pluginObject?.k === "obj" ? parsed.pluginObject : null;
   let scope = parsed.bindings;
@@ -46,7 +48,7 @@ export function discoverProgram(
   // defines the federation options, not a rewritten copy of it.
   let configFile = filePath;
   if (!options && parsed.pluginCallee) {
-    const loaded = loadCallee(filePath, parsed, parsed.pluginCallee, dependencies);
+    const loaded = loadCallee(filePath, parsed, parsed.pluginCallee, dependencies, log);
     if (loaded?.options.k === "obj") {
       options = loaded.options;
       scope = loaded.bindings;

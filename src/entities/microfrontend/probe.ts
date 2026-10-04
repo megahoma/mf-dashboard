@@ -1,3 +1,4 @@
+import { noLog, safeError, type LogContext } from "../../shared/logging.ts";
 import { localManifestUrl, isHttpUrl } from "../../shared/urls.ts";
 import { createHash } from "node:crypto";
 import type { LocalApp } from "./discover.ts";
@@ -63,6 +64,7 @@ export interface ProbeCycleInput {
   apps: readonly LocalApp[];
   links: readonly RemoteLink[];
   extraManifestUrls: readonly string[];
+  log?: LogContext;
 }
 
 const MONTHS: Record<string, number> = {
@@ -172,11 +174,25 @@ export function createProbeCycle(
   return {
     start(input) {
       if (inflight) return Promise.resolve(false);
-      const cache: ZipCache = { book, cycle: new Map(), seen: new Set() };
-      const manifest = (url: string | null) => probeManifest(url, net, cache);
+      const log = input.log ?? noLog;
+      const started = Date.now();
+      const cache: ZipCache = {
+        book,
+        cycle: new Map(),
+        seen: new Set(),
+        log,
+        manifestRequests: 0,
+        zipRequests: 0,
+      };
+      const manifest = (url: string | null) => probeManifest(url, net, cache, log);
+      log.event("debug", "probe.started", {
+        apps: input.apps.length,
+        links: input.links.length,
+        extras: input.extraManifestUrls.length,
+      });
       const run = (async () => {
         for (const app of input.apps)
-          putAppResult(book, app.name, await probeConnectedApp(app, net, manifest));
+          putAppResult(book, app.name, await probeConnectedApp(app, net, manifest, log));
         for (const link of input.links)
           putLinkResult(book, { link, ...(await manifest(link.url)) });
         for (const url of input.extraManifestUrls)
@@ -185,9 +201,23 @@ export function createProbeCycle(
           if (!cache.seen.has(url)) book.zips.delete(url);
         }
       })();
-      inflight = run.finally(() => {
-        inflight = null;
-      });
+      inflight = run
+        .then(
+          () => {
+            log.event("debug", "probe.completed", {
+              durationMs: Date.now() - started,
+              manifestRequests: cache.manifestRequests,
+              zipRequests: cache.zipRequests,
+            });
+          },
+          (error: unknown) => {
+            log.event("debug", "probe.failed", safeError(error));
+            throw error;
+          },
+        )
+        .finally(() => {
+          inflight = null;
+        });
       return inflight.then(() => true);
     },
   };
@@ -202,9 +232,17 @@ async function probeConnectedApp(
   app: LocalApp,
   net: Net,
   manifest: (url: string) => Promise<ArtifactProbe>,
+  log: LogContext = noLog,
 ): Promise<ProbeResult> {
   if (app.port == null) return emptyResult(false);
+  const started = Date.now();
   const opened = await callNet(net.connect(app.port));
+  log.event("trace", "port.checked", {
+    app: app.name,
+    port: app.port,
+    open: opened === true,
+    durationMs: Date.now() - started,
+  });
   const portOpen = opened === true;
   if (!portOpen || !app.manifest) return emptyResult(portOpen);
   return { portOpen, ...(await manifest(localManifestUrl(app.port, app.manifestPath))) };
@@ -246,18 +284,53 @@ interface ZipCache {
   book: ProbeBook;
   cycle: Map<string, ZipFact>;
   seen: Set<string>;
+  log: LogContext;
+  manifestRequests: number;
+  zipRequests: number;
 }
 
 async function probeZip(url: string, net: Net, cache?: ZipCache): Promise<ZipProbe | null> {
   cache?.seen.add(url);
   const cached = cache?.cycle.get(url);
-  if (cached) return cached;
+  if (cached) {
+    cache?.log.event("trace", "zip.reused", { url, reason: "cycle-cache" });
+    return cached;
+  }
   const previous = cache?.book.zips.get(url);
-  const zip = await callNet(
-    net.get(url, previous?.zipMtime != null ? { ifModifiedSince: previous.zipMtime } : undefined),
-  );
+  const started = Date.now();
+  cache?.log.event("trace", "zip.request", { url, conditional: previous?.zipMtime != null });
+  if (cache) cache.zipRequests++;
+  let zip: Awaited<ReturnType<Net["get"]>>;
+  try {
+    zip = await withTimeout(
+      net.get(url, previous?.zipMtime != null ? { ifModifiedSince: previous.zipMtime } : undefined),
+      REQUEST_TIMEOUT_MS,
+    );
+  } catch (error) {
+    cache?.log.event("trace", "zip.failed", {
+      url,
+      reason:
+        error instanceof Error && (error.name === "TimeoutError" || error.message === "timeout")
+          ? "timeout"
+          : "network",
+      durationMs: Date.now() - started,
+      ...safeError(error),
+    });
+    return null;
+  }
+  cache?.log.event("trace", "zip.response", {
+    url,
+    status: zip?.status,
+    ok: zip?.ok ?? false,
+    bytes: zip?.body?.byteLength ?? 0,
+    durationMs: Date.now() - started,
+  });
   if (zip?.notModified || zip?.status === 304) {
-    if (!previous || previous.zipMtime == null) return null;
+    if (!previous || previous.zipMtime == null) {
+      cache?.log.event("trace", "zip.skipped", { url, reason: "304-without-prior-hash" });
+      return null;
+    }
+    cache?.log.event("trace", "zip.reused", { url, reason: "not-modified", reusedHash: true });
     cache?.cycle.set(url, previous);
     return previous;
   }
@@ -278,17 +351,37 @@ async function probeManifest(
   url: string | null,
   net: Net,
   cache?: ZipCache,
+  log: LogContext = noLog,
 ): Promise<ArtifactProbe> {
   const blank = emptyArtifact();
-  if (!isHttpUrl(url)) return blank;
+  if (!isHttpUrl(url)) {
+    log.event("trace", "manifest.skipped", { reason: "invalid-url" });
+    return blank;
+  }
+  const started = Date.now();
+  log.event("trace", "manifest.request", { url });
   let response: Awaited<ReturnType<Net["get"]>>;
   try {
+    if (cache) cache.manifestRequests++;
     response = await withTimeout(net.get(url), REQUEST_TIMEOUT_MS);
   } catch (error) {
     const timeout =
       error instanceof Error && (error.name === "TimeoutError" || error.message === "timeout");
+    log.event("trace", "manifest.failed", {
+      url,
+      reason: timeout ? "timeout" : "network",
+      durationMs: Date.now() - started,
+      ...safeError(error),
+    });
     return { ...blank, requestFailure: timeout ? "timeout" : "network" };
   }
+  log.event("trace", "manifest.response", {
+    url,
+    status: response.status,
+    ok: response.ok,
+    durationMs: Date.now() - started,
+    validJson: response.json != null,
+  });
   if (!response.ok)
     return {
       ...blank,
@@ -297,7 +390,13 @@ async function probeManifest(
   const buildVersion = readBuildVersion(response.json);
   const modules = readManifestModules(response.json);
   const zipUrl = resolveZipUrl(url, response.json);
-  if (!zipUrl) return { ...blank, manifestReachable: true, buildVersion, ...modules };
+  if (!zipUrl) {
+    log.event("trace", "zip.skipped", {
+      url,
+      reason: response.json == null ? "invalid-json" : "missing-or-invalid-types-metadata",
+    });
+    return { ...blank, manifestReachable: true, buildVersion, ...modules };
+  }
   const zip = await probeZip(zipUrl, net, cache);
   if (!zip) return { ...blank, manifestReachable: true, buildVersion, zipUrl, ...modules };
   return {

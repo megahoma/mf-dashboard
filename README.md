@@ -215,3 +215,11 @@ Brace tokens are replaced before the command runs. Each value is inserted as one
 **Start** runs the script of one stopped app from `mf-dashboard.apps`. Apps outside that list are left alone.
 
 The extension does not open a browser tab or the VS Code simple browser. A script that passes a flag such as `--open` may still open one itself.
+
+## Diagnostic logs
+
+Open the Command Palette → **MF Dashboard: Show Logs**, or select **MF Dashboard** in the Output panel. The channel does not open automatically.
+
+Use the built-in **Developer: Set Log Level...** command to select the **MF Dashboard** channel and set its level to **Debug** or **Trace**, then reproduce the problem. Info records user actions and status changes; Debug records probe cycles, cache decisions, and status details; Trace records port checks, HTTP responses, and ZIP reuse, including 304 responses. The `operation` field links events from the same operation. Start confirms that a command was sent to the terminal; it does not confirm that the server started successfully.
+
+Logs remain local. They exclude environment variable values, source code, configuration contents, manifest and ZIP contents, shell commands, and command output. URLs have their userinfo, query, and fragment removed; errors retain their name, code, and safe stack frames. App names and file paths may appear, so review the logs before sharing them manually.
