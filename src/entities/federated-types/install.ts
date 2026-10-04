@@ -7,6 +7,7 @@ import path from "node:path";
 import { filesFingerprint } from "../../shared/fingerprint.ts";
 import { readLimitedBody } from "../../shared/http-body.ts";
 import { createKeyedLock } from "../../shared/queue.ts";
+import { DiagnosticError } from "../../shared/diagnostic-error.ts";
 
 const destinationLock = createKeyedLock();
 
@@ -86,14 +87,25 @@ async function checkInstalledArchive(input: InstallTypesInput): Promise<InstallT
   const loaded = await loadZip(input);
   const destination = path.resolve(input.destination);
   if (!fs.existsSync(destination) || !fs.statSync(destination).isDirectory()) {
-    throw new Error("unzip: types directory is missing");
+    throw new DiagnosticError("unzip: types directory is missing", {
+      stage: "destination",
+      reason: "directory-missing",
+    });
   }
   assertTreeInside(destination);
   const files = readTree(destination);
-  if (files.length === 0) throw new Error("unzip: types directory is empty");
+  if (files.length === 0)
+    throw new DiagnosticError("unzip: types directory is empty", {
+      stage: "destination",
+      reason: "directory-empty",
+    });
   const fingerprint = filesFingerprint(files);
   const extracted = await fingerprintArchive(loaded.archive);
-  if (fingerprint !== extracted) throw new Error("unzip: installed files do not match the archive");
+  if (fingerprint !== extracted)
+    throw new DiagnosticError("unzip: installed files do not match the archive", {
+      stage: "destination",
+      reason: "fingerprint-mismatch",
+    });
   return { zipHash: loaded.zipHash, filesFingerprint: fingerprint };
 }
 
@@ -102,21 +114,46 @@ async function loadZip(
 ): Promise<{ archive: ZipArchive; zipHash: string }> {
   const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const fetchImpl = input.fetchImpl ?? fetch;
+  const signal = AbortSignal.timeout(timeoutMs);
   let response: Response;
   try {
-    response = await fetchImpl(input.url, { signal: AbortSignal.timeout(timeoutMs) });
+    response = await fetchImpl(input.url, { signal });
   } catch (error) {
-    throw new Error(`network: ${error instanceof Error ? error.message : error}`, { cause: error });
+    throw new DiagnosticError(
+      `network: ${error instanceof Error ? error.message : error}`,
+      {
+        stage: "archive",
+        reason: signal.aborted ? "timeout" : "network",
+        timeoutMs: signal.aborted ? timeoutMs : undefined,
+      },
+      { cause: error },
+    );
   }
-  if (!response.ok) throw new Error(`network: status ${response.status} for ${input.url}`);
+  if (!response.ok)
+    throw new DiagnosticError(`network: status ${response.status} for ${input.url}`, {
+      stage: "archive",
+      reason: "http-status",
+      status: response.status,
+    });
   let buffer: Buffer;
   try {
     buffer = Buffer.from(await readLimitedBody(response));
   } catch (error) {
-    throw new Error(`network: ${error instanceof Error ? error.message : error}`, { cause: error });
+    throw new DiagnosticError(
+      `network: ${error instanceof Error ? error.message : error}`,
+      {
+        stage: "archive",
+        reason: signal.aborted ? "timeout" : "network",
+        timeoutMs: signal.aborted ? timeoutMs : undefined,
+      },
+      { cause: error },
+    );
   }
   if (buffer.length < 4 || buffer[0] !== 0x50 || buffer[1] !== 0x4b) {
-    throw new Error("unzip: response is not a zip archive");
+    throw new DiagnosticError("unzip: response is not a zip archive", {
+      stage: "archive",
+      reason: "invalid-zip",
+    });
   }
   let archive: ZipArchive;
   try {
@@ -223,8 +260,17 @@ export function readTree(dir: string): { name: string; bytes: Uint8Array }[] {
 }
 
 function unzipError(error: unknown): Error {
-  if (error instanceof Error && error.message.startsWith("unzip:")) return error;
-  return new Error(`unzip: ${error instanceof Error ? error.message : error}`);
+  if (error instanceof DiagnosticError) return error;
+  if (error instanceof Error && error.message.startsWith("unzip:"))
+    return new DiagnosticError(
+      error.message,
+      { stage: "archive", reason: "archive-invalid" },
+      { cause: error },
+    );
+  return new DiagnosticError(`unzip: ${error instanceof Error ? error.message : error}`, {
+    stage: "archive",
+    reason: "archive-invalid",
+  });
 }
 
 function sha256(bytes: Buffer): string {

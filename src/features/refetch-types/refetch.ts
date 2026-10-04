@@ -6,6 +6,7 @@ import {
   type InstallTypesResult,
 } from "../../entities/federated-types/index.ts";
 import { fillTemplate } from "../../shared/shell.ts";
+import { DiagnosticError } from "../../shared/diagnostic-error.ts";
 
 const REFETCH_TIMEOUT_MS = 60_000;
 
@@ -75,7 +76,12 @@ export async function refetchInstalled(input: {
   const run = input.runCommand;
   if (!run) throw new Error("refetch command is not runnable");
   const code = await run(command, input.consumerFolder, timeoutMs);
-  if (code !== 0) throw new Error(`refetch command exited ${code}`);
+  if (code !== 0)
+    throw new DiagnosticError(`refetch command exited ${code}`, {
+      stage: "shell",
+      reason: "shell-exit",
+      exitCode: code,
+    });
   return confirmInstalledArchive({
     url: input.url,
     destination,
@@ -94,22 +100,39 @@ function assertAlias(alias: string): void {
     alias.includes("\0") ||
     path.isAbsolute(alias)
   ) {
-    throw new Error(`unsafe remote alias: ${alias}`);
+    throw new DiagnosticError(`unsafe remote alias: ${alias}`, {
+      stage: "destination",
+      reason: "unsafe-alias",
+    });
   }
 }
 
 function assertRelativeFolder(typesFolder: string): void {
   if (typesFolder === "" || typesFolder.includes("\0") || path.isAbsolute(typesFolder)) {
-    throw new Error("unsafe types folder");
+    throw new DiagnosticError("unsafe types folder", {
+      stage: "destination",
+      reason: "unsafe-types-folder",
+    });
   }
-  if (typesFolder.split(/[\\/]/).includes("..")) throw new Error("unsafe types folder");
+  if (typesFolder.split(/[\\/]/).includes(".."))
+    throw new DiagnosticError("unsafe types folder", {
+      stage: "destination",
+      reason: "path-escape",
+    });
 }
 
 function assertInside(root: string, target: string): void {
   const rel = path.relative(path.resolve(root), path.resolve(target));
-  if (rel === "..") throw new Error("types path escapes the consumer");
+  if (rel === "..")
+    throw new DiagnosticError("types path escapes the consumer", {
+      stage: "destination",
+      reason: "path-escape",
+    });
   if (rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel))
-    throw new Error("types path escapes the consumer");
+    throw new DiagnosticError("types path escapes the consumer", {
+      stage: "destination",
+      reason: "path-escape",
+    });
 }
 
 function assertNoSymlinkEscape(root: string, target: string): void {
@@ -117,7 +140,10 @@ function assertNoSymlinkEscape(root: string, target: string): void {
   const rootReal = fs.realpathSync(root);
   const rel = path.relative(path.resolve(root), path.resolve(target));
   if (rel.startsWith("..") || path.isAbsolute(rel))
-    throw new Error("types path escapes the consumer");
+    throw new DiagnosticError("types path escapes the consumer", {
+      stage: "destination",
+      reason: "path-escape",
+    });
   let current = path.resolve(root);
   for (const part of rel.split(path.sep)) {
     if (part === "" || part === ".") continue;
@@ -126,7 +152,10 @@ function assertNoSymlinkEscape(root: string, target: string): void {
     const real = fs.realpathSync(current);
     const fromRoot = path.relative(rootReal, real);
     if (fromRoot === ".." || fromRoot.startsWith(`..${path.sep}`) || path.isAbsolute(fromRoot)) {
-      throw new Error("types path escapes the consumer");
+      throw new DiagnosticError("types path escapes the consumer", {
+        stage: "destination",
+        reason: "path-escape",
+      });
     }
   }
 }

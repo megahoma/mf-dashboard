@@ -1,3 +1,5 @@
+import { diagnosticFields } from "./diagnostic-error.ts";
+
 export type LogLevel = "trace" | "debug" | "info" | "warn" | "error";
 export type LogFields = Readonly<Record<string, string | number | boolean | null | undefined>>;
 
@@ -42,7 +44,7 @@ function singleLine(value: string): string {
 }
 
 // Messages and causes can contain commands, response bodies and credentials.
-// Keep only error identifiers and V8 frames with a source location.
+// Keep only error identifiers, safe source frames and explicit diagnostic fields.
 export function safeError(error: unknown): LogFields {
   try {
     if (!(error instanceof Error)) return { error: "unknown" };
@@ -63,7 +65,7 @@ export function safeError(error: unknown): LogFields {
       .slice(0, 4)
       .map((frame) => frame.trim())
       .join("; ");
-    return { error: name, code, stack: stack || undefined };
+    return { error: name, code, stack: stack || undefined, ...diagnosticFields(error) };
   } catch {
     return { error: "unknown" };
   }

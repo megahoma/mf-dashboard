@@ -1,4 +1,5 @@
 import { noLog, safeError, type LogContext } from "../../shared/logging.ts";
+import { DiagnosticError } from "../../shared/diagnostic-error.ts";
 import type { LocalApp } from "../../entities/microfrontend/index.ts";
 import { runShell } from "../../shared/shell.ts";
 import { manifestZipUrl } from "../rebuild-types/zip-url.ts";
@@ -34,6 +35,8 @@ export async function installRemoteTypes(
       reason: "manifest",
       ...safeError(cause),
     });
+    if (cause instanceof DiagnosticError)
+      throw new DiagnosticError(`unreachable dependency: ${remote.name}`, cause.details, { cause });
     throw new Error(`unreachable dependency: ${remote.name}`, { cause });
   }
   try {
