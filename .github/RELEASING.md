@@ -21,7 +21,9 @@ Set a category label on each PR before releasing:
 PRs without a matching label appear under Other Changes. GitHub omits empty
 categories and adds a link to the full changelog.
 
-The workflow creates release notes with `gh release create --generate-notes`
-and uploads the VSIX in a separate step. Upload failures fail the workflow.
+The workflow creates a draft with `gh release create --draft --generate-notes`,
+uploads the VSIX, and only then publishes the release. Upload failures fail
+the workflow and leave a new release as a draft.
 On a rerun, the existing release notes are preserved and the same-named VSIX
-is replaced with `gh release upload --clobber`.
+is replaced with `gh release upload --clobber`. An existing draft is published
+after a successful upload; an already published release stays published.
