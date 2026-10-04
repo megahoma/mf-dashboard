@@ -1,5 +1,7 @@
 .vscode/**
 .github/**
+.superpowers/**
+.tmp/**
 src/**
 tests/**
 docs/**
