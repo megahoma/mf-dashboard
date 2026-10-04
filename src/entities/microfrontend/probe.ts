@@ -300,7 +300,7 @@ async function probeZip(url: string, net: Net, cache?: ZipCache): Promise<ZipPro
   const started = Date.now();
   cache?.log.event("trace", "zip.request", { url, conditional: previous?.zipMtime != null });
   if (cache) cache.zipRequests++;
-  let zip: Awaited<ReturnType<Net["get"]>> | null = null;
+  let zip: Awaited<ReturnType<Net["get"]>>;
   try {
     zip = await withTimeout(
       net.get(url, previous?.zipMtime != null ? { ifModifiedSince: previous.zipMtime } : undefined),
@@ -316,6 +316,7 @@ async function probeZip(url: string, net: Net, cache?: ZipCache): Promise<ZipPro
       durationMs: Date.now() - started,
       ...safeError(error),
     });
+    return null;
   }
   cache?.log.event("trace", "zip.response", {
     url,

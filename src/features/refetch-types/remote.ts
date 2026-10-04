@@ -53,6 +53,14 @@ export async function installRemoteTypes(
           code,
           durationMs: Date.now() - started,
         });
+        if (code !== 0)
+          log.event("error", "shell.failed", {
+            app: consumer.name,
+            kind: "fetch",
+            reason: "shell-exit",
+            exitCode: code,
+            durationMs: Date.now() - started,
+          });
         return code;
       },
     });

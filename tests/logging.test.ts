@@ -2,6 +2,8 @@ import { describeLink } from "../src/entities/federated-types/observe.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createLogger, safeError, safeUrl } from "../src/shared/logging.ts";
+import { DashboardSession } from "../src/widgets/mf-dashboard-tree/session.ts";
+import { localApp } from "./support/app.ts";
 import {
   createProbeBook,
   createProbeCycle,
@@ -143,11 +145,107 @@ test("probe logging preserves requests, retries and conditional ZIP reuse", asyn
   assert.deepEqual(broken.requests, quiet.requests);
   assert.deepEqual(logged.fact, quiet.fact);
   assert.deepEqual(broken.fact, quiet.fact);
+  assert.equal(logged.messages.filter((message) => message.includes("zip.failed")).length, 1);
+  assert.equal(
+    logged.messages.filter((message) => message.includes("zip.response")).length,
+    2,
+    "only successful HTTP responses produce zip.response (200 and 304)",
+  );
   assert.ok(logged.messages.some((message) => message.includes("reason=cycle-cache")));
   assert.ok(logged.messages.some((message) => message.includes("reason=not-modified")));
   assert.ok(
     logged.messages.some((message) => message.includes("manifestRequests=3 zipRequests=1")),
   );
+});
+
+test("timer failures are visible at Info with safe duplicate-name details and preserve the book", async () => {
+  const messages: string[] = [];
+  const log = createLogger({
+    enabled: (level) => ["info", "warn", "error"].includes(level),
+    write: (level, text) => messages.push(`${level} ${text}`),
+  });
+  const book = createProbeBook();
+  book.zips.set("http://localhost/old.zip", { zipHash: "old", zipMtime: 1000 });
+  let duplicate = true;
+  const app = localApp("widget", "/unused");
+  const session = new DashboardSession(
+    {
+      readSettings: () => ({
+        apps: {},
+        envMode: "development",
+        ignorePaths: [],
+        extraManifestUrls: [],
+        structure: "tree",
+      }),
+      roots: () => [{ name: "workspace", path: "/unused" }],
+      loadKnown: () => (duplicate ? [app, app] : [app]),
+      async probe() {
+        throw new Error("SECRET response body");
+      },
+      scan: () => ({}),
+      writeApps() {},
+    },
+    book,
+    () => {},
+    log,
+  );
+  await assert.rejects(() => session.refresh("timer"), /duplicate federation name/);
+  assert.equal(messages.length, 1);
+  assert.match(messages[0], /error refresh.failed operation=1 source=timer/);
+  assert.match(messages[0], /reason=duplicate-federation-name app=widget/);
+  duplicate = false;
+  await assert.rejects(() => session.refresh("timer"), /SECRET/);
+  assert.equal(messages.length, 2);
+  assert.match(messages[1], /error refresh.failed operation=2 source=timer/);
+  assert.equal(messages.join(" ").includes("SECRET"), false);
+  assert.deepEqual(book.zips.get("http://localhost/old.zip"), { zipHash: "old", zipMtime: 1000 });
+  assert.deepEqual(session.loaded, []);
+  assert.equal(session.probeRunning, false);
+});
+
+test("discovery reports duplicate workspace and federation names without writing settings", async () => {
+  for (const duplicateRoots of [true, false]) {
+    const messages: string[] = [];
+    const log = createLogger({
+      enabled: (level) => ["info", "warn", "error"].includes(level),
+      write: (_level, text) => messages.push(text),
+    });
+    const session = new DashboardSession(
+      {
+        readSettings: () => ({
+          apps: {},
+          envMode: "development",
+          ignorePaths: [],
+          extraManifestUrls: [],
+          structure: "tree",
+        }),
+        roots: () => [
+          { name: "one", path: "/one" },
+          { name: duplicateRoots ? "one" : "two", path: "/two" },
+        ],
+        scan: (root) => ({ widget: localApp("widget", `${root}/widget`) }),
+        loadKnown: () => assert.fail("invalid discovery must not load apps"),
+        probe: () => assert.fail("invalid discovery must not probe"),
+        writeApps: () => assert.fail("invalid discovery must not write settings"),
+      },
+      createProbeBook(),
+      () => {},
+      log,
+    );
+    await assert.rejects(
+      () => session.discover(),
+      duplicateRoots ? /workspace folder names must be unique/ : /duplicate federation name/,
+    );
+    const failure = messages.find((text) => text.startsWith("discovery.failed"));
+    assert.ok(failure);
+    assert.match(
+      failure,
+      duplicateRoots
+        ? /reason=duplicate-workspace-folder-name/
+        : /reason=duplicate-federation-name app=widget/,
+    );
+    assert.deepEqual(session.loaded, []);
+  }
 });
 
 test("type diagnostics explain fingerprint mismatch without recording evidence bytes", () => {

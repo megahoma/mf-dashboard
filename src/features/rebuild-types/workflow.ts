@@ -117,7 +117,16 @@ export async function rebuildTypes(
         code,
         durationMs: Date.now() - started,
       });
-      if (code !== 0) throw new Error(`rebuild command exited ${code}`);
+      if (code !== 0) {
+        log.event("error", "shell.failed", {
+          app: app.name,
+          kind: "rebuild",
+          reason: "shell-exit",
+          exitCode: code,
+          durationMs: Date.now() - started,
+        });
+        throw new Error(`rebuild command exited ${code}`);
+      }
       if (app.port == null) throw new Error("generated zip is not published by a manifest");
       zipHash = (
         await operations.hashManifestZip({

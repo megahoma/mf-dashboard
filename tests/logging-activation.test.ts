@@ -45,6 +45,10 @@ test("activation owns one log channel and only Show Logs opens it", async () => 
     await stub.registeredCommands.get("mf-dashboard.refresh")?.();
     assert.equal(channel.shown, 1, "refresh does not open Output");
     assert.ok(channel.messages.some((text) => text.includes("probe.started")));
+    channel.logLevel = stub.LogLevel.Off;
+    const count = channel.messages.length;
+    await stub.registeredCommands.get("mf-dashboard.refresh")?.();
+    assert.equal(channel.messages.length, count, "Off prevents writes to the channel");
   } finally {
     for (const subscription of subscriptions.reverse()) subscription.dispose();
   }

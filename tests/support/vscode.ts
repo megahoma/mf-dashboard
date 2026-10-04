@@ -63,7 +63,7 @@ export const workspace = {
     return { uri };
   },
 };
-export const LogLevel = { Trace: 1, Debug: 2, Info: 3, Warning: 4, Error: 5, Off: 6 };
+export const LogLevel = { Trace: 1, Debug: 2, Info: 3, Warning: 4, Error: 5, Off: 0 };
 export const ConfigurationTarget = { Workspace: 2 };
 export const l10n = { t: (text: string) => text };
 export const outputChannels: {

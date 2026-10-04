@@ -171,7 +171,13 @@ test("custom rebuild checks the published archive and never confirms a failed co
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const app = localApp("app", root);
   const confirmations = createConfirmationStore();
+  const messages: string[] = [];
+  const log = createLogger({
+    enabled: (level) => ["info", "warn", "error"].includes(level),
+    write: (_level, text) => messages.push(text),
+  }).operation("rebuild");
   const context: RebuildContext = {
+    log,
     apps: [app],
     book: createProbeBook(),
     confirmations,
@@ -222,6 +228,45 @@ test("custom rebuild checks the published archive and never confirms a failed co
   );
   assert.equal(checked, 1);
   assert.equal(confirmations.generation("app")?.zipHash, "published");
+  assert.equal(messages.length, 1);
+  assert.match(messages[0], /shell.failed operation=1 source=rebuild/);
+  assert.match(messages[0], /kind=rebuild reason=shell-exit exitCode=3/);
+  assert.equal(messages[0].includes("build 'app'"), false);
+});
+
+test("failed fetch commands expose the exit code at Info without logging the command or error message", async () => {
+  const messages: string[] = [];
+  const log = createLogger({
+    enabled: (level) => ["info", "warn", "error"].includes(level),
+    write: (_level, text) => messages.push(text),
+  }).operation("fetch");
+  await assert.rejects(
+    () =>
+      installRemoteTypes(
+        localApp("shell", "/shell"),
+        { alias: "widget", name: "widget", url: "https://example.com/manifest.json" },
+        "https://example.com/manifest.json",
+        "fetch SECRET {typesFolder}",
+        {
+          async manifestZipUrl() {
+            return "https://example.com/types.zip";
+          },
+          async refetchInstalled(input) {
+            assert.ok(input.runCommand);
+            const code = await input.runCommand(input.command, input.consumerFolder, 1000);
+            throw new Error(`refetch command exited ${code}: SECRET`);
+          },
+          async runShell() {
+            return 9;
+          },
+        },
+        log,
+      ),
+    /refetch command exited 9/,
+  );
+  assert.ok(messages.some((text) => /kind=fetch reason=shell-exit exitCode=9/.test(text)));
+  assert.ok(messages.every((text) => text.includes("operation=1 source=fetch")));
+  assert.equal(messages.join(" ").includes("SECRET"), false);
 });
 
 test("remote installation shares safe template parameters and reports manifest failures", async () => {

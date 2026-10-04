@@ -37,7 +37,8 @@ export function activate(context: vscode.ExtensionContext): void {
     error: vscode.LogLevel.Error,
   };
   const log = createLogger({
-    enabled: (level) => channel.logLevel <= levels[level],
+    enabled: (level) =>
+      channel.logLevel !== vscode.LogLevel.Off && channel.logLevel <= levels[level],
     write: (level, message) => channel[level](message),
   });
   log.event("info", "extension.activated", {

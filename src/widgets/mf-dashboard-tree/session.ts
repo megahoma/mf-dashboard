@@ -1,4 +1,4 @@
-import { noLog, safeError, type LogContext } from "../../shared/logging.ts";
+import { noLog, safeError, type LogContext, type LogFields } from "../../shared/logging.ts";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -327,6 +327,7 @@ export class DashboardSession {
     const started = Date.now();
     log.event(source === "timer" ? "debug" : "info", "refresh.started");
     const snapshot = this.captureRefreshState();
+    let failureFields: LogFields = {};
     this.probeRunning = true;
     let structureAtProbe = this.structure;
     try {
@@ -353,7 +354,10 @@ export class DashboardSession {
       });
       const names = new Set<string>();
       for (const app of loaded) {
-        if (names.has(app.name)) throw new Error(`duplicate federation name: ${app.name}`);
+        if (names.has(app.name)) {
+          failureFields = { reason: "duplicate-federation-name", app: app.name };
+          throw new Error(`duplicate federation name: ${app.name}`);
+        }
         names.add(app.name);
       }
       // The probe writes `staged`. The visible book stays put until the swap below.
@@ -382,8 +386,9 @@ export class DashboardSession {
         structure: toggledDuringProbe ? this.structure : snapshot.structure,
       });
       this.probeRunning = false;
-      log.event(source === "timer" ? "debug" : "error", "refresh.failed", {
+      log.event("error", "refresh.failed", {
         ...safeError(error),
+        ...failureFields,
         rolledBack: true,
         durationMs: Date.now() - started,
       });
@@ -407,13 +412,16 @@ export class DashboardSession {
   async discover(): Promise<void> {
     const log = this.log.operation("discovery");
     const started = Date.now();
+    let failureFields: LogFields = {};
     log.event("info", "discovery.started");
     try {
       const current = this.ports.readSettings();
       const roots = this.ports.roots();
       if (roots.length > 0) {
-        if (new Set(roots.map((root) => root.name)).size !== roots.length)
+        if (new Set(roots.map((root) => root.name)).size !== roots.length) {
+          failureFields = { reason: "duplicate-workspace-folder-name" };
           throw new Error("workspace folder names must be unique");
+        }
         const foundApps: Record<string, AppSetting> = {};
         for (const root of roots) {
           const found = this.ports.scan(root.path, {
@@ -422,7 +430,10 @@ export class DashboardSession {
             log,
           });
           for (const [name, foundApp] of Object.entries(found)) {
-            if (foundApps[name]) throw new Error(`duplicate federation name: ${name}`);
+            if (foundApps[name]) {
+              failureFields = { reason: "duplicate-federation-name", app: name };
+              throw new Error(`duplicate federation name: ${name}`);
+            }
             foundApps[name] = {
               path: workspaceRelative(root.path, foundApp.folder),
               ...(roots.length > 1 ? { workspaceFolder: root.name } : {}),
@@ -441,7 +452,7 @@ export class DashboardSession {
         durationMs: Date.now() - started,
       });
     } catch (error) {
-      log.event("error", "discovery.failed", safeError(error));
+      log.event("error", "discovery.failed", { ...safeError(error), ...failureFields });
       throw error;
     }
   }
