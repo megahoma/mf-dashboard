@@ -2,7 +2,9 @@
 
 [English](README.md) | [Русский](README.ru.md)
 
-A VS Code sidebar for Module Federation microfrontends. It shows app and remote statuses, starts local apps, rebuilds and downloads federated types, and opens configs and manifests from the tree.
+MF Dashboard is a VS Code extension for working with Module Federation microfrontends. From the MF Dashboard panel, you can monitor applications and their remote dependencies, start local applications, update types, and open configurations and manifests.
+
+![MF Dashboard showing application statuses, remote dependencies, and a manifest preview](media/dashboard.png)
 
 ## Installation
 
