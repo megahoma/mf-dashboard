@@ -28,7 +28,7 @@ import {
   sourceContains,
 } from "../../entities/federated-types/index.ts";
 import { resolveStartScript } from "../../features/init-settings/index.ts";
-import { refetchTarget } from "../../features/refetch-types/index.ts";
+import { refetchTarget, typesRootTarget } from "../../features/refetch-types/refetch.ts";
 import { MANIFEST_SCHEME, ManifestDocuments } from "../../features/open-manifest/documents.ts";
 import { manifestFailureMessage, manifestPreviewText } from "../../features/open-manifest/text.ts";
 import {
@@ -132,6 +132,7 @@ export class MfDashboardProvider
   private readonly producerCache = new Map<string, ProducerSnapshot>();
   private readonly publishedZipHashes = new Map<string, string>();
   private readonly typeCache = new Map<string, ReturnType<typeof describeLink>>();
+  private view: { nodes: DashboardNode[]; stamp: string } | null = null;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private readonly saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private disposed = false;
@@ -189,6 +190,7 @@ export class MfDashboardProvider
     if (this.timer) clearTimeout(this.timer);
     for (const timer of this.saveTimers.values()) clearTimeout(timer);
     this.saveTimers.clear();
+    this.view = null;
     this.manifestRegistration.dispose();
     this.manifests.dispose();
     this.diagnostics.dispose();
@@ -197,6 +199,7 @@ export class MfDashboardProvider
 
   private notify(): void {
     if (this.disposed) return;
+    this.view = null;
     if (!this.session.probeRunning) {
       this.publishProblems();
       const next = new Map<string, string>();
@@ -216,7 +219,7 @@ export class MfDashboardProvider
           visit(row.children);
         }
       };
-      visit(this.session.nodes());
+      visit(this.viewNodes());
       this.statuses = next;
       const warningKeys = new Set(
         this.session.loaded.flatMap((app) =>
@@ -548,8 +551,28 @@ export class MfDashboardProvider
   }
 
   getChildren(element?: DashboardNode): DashboardNode[] {
-    if (!element) return this.session.nodes();
+    if (!element) return this.viewNodes();
     return element.children;
+  }
+
+  private viewNodes(): DashboardNode[] {
+    const stamp = this.typesStamp();
+    if (this.view?.stamp === stamp) return this.view.nodes;
+    const nodes = this.session.nodes();
+    this.view = { nodes, stamp };
+    return nodes;
+  }
+
+  // The probe book does not record whether a types path is a directory.
+  // Comparing that shape keeps Reveal types current without building the tree again.
+  private typesStamp(): string {
+    const rows: string[] = [];
+    for (const app of this.session.loaded) {
+      rows.push(directoryStamp(typesRoot(app.folder, app.typesFolder)));
+      for (const remote of app.remotes)
+        rows.push(directoryStamp(linkTypes(app.folder, remote.alias, app.typesFolder)));
+    }
+    return rows.join("\n");
   }
 
   private cachedTypes(link: RemoteLink): ReturnType<typeof describeLink> {
@@ -564,6 +587,7 @@ export class MfDashboardProvider
   private clearTypeCache(): void {
     this.typeCache.clear();
     this.producerCache.clear();
+    this.view = null;
   }
 
   private warnOnce(
@@ -658,6 +682,31 @@ export class MfDashboardProvider
           })),
       },
     );
+  }
+}
+
+function typesRoot(folder: string, typesFolder: string): string | null {
+  try {
+    return typesRootTarget(folder, typesFolder);
+  } catch {
+    return null;
+  }
+}
+
+function linkTypes(folder: string, alias: string, typesFolder: string): string | null {
+  try {
+    return refetchTarget(folder, alias, typesFolder);
+  } catch {
+    return null;
+  }
+}
+
+function directoryStamp(target: string | null): string {
+  if (target == null) return "invalid";
+  try {
+    return `${target}\0${fs.statSync(target).isDirectory() ? "dir" : "file"}`;
+  } catch {
+    return `${target}\0missing`;
   }
 }
 
