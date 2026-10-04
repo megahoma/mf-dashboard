@@ -6,9 +6,11 @@ const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.ur
   contributes: { configuration: { properties: Record<string, unknown> } };
 };
 
-test("readme names every extension setting", () => {
-  const readme = fs.readFileSync(new URL("../README.md", import.meta.url), "utf8");
-  const keys = Object.keys(pkg.contributes.configuration.properties);
-  assert.ok(keys.length > 0);
-  for (const key of keys) assert.ok(readme.includes(key), key);
-});
+for (const file of ["README.md", "README.ru.md"]) {
+  test(`${file} names every extension setting`, () => {
+    const readme = fs.readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+    const keys = Object.keys(pkg.contributes.configuration.properties);
+    assert.ok(keys.length > 0);
+    for (const key of keys) assert.ok(readme.includes(key), key);
+  });
+}
