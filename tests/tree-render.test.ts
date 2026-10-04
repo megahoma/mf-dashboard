@@ -139,6 +139,37 @@ test("a successful refresh builds the tree once for logs and later row requests"
   assert.equal(stat.mock.callCount() - statBefore, 2);
 });
 
+test("flat row reads skip hidden remote types paths and tree mode sees their changes", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-tree-flat-"));
+  const folder = path.join(root, "shell");
+  const typesRoot = path.join(folder, "@mf-types");
+  fs.mkdirSync(typesRoot, { recursive: true });
+  const provider = providerFor();
+  provider.session.loaded = [
+    localApp("shell", folder, {
+      remotes: [{ alias: "widget", name: "widget", url: null }],
+    }),
+  ];
+  t.after(() => {
+    provider.dispose();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  provider.setStructure("flat");
+  const rows = provider.getChildren();
+  assert.equal(rows[0]?.children.length, 0);
+  fs.mkdirSync(path.join(typesRoot, "widget"));
+  const stat = t.mock.method(fs, "statSync");
+  assert.equal(provider.getChildren(), rows);
+  assert.deepEqual(
+    stat.mock.calls.map((call) => call.arguments[0]),
+    [typesRoot],
+  );
+  provider.setStructure("tree");
+  const link = provider.getChildren()[0]?.children[0];
+  assert.ok(link);
+  assert.ok(link.contextValue.split(" ").includes("types"));
+});
+
 test("language, structure, pending, and script gaps rebuild the visible rows", () => {
   const provider = providerFor();
   provider.session.loaded = [

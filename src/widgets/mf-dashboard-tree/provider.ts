@@ -569,6 +569,7 @@ export class MfDashboardProvider
     const rows: string[] = [];
     for (const app of this.session.loaded) {
       rows.push(directoryStamp(typesRoot(app.folder, app.typesFolder)));
+      if (this.session.structure === "flat") continue;
       for (const remote of app.remotes)
         rows.push(directoryStamp(linkTypes(app.folder, remote.alias, app.typesFolder)));
     }
