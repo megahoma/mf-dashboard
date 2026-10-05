@@ -294,7 +294,7 @@
     "lint": "rslint --type-check .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "compile": "esbuild src/app/extension.ts --bundle --platform=node --format=cjs --outfile=dist/extension.js --external:vscode",
+    "compile": "esbuild src/app/extension.ts --bundle --platform=node --format=cjs --main-fields=module,main --outfile=dist/extension.js --external:vscode",
     "package": "vsce package",
     "vscode:prepublish": "npm run compile",
     "prepare": "husky"
@@ -308,6 +308,8 @@
   },
   "devDependencies": {
     "@rslint/core": "^0.9.3",
+    "@types/babel__traverse": "7.28.0",
+    "@types/micromatch": "4.0.10",
     "@types/node": "^26.6.2",
     "@types/vscode": "^1.90.0",
     "@vscode/vsce": "^4.0.0",
@@ -317,5 +319,14 @@
     "ovsx": "^1.2.0",
     "prettier": "^3.9.9",
     "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "@babel/parser": "7.29.9",
+    "@babel/traverse": "7.29.8",
+    "dotenv": "18.0.5",
+    "fast-glob": "3.3.3",
+    "get-tsconfig": "4.14.3",
+    "jsonc-parser": "3.3.1",
+    "micromatch": "4.0.8"
   }
 }

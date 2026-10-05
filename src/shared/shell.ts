@@ -22,6 +22,7 @@ export function fillTemplate(
   );
 }
 
+// Do not release the caller's queue while a timed-out generator can still write.
 export function runShell(command: string, cwd: string, timeoutMs: number): Promise<number> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, {
@@ -30,36 +31,64 @@ export function runShell(command: string, cwd: string, timeoutMs: number): Promi
       stdio: "ignore",
       detached: process.platform !== "win32",
     });
-    let settled = false;
+    let timedOut = false;
     const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      if (process.platform !== "win32" && child.pid) {
-        try {
-          process.kill(-child.pid, "SIGTERM");
-        } catch {
-          child.kill("SIGTERM");
-        }
-      } else child.kill("SIGTERM");
-      reject(
-        new DiagnosticError(`timeout ${timeoutMs}`, {
-          stage: "shell",
-          reason: "timeout",
-          timeoutMs,
-        }),
+      timedOut = true;
+      void stopProcessTree(child.pid).then(
+        () =>
+          reject(
+            new DiagnosticError(`timeout ${timeoutMs}`, {
+              stage: "shell",
+              reason: "timeout",
+              timeoutMs,
+            }),
+          ),
+        (error: unknown) =>
+          reject(new Error("Could not stop timed-out shell process tree", { cause: error })),
       );
     }, timeoutMs);
     child.once("error", (error) => {
-      if (settled) return;
-      settled = true;
       clearTimeout(timer);
-      reject(error);
+      if (!timedOut) reject(error);
     });
-    child.once("exit", (code) => {
-      if (settled) return;
-      settled = true;
+    child.once("close", (code) => {
       clearTimeout(timer);
-      resolve(code ?? 1);
+      if (!timedOut) resolve(code ?? 1);
     });
   });
+}
+
+async function stopProcessTree(pid: number | undefined): Promise<void> {
+  if (pid === undefined) return;
+  if (process.platform === "win32") {
+    await new Promise<void>((resolve, reject) => {
+      const killer = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore" });
+      killer.once("error", reject);
+      killer.once("close", (code) => {
+        if (code === 0 || code === 128)
+          resolve(); // 128: process has already exited.
+        else reject(new Error(`taskkill exited with ${code}`));
+      });
+    });
+    return;
+  }
+  const signal = (value: NodeJS.Signals | 0): boolean => {
+    try {
+      process.kill(-pid, value);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+      throw error;
+    }
+  };
+  if (!signal("SIGTERM")) return;
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  if (!signal(0)) return;
+  signal("SIGKILL");
+  // A shell exiting does not imply its descendants have exited as well.
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if (!signal(0)) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error("Shell process group did not exit after SIGKILL");
 }

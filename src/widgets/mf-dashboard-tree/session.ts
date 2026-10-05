@@ -422,7 +422,7 @@ export class DashboardSession {
           failureFields = { reason: "duplicate-workspace-folder-name" };
           throw new Error("workspace folder names must be unique");
         }
-        const foundApps: Record<string, AppSetting> = {};
+        const foundApps: Record<string, AppSetting> = Object.create(null);
         for (const root of roots) {
           const found = this.ports.scan(root.path, {
             envMode: current.envMode,
@@ -430,7 +430,7 @@ export class DashboardSession {
             log,
           });
           for (const [name, foundApp] of Object.entries(found)) {
-            if (foundApps[name]) {
+            if (Object.hasOwn(foundApps, name)) {
               failureFields = { reason: "duplicate-federation-name", app: name };
               throw new Error(`duplicate federation name: ${name}`);
             }
@@ -443,7 +443,9 @@ export class DashboardSession {
           }
         }
         const apps = mergeMissingApps(current.apps, foundApps);
-        const changed = Object.keys(foundApps).some((name) => current.apps?.[name] == null);
+        const changed = Object.keys(foundApps).some(
+          (name) => !Object.hasOwn(current.apps ?? {}, name),
+        );
         if (changed) await this.ports.writeApps(apps);
       }
       await this.refresh("discovery", log);

@@ -1,5 +1,6 @@
 import { noLog, safeError, type LogContext } from "../../shared/logging.ts";
 import fs from "node:fs";
+import { parse as parseEnv } from "dotenv";
 import path from "node:path";
 import { discoverProgram, readPort, type LocalApp } from "./config.ts";
 import { parseProgram } from "./syntax.ts";
@@ -37,29 +38,11 @@ export function readAppFolder(
   return apps.find((app) => app.name === name) ?? apps[0] ?? null;
 }
 export function readEnvFile(text: string): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const raw of text.split(/\r?\n/)) {
-    const line = raw.trim();
-    if (line === "" || line.startsWith("#")) continue;
-    const body = line.startsWith("export ") ? line.slice("export ".length).trim() : line;
-    const eq = body.indexOf("=");
-    if (eq <= 0) continue;
-    const key = body.slice(0, eq).trim();
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
-    let value = body.slice(eq + 1).trim();
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1);
-    }
-    env[key] = value;
-  }
-  return env;
+  return parseEnv(text);
 }
 
 export function scanWorkspace(root: string, options: ScanOptions = {}): Record<string, LocalApp> {
-  const found: Record<string, LocalApp> = {};
+  const found = new Map<string, LocalApp>();
   const rootAbs = path.resolve(root);
   walk(
     rootAbs,
@@ -69,7 +52,7 @@ export function scanWorkspace(root: string, options: ScanOptions = {}): Record<s
     found,
     options.log ?? noLog,
   );
-  return found;
+  return Object.fromEntries(found);
 }
 
 function walk(
@@ -77,7 +60,7 @@ function walk(
   root: string,
   ignorePaths: readonly string[],
   envMode: string,
-  found: Record<string, LocalApp>,
+  found: Map<string, LocalApp>,
   log: LogContext,
 ): void {
   let entries: fs.Dirent[];
@@ -103,7 +86,17 @@ function walk(
     if (entry.isFile() && CONFIG_FILE.test(entry.name)) configs.push(abs);
   }
   for (const app of discoverDirectory(dir, configs, envMode, undefined, log)) {
-    if (!(app.name in found)) found[app.name] = app;
+    const previous = found.get(app.name);
+    if (previous && previous.folder !== app.folder) {
+      log.event("error", "discovery.duplicate", {
+        reason: "duplicate-federation-name",
+        app: app.name,
+        folder: app.folder,
+        previousFolder: previous.folder,
+      });
+      throw new Error(`duplicate federation name: ${app.name} (${previous.folder}, ${app.folder})`);
+    }
+    found.set(app.name, app);
   }
   for (const child of children) walk(child, root, ignorePaths, envMode, found, log);
 }
@@ -147,12 +140,11 @@ function discoverDirectory(
       });
       continue;
     }
-    const parsed = parseProgram(text);
-    const port =
-      readPort(parsed.server, parsed.bindings, env) ??
-      readPort(parsed.devServer, parsed.bindings, env);
-    if (port !== null) loosePort = port;
+    const parsed = parseProgram(text, file, log);
+    if (!parsed) continue;
     const app = discoverProgram(parsed, text, file, env, dependencies, log);
+    const port = app?.port ?? readPort(parsed, env, dependencies, log);
+    if (port !== null) loosePort = port;
     if (!app) {
       log.event("trace", "discovery.skipped", {
         file,

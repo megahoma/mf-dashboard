@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { buildSync } from "esbuild";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
@@ -20,6 +25,33 @@ const en = JSON.parse(
 const ru = JSON.parse(
   readFileSync(new URL("../package.nls.ru.json", import.meta.url), "utf8"),
 ) as Record<string, string>;
+
+test("the extension bundle loads without project dependencies or extra implementation files", (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "mf-extension-bundle-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const file = path.join(root, "extension.cjs");
+  const mainFields = pkg.scripts?.compile.match(/--main-fields=(\S+)/)?.[1].split(",");
+  buildSync({
+    entryPoints: [fileURLToPath(new URL("../src/app/extension.ts", import.meta.url))],
+    outfile: file,
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    external: ["vscode"],
+    mainFields,
+  });
+  const result = spawnSync(
+    process.execPath,
+    [
+      "-e",
+      'const Module=require("node:module"); const load=Module._load; Module._load=function(name,parent,isMain){return name==="vscode"?{EventEmitter:class {}}:load.call(this,name,parent,isMain)}; require(process.argv[1]);',
+      file,
+    ],
+    { encoding: "utf8", cwd: root },
+  );
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stderr);
+});
 
 function welcomeContents(): string {
   const entry = pkg.contributes.viewsWelcome?.find((item) => item.view === "mf-dashboard");

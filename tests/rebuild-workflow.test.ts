@@ -11,10 +11,30 @@ import {
   type LocalApp,
 } from "../src/entities/microfrontend/index.ts";
 import { createConfirmationStore } from "../src/entities/federated-types/index.ts";
-import { collectProducerEvidence } from "../src/features/rebuild-types/evidence.ts";
+import {
+  collectProducerEvidence,
+  dependencyEvidence,
+} from "../src/features/rebuild-types/evidence.ts";
 import { rebuildTypes, type RebuildContext } from "../src/features/rebuild-types/workflow.ts";
 import { installRemoteTypes } from "../src/features/refetch-types/remote.ts";
 import { localApp } from "./support/app.ts";
+
+test("a dependency named __proto__ retains its published ZIP hash", () => {
+  const child = localApp("__proto__", path.resolve("child"), { generateTypes: true });
+  const parent = localApp("parent", path.resolve("parent"), {
+    remotes: [{ alias: "child", name: child.name, url: null }],
+  });
+  const evidence = dependencyEvidence(
+    parent,
+    [parent, child],
+    createProbeBook(),
+    new Map([[child.name, "hash"]]),
+  );
+  assert.deepEqual(evidence.dependencies, ["__proto__"]);
+  assert.equal(Object.hasOwn(evidence.dependencyZipHashes, "__proto__"), true);
+  assert.equal(evidence.dependencyZipHashes.__proto__, "hash");
+  assert.equal(JSON.stringify(evidence.dependencyZipHashes), '{"__proto__":"hash"}');
+});
 
 test("rebuild installs dependencies before generation and saves the newly built dependency hash", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-rebuild-"));

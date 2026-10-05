@@ -58,7 +58,7 @@ test("stat failures in installed types do not prevent rendering the dashboard", 
 
 test("shared producers are scanned once and invalidated with the link status cache", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-producer-cache-"));
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mf-producer-cache-")));
   const producer = localApp("producer", root);
   const source = path.join(root, "app.ts");
   fs.writeFileSync(source, "export const app = 1;");
@@ -228,5 +228,36 @@ test("unchanged status and unreadable-type warnings stay quiet until recovery", 
   assert.equal(
     events.some((event) => event.text.includes("SECRET")),
     false,
+  );
+});
+
+test("a malformed producer tsconfig leaves the rest of the tree visible with unknown type evidence", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-bad-tsconfig-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, "tsconfig.json"), '{"include":broken}');
+  const provider = new MfDashboardProvider(() => terms);
+  t.after(() => provider.dispose());
+  provider.session.loaded = [
+    localApp("consumer", root, {
+      consumeTypes: true,
+      remotes: [{ alias: "producer", name: "producer", url: null }],
+    }),
+    localApp("producer", root),
+    localApp("other", root),
+  ];
+  const rows = provider.getChildren();
+  assert.deepEqual(
+    rows.map((row) => row.name),
+    ["consumer", "other"],
+  );
+  assert.equal(rows[0].children[0].name, "producer");
+  assert.equal(
+    provider.session.typesForLink({
+      consumer: "consumer",
+      alias: "producer",
+      remoteName: "producer",
+      url: null,
+    }),
+    "unknown",
   );
 });
