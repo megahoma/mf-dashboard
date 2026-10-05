@@ -269,11 +269,29 @@ function sourceEntries(
     if (!relative) return glob.convertPathToPattern(base);
     const pattern = glob.posix
       .escapePath(relative.split(path.sep).join("/"))
-      .replace(/\\([*?])/g, "$1");
+      .replace(/\\([*?])/g, (_match, wildcard: string) => (wildcard === "?" ? "[^/]" : "*"));
     return `${glob.convertPathToPattern(base).replace(/\/$/, "")}/${pattern}`;
   };
   const includes = config.include ?? (config.files ? [] : ["**/*"]);
   if (includes.length) {
+    // TS skips package directories only in wildcard segments; a literal include can opt in.
+    const implicitDirectories = new Set(["bower_components", "jspm_packages"]);
+    const explicitDirectories = includes.flatMap((pattern) => {
+      const parts = absolutePattern(pattern).split("/");
+      return parts.flatMap((part, index) =>
+        implicitDirectories.has(caseSensitive ? part : part.toLowerCase())
+          ? [
+              createFilesMatcher(
+                {
+                  path: hasConfig ? configFile : path.join(root, "tsconfig.json"),
+                  config: { include: [`${parts.slice(0, index + 1).join("/")}/*`], exclude: [] },
+                },
+                caseSensitive,
+              ),
+            ]
+          : [],
+      );
+    });
     const patterns = includes.map((pattern) => {
       const absolute = absolutePattern(pattern);
       return escape(/(?:^|\/)[^.*?]+$/.test(absolute) ? `${absolute}/**/*` : absolute);
@@ -314,6 +332,13 @@ function sourceEntries(
               const full = path.resolve(directory);
               if (
                 !ownPath(full) ||
+                (full !== root &&
+                  implicitDirectories.has(
+                    caseSensitive ? path.basename(full) : path.basename(full).toLowerCase(),
+                  ) &&
+                  !explicitDirectories.some((match) =>
+                    match(path.join(full, "__mf_directory__.ts")),
+                  )) ||
                 ignoredDirectories.some((match) => match(full.split(path.sep).join("/")))
               )
                 return [];

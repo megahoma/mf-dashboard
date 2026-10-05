@@ -3,7 +3,7 @@ import type { Binding } from "@babel/traverse";
 import type * as t from "@babel/types";
 import { noLog, type LogContext } from "../../shared/logging.ts";
 import { ConfigImports } from "./config-imports.ts";
-import { parseProgram, type AstPath, type Program } from "./syntax.ts";
+import { hasMemberWrites, parseProgram, type AstPath, type Program } from "./syntax.ts";
 
 export interface LocalApp {
   name: string;
@@ -204,6 +204,17 @@ class StaticConfig {
       this.active.delete(p.node);
     }
   }
+  private exported(
+    program: Program,
+    name: string,
+    frame = new Map<Binding, Value>(),
+    depth = 0,
+  ): Value {
+    const exported = this.imports.exported(program, name);
+    if (!exported || !("object" in exported)) return this.evaluate(exported, frame, depth);
+    const value = this.evaluate(exported.object, frame, depth);
+    return object(value) ? value[exported.imported] : UNKNOWN;
+  }
   private value(p: AstPath, frame: Map<Binding, Value>, depth: number): Value {
     const ev = (child: AstPath | null): Value => this.evaluate(child, frame, depth);
     if (p.isStringLiteral() || p.isNumericLiteral() || p.isBooleanLiteral()) return p.node.value;
@@ -222,23 +233,7 @@ class StaticConfig {
         return p.node.name === "undefined" ? undefined : this.unknown(p, "unbound-reference");
       if (!binding.constant) return this.unknown(p, "mutable-binding");
       // Apply the same write guard to locals and helper parameters.
-      if (
-        binding.referencePaths.some((reference) => {
-          let parent: AstPath = reference;
-          while (
-            parent.parentPath?.isMemberExpression() ||
-            parent.parentPath?.isOptionalMemberExpression()
-          )
-            parent = parent.parentPath;
-          return (
-            (parent.parentPath?.isAssignmentExpression() && parent.key === "left") ||
-            parent.parentPath?.isUpdateExpression() ||
-            (parent.parentPath?.isUnaryExpression({ operator: "delete" }) &&
-              parent.key === "argument")
-          );
-        })
-      )
-        return this.unknown(p, "unsupported-write");
+      if (hasMemberWrites(binding)) return this.unknown(p, "unsupported-write");
       if (frame.has(binding)) return frame.get(binding);
       const declaration = binding.path;
       if (declaration.isImportSpecifier() || declaration.isImportDefaultSpecifier()) {
@@ -251,7 +246,7 @@ class StaticConfig {
           : declaration.node.imported.type === "Identifier"
             ? declaration.node.imported.name
             : declaration.node.imported.value;
-        return target ? ev(this.imports.exported(target, imported)) : UNKNOWN;
+        return target ? this.exported(target, imported, frame, depth) : UNKNOWN;
       }
       if (declaration.isFunctionDeclaration()) return ev(declaration);
       if (declaration.isVariableDeclarator()) {
@@ -290,22 +285,16 @@ class StaticConfig {
           const spread = ev(prop.get("argument"));
           if (!object(spread)) return this.unknown(prop, "unresolved-spread");
           Object.assign(result, spread);
-        } else if (prop.isObjectProperty()) {
+        } else if (prop.isObjectProperty() || prop.isObjectMethod()) {
           const key = prop.node.computed
-            ? ev(prop.get("key"))
+            ? ev(prop.get("key") as AstPath)
             : prop.node.key.type === "Identifier"
               ? prop.node.key.name
               : "value" in prop.node.key
                 ? prop.node.key.value
                 : UNKNOWN;
           if (!primitive(key)) return this.unknown(prop, "unresolved-property-key");
-          result[String(key)] = ev(prop.get("value"));
-        } else if (
-          prop.isObjectMethod() &&
-          !prop.node.computed &&
-          prop.node.key.type === "Identifier"
-        ) {
-          result[prop.node.key.name] = UNKNOWN;
+          result[String(key)] = prop.isObjectProperty() ? ev(prop.get("value")) : UNKNOWN;
         }
       }
       this.origins.set(result, this.imports.fileOf(p));
@@ -338,11 +327,13 @@ class StaticConfig {
       if (owner.isIdentifier()) {
         const binding = owner.scope.getBinding(owner.node.name);
         if (binding?.path.isImportNamespaceSpecifier()) {
+          if (!binding.constant || hasMemberWrites(binding))
+            return this.unknown(owner, "unsupported-write");
           const target = this.imports.resolve(
             binding.path,
             (binding.path.parent as t.ImportDeclaration).source.value,
           );
-          return target ? ev(this.imports.exported(target, String(key))) : UNKNOWN;
+          return target ? this.exported(target, String(key), frame, depth) : UNKNOWN;
         }
       }
       const value = ev(owner);
@@ -422,7 +413,7 @@ class StaticConfig {
         args[0]?.isStringLiteral()
       ) {
         const target = this.imports.resolve(p, args[0].node.value);
-        return target ? ev(this.imports.exported(target, "default")) : UNKNOWN;
+        return target ? this.exported(target, "default", frame, depth) : UNKNOWN;
       }
       const fn = ev(callee);
       if (!fn || typeof fn !== "object" || !(TAG in fn) || fn[TAG] !== "function")
@@ -502,7 +493,7 @@ class StaticConfig {
   }
   config(): Value {
     if (this.configResult) return this.configResult.value;
-    const value = this.evaluate(this.imports.exported(this.parsed, "default"));
+    const value = this.exported(this.parsed, "default");
     const result =
       value && typeof value === "object" && TAG in value && value[TAG] === "function"
         ? this.call(value as FunctionValue, [], 0)
@@ -512,37 +503,34 @@ class StaticConfig {
   }
   options(): ObjectValue | null {
     const config = this.config(); // Only values retained in the exported config participate.
-    if (object(config) && Array.isArray(config.plugins)) {
-      for (const plugin of config.plugins)
-        if (this.plugins.has(plugin) && object(plugin)) return plugin;
+    if (object(config) && this.plugins.has(config)) return config;
+    if (object(config) && Object.hasOwn(config, "plugins")) {
+      if (Array.isArray(config.plugins))
+        for (const plugin of config.plugins)
+          if (this.plugins.has(plugin) && object(plugin)) return plugin;
       return null;
     }
-    if (object(config) && this.plugins.has(config)) return config;
-    if (this.plugins.size === 0) {
-      for (const call of this.parsed.calls) {
-        if (
-          !(call.isCallExpression() || call.isNewExpression()) ||
-          !this.api(call.get("callee") as AstPath, PLUGINS)
-        )
-          continue;
-        if (call.getFunctionParent() || call.findParent((parent) => CONTROLS.has(parent.node.type)))
-          continue;
-        // Preserve standalone plugin declarations; skip decoys inside unrelated objects.
-        if (this.parsed.exports.has("default") && !call.parentPath?.isExpressionStatement())
-          continue;
-        this.evaluate(call);
-      }
+    if (this.parsed.exports.has("default") && !object(config)) return null;
+    for (const call of this.parsed.calls) {
+      if (
+        !(call.isCallExpression() || call.isNewExpression()) ||
+        !call.parentPath?.isExpressionStatement() ||
+        !this.api(call.get("callee") as AstPath, PLUGINS) ||
+        call.getFunctionParent() ||
+        call.findParent((parent) => CONTROLS.has(parent.node.type))
+      )
+        continue;
+      const value = this.evaluate(call);
+      if (object(value)) return value;
     }
-    for (const value of this.plugins.values()) if (object(value)) return value;
-    const fallback = this.config();
     if (
-      object(fallback) &&
+      object(config) &&
       (path.basename(this.parsed.file).startsWith("module-federation.config.") ||
         ["name", "remotes", "exposes", "dts", "manifest", "filename"].some((key) =>
-          Object.hasOwn(fallback, key),
+          Object.hasOwn(config, key),
         ))
     )
-      return fallback;
+      return config;
     return null;
   }
 }

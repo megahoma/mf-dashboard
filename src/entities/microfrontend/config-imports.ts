@@ -6,6 +6,8 @@ import { parseProgram, type AstPath, type Program } from "./syntax.ts";
 
 const SOURCE_EXTS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"];
 
+export type ExportedValue = AstPath | { object: AstPath; imported: string };
+
 // Per-discovery lifetime: no stale scopes or file contents survive a config reload.
 export class ConfigImports {
   private readonly modules = new Map<string, Program | null>();
@@ -54,7 +56,7 @@ export class ConfigImports {
       return null;
     }
   }
-  exported(program: Program, name: string, active = new Set<string>()): AstPath | null {
+  exported(program: Program, name: string, active = new Set<string>()): ExportedValue | null {
     const key = `${program.file}\0${name}`;
     if (active.has(key) || active.size > 8) {
       this.log.event("trace", "config.helper.unresolved", {
@@ -70,39 +72,12 @@ export class ConfigImports {
         const target = this.resolve(program.root, exported.from);
         return target ? this.exported(target, exported.imported, next) : null;
       }
-      if (exported.isIdentifier()) {
-        const binding = exported.scope.getBinding(exported.node.name);
-        const declaration = binding?.path;
-        if (declaration?.isImportSpecifier() || declaration?.isImportDefaultSpecifier()) {
-          const target = this.resolve(
-            declaration,
-            (declaration.parent as t.ImportDeclaration).source.value,
-          );
-          const imported = declaration.isImportDefaultSpecifier()
-            ? "default"
-            : declaration.node.imported.type === "Identifier"
-              ? declaration.node.imported.name
-              : declaration.node.imported.value;
-          return target ? this.exported(target, imported, next) : null;
-        }
-      }
+      // Local import aliases must pass the evaluator's binding/write guards before forwarding.
       return exported;
     }
-    // A common CJS helper exports an object of named options/functions.
-    if (program.default?.isObjectExpression()) {
-      for (const prop of program.default.get("properties")) {
-        if (
-          prop.isObjectProperty() &&
-          !prop.node.computed &&
-          (prop.node.key.type === "Identifier"
-            ? prop.node.key.name
-            : prop.node.key.type === "StringLiteral"
-              ? prop.node.key.value
-              : null) === name
-        )
-          return prop.get("value");
-      }
-    }
+    // Evaluate the final CJS object before selecting a named value: spreads and last-wins matter.
+    if (name !== "default" && program.commonJs && program.default)
+      return { object: program.default, imported: name };
     for (const source of program.stars) {
       const target = this.resolve(program.root, source);
       const result = target && this.exported(target, name, next);

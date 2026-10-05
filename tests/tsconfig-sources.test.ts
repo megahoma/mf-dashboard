@@ -47,6 +47,10 @@ const cases: [string, Record<string, unknown> | string][] = [
   ],
   ["literal brackets", { include: ["src/[literal]/**/*.ts"] }],
   ["literal parentheses", { include: ["src/(literal)/**/*.ts"] }],
+  ["question wildcard in a directory", { include: ["src/?ne/*.ts"] }],
+  ["question wildcard inside a directory name", { include: ["src/o?e/*.ts"] }],
+  ["question wildcard in a file name", { include: ["src/one/?.ts"] }],
+  ["question wildcard in an exclude", { include: ["src/**/*.ts"], exclude: ["src/?ne"] }],
 ];
 for (const [title, config] of cases) {
   test(`source selection matches TS7: ${title}`, (t) => {
@@ -64,6 +68,8 @@ for (const [title, config] of cases) {
       "src/foo.bar/a.ts",
       "src/[literal]/a.ts",
       "src/(literal)/a.ts",
+      "src/one/a.ts",
+      "src/one/b.ts",
       "emitted/generated.ts",
     ])
       write(file, "export const value=1;");
@@ -220,6 +226,72 @@ test("glob scans do not read excluded folders or folders outside include", (t) =
     JSON.stringify({ include: ["../**/*.ts"], exclude: ["../excl*", "../unrelated"] }),
   );
   assert.deepEqual(sourceIdentity(root, "config/tsconfig.json", "@mf-types").names, ["src/a.ts"]);
+});
+
+test("implicit package folders are pruned unless an include names them explicitly", (t) => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mf-glob-implicit-")));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  for (const folder of [
+    "src",
+    "bower_components/pkg",
+    "jspm_packages/pkg",
+    "src/bower_components/pkg",
+  ]) {
+    fs.mkdirSync(path.join(root, folder), { recursive: true });
+    fs.writeFileSync(path.join(root, folder, "a.ts"), "export const value=1;");
+  }
+  const original = fs.readdirSync;
+  let blocked = true;
+  const read = t.mock.method(fs, "readdirSync", (...args: Parameters<typeof fs.readdirSync>) => {
+    if (
+      blocked &&
+      path
+        .relative(root, String(args[0]))
+        .split(path.sep)
+        .some((part) => ["bower_components", "jspm_packages"].includes(part))
+    )
+      throw Object.assign(new Error("unreadable implicit folder"), { code: "EACCES" });
+    return Reflect.apply(original, fs, args);
+  });
+  const config = path.join(root, "tsconfig.json");
+  for (const include of [undefined, ["**/*.ts"], ["src/**/*.ts"]]) {
+    fs.writeFileSync(config, JSON.stringify({ include }));
+    assert.deepEqual(sourceIdentity(root, null, "@mf-types").names, ["src/a.ts"]);
+  }
+  assert.equal(
+    read.mock.calls.some((call) =>
+      path
+        .relative(root, String(call.arguments[0]))
+        .split(path.sep)
+        .some((part) => ["bower_components", "jspm_packages"].includes(part)),
+    ),
+    false,
+  );
+  blocked = false;
+  fs.writeFileSync(
+    config,
+    JSON.stringify({
+      include: [
+        "bower_components/pkg/**/*.ts",
+        "src/**/bower_components/pkg/**/*.ts",
+        "jspm_packages/pkg/**/*.ts",
+      ],
+    }),
+  );
+  assert.deepEqual(sourceIdentity(root, null, "@mf-types").names, [
+    "bower_components/pkg/a.ts",
+    "jspm_packages/pkg/a.ts",
+    "src/bower_components/pkg/a.ts",
+  ]);
+  fs.writeFileSync(path.join(root, "bower_components/tsconfig.json"), "{}");
+  assert.deepEqual(sourceIdentity(root, "bower_components/tsconfig.json", "@mf-types").names, [
+    "bower_components/pkg/a.ts",
+  ]);
+  blocked = true;
+  assert.throws(
+    () => sourceIdentity(root, null, "@mf-types"),
+    (error) => error instanceof Error && "code" in error && error.code === "EACCES",
+  );
 });
 
 test("invalid original selection rules are rejected before normalized library results are used", (t) => {

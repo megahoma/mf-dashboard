@@ -345,6 +345,209 @@ test("only plugins retained by the final configuration select the application", 
   }
 });
 
+test("unresolved or absent final plugins never reuse discarded calls", () => {
+  for (const plugins of ["undefined", "null", "false", "unknown()"])
+    assert.equal(
+      discoverSource(
+        `export default {plugins:[pluginModuleFederation({name:'before'})],plugins:${plugins}};`,
+        path.resolve("rsbuild.config.ts"),
+        {},
+      ),
+      null,
+      plugins,
+    );
+  for (const source of [
+    "export default {other:pluginModuleFederation({name:'before'})};",
+    "const discarded={other:pluginModuleFederation({name:'before'})};",
+    "export default {...unknown(),other:pluginModuleFederation({name:'before'})};",
+  ])
+    assert.equal(discoverSource(source, path.resolve("rsbuild.config.ts"), {}), null, source);
+  assert.equal(
+    discoverSource(
+      "pluginModuleFederation({name:'app'}); export default {server:{port:3001}};",
+      path.resolve("rsbuild.config.ts"),
+      {},
+    )?.name,
+    "app",
+  );
+});
+
+test("named helper exports keep the same mutation guards as local bindings", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-babel-export-writes-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, "package.json"), "{}");
+  const helper = path.join(root, "options.ts");
+  const config = path.join(root, "rsbuild.config.ts");
+  for (const [source, argument, expected] of [
+    ["export const options={name:'app'};", "options", "app"],
+    ["export function options(){return {name:'app'}}", "options()", "app"],
+    ["export const options={name:'before'}; options.name='after';", "options", null],
+    ["export let options={name:'before'}; options={name:'after'};", "options", null],
+    [
+      "export function options(){return {name:'before'}} options=()=>({name:'after'});",
+      "options()",
+      null,
+    ],
+    ["const options={name:'before'}; options.name='after'; export {options};", "options", null],
+  ] as const) {
+    fs.writeFileSync(helper, source);
+    for (const declaration of [
+      "import {options} from './options';",
+      "import {options} from './barrel';",
+    ]) {
+      fs.writeFileSync(path.join(root, "barrel.ts"), "export {options} from './options';");
+      fs.writeFileSync(
+        config,
+        `${declaration} export default pluginModuleFederation(${argument});`,
+      );
+      assert.equal(readAppFolder(root, "development")?.name ?? null, expected, source);
+    }
+  }
+  fs.writeFileSync(helper, "export const options={name:'before'};");
+  fs.writeFileSync(
+    config,
+    "import * as ns from './options'; ns.options.name='after'; export default pluginModuleFederation(ns.options);",
+  );
+  assert.equal(readAppFolder(root, "development"), null);
+  for (const exported of [
+    "export {options}",
+    "export {options as default}",
+    "export default options",
+  ]) {
+    fs.writeFileSync(
+      path.join(root, "barrel.ts"),
+      `import {options} from './options'; options.name='after'; ${exported};`,
+    );
+    const declaration =
+      exported === "export {options}"
+        ? "import {options} from './barrel';"
+        : "import options from './barrel';";
+    fs.writeFileSync(config, `${declaration} export default pluginModuleFederation(options);`);
+    assert.equal(readAppFolder(root, "development"), null, exported);
+  }
+});
+
+test("writes through aliases cannot publish an obsolete options object", () => {
+  for (const prelude of [
+    "const alias=options; alias.name='after';",
+    "const alias=options; const next=alias; next.name='after';",
+    "const alias=options as const; alias.name='after';",
+    "const alias=options; delete alias.name;",
+    "const alias=options; alias.name++;",
+    "const {remotes}=options; remotes.widget='after@http://localhost:3002/mf-manifest.json';",
+  ])
+    assert.equal(
+      discoverSource(
+        `const options={name:'before',remotes:{widget:'before@http://localhost:3001/mf-manifest.json'}}; ${prelude} export default pluginModuleFederation(options);`,
+        path.resolve("rsbuild.config.ts"),
+        {},
+      ),
+      null,
+      prelude,
+    );
+  assert.equal(
+    discoverSource(
+      "const make=x=>{const alias=x; alias.name='after'; return x}; export default pluginModuleFederation(make({name:'before'}));",
+      path.resolve("rsbuild.config.ts"),
+      {},
+    ),
+    null,
+  );
+  assert.equal(
+    discoverSource(
+      "const options={name:'app'}; let alias=options; alias={name:'other'}; export default pluginModuleFederation(options);",
+      path.resolve("rsbuild.config.ts"),
+      {},
+    )?.name,
+    "app",
+  );
+});
+
+test("object methods with static keys obey last-wins without evaluating getters", () => {
+  for (const method of [
+    "get name(){return 'after'}",
+    "get 'name'(){return 'after'}",
+    "get ['name'](){return 'after'}",
+    "get ['na'+'me'](){return 'after'}",
+    "['name'](){return 'after'}",
+    "get [unknown()](){return 'after'}",
+  ])
+    assert.equal(
+      discoverSource(
+        `export default pluginModuleFederation({name:'before',${method}});`,
+        path.resolve("rsbuild.config.ts"),
+        {},
+      ),
+      null,
+      method,
+    );
+  assert.equal(
+    discoverSource(
+      "export default pluginModuleFederation({get ['name'](){throw new Error('not executed')},name:'app'});",
+      path.resolve("rsbuild.config.ts"),
+      {},
+    )?.name,
+    "app",
+  );
+});
+
+test("named CommonJS imports use the final object, including overrides and spreads", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-babel-cjs-final-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, "package.json"), "{}");
+  fs.writeFileSync(
+    path.join(root, "rsbuild.config.ts"),
+    "import {options} from './options.cjs'; export default pluginModuleFederation(options);",
+  );
+  const helper = path.join(root, "options.cjs");
+  for (const [source, expected] of [
+    ["module.exports={options:{name:'before'},options:{name:'app'}};", "app"],
+    ["module.exports={options:{name:'before'},...{options:{name:'app'}}};", "app"],
+    ["module.exports={options:{name:'before'},...unknown()};", null],
+    ["module.exports={['options']:{name:'app'}};", "app"],
+    ["const result={options:{name:'app'}}; module.exports=result;", "app"],
+    ["exports.options={name:'before'}; module.exports={options:{name:'app'}};", "app"],
+    ["exports.options={name:'before'}; module.exports={};", null],
+    ["module.exports={options:{name:'before'}}; exports.options={name:'after'};", null],
+    ["module.exports={options:{name:'before'},get ['options'](){return {name:'after'}}};", null],
+    ["const options={name:'before'}; options.name='after'; module.exports={options};", null],
+    [
+      "module.exports={options:{name:'before'}}; const alias=module.exports.options; alias.name='after';",
+      null,
+    ],
+    [
+      "module.exports={options:{name:'before'}}; const alias=module.exports?.options; alias.name='after';",
+      null,
+    ],
+    [
+      "module.exports={options:{name:'before'}}; const alias=module?.exports?.options; alias.name='after';",
+      null,
+    ],
+    ["exports.options={name:'before'}; const alias=exports.options; alias.name='after';", null],
+    ["exports.options={name:'before'}; exports={}; exports.options={name:'after'};", null],
+    [
+      "module.exports={options:{name:'before'}}; const alias=module.exports; const next=alias.options; delete next.name;",
+      null,
+    ],
+    [
+      "module.exports={options:{name:'before'}}; const {options}=module.exports; options.name++;",
+      null,
+    ],
+    ["exports.options={name:'before'}; const alias=exports; alias.options.name='after';", null],
+    [
+      "module.exports={options:{name:'app'}}; const alias=module.exports.options; console.log(alias.name);",
+      "app",
+    ],
+    [
+      "module.exports={options:{name:'app'}}; let alias=module.exports.options; alias={name:'other'};",
+      "app",
+    ],
+  ] as const) {
+    fs.writeFileSync(helper, source);
+    assert.equal(readAppFolder(root, "development")?.name ?? null, expected, source);
+  }
+});
+
 test("unused or shadowed CommonJS assignments cannot replace the selected export", () => {
   for (const tail of [
     "function unused(module) {module.exports={name:'decoy'};}",
