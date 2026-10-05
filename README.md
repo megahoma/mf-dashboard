@@ -51,15 +51,17 @@ The extension activates on startup and looks for these config files:
 | Rsbuild           | `rsbuild.config.*`           |
 | Vite              | `vite.config.*`              |
 
-Supported extensions are `.mjs`, `.cjs`, `.js`, `.mts`, `.cts`, `.ts`, `.jsx`, and `.tsx`. Discovery parses source without executing the config. It recognizes `pluginModuleFederation`, `ModuleFederationPlugin`, and `createModuleFederationConfig`, including supported helpers imported from the same package. Arbitrary runtime logic may not resolve.
+Supported extensions are `.mjs`, `.cjs`, `.js`, `.mts`, `.cts`, `.ts`, `.jsx`, and `.tsx`. Discovery uses Babel to read source without executing the config. It recognizes `pluginModuleFederation`, `ModuleFederationPlugin`, and `createModuleFederationConfig`, constants, aliases, object spreads, static expressions, and synchronous helpers with an unconditional return. Relative named/default/namespace imports and local re-exports are supported within the same package. The project's TypeScript version does not affect discovery. Conditional returns, dynamic imports, package helpers, and tsconfig path aliases remain unresolved.
 
 The local port comes from `server.port` or `devServer.port`. Remote URLs may use `process.env` or `import.meta.env` values from `.env.<mode>` and `.env.<mode>.local`; the local file takes precedence. The default manifest path is `/mf-manifest.json`.
 
 Discovery skips `node_modules`, `.git`, `dist`, and `mf-dashboard.ignorePaths`. It adds missing app names without overwriting saved entries. Once `mf-dashboard.apps` exists, even as an empty object, startup reloads that list instead of scanning for new apps. An empty scan writes no settings and an explicit search with no loaded apps shows a notification.
 
-Multi-root workspaces are scanned folder by folder. Federation names and workspace-folder names must be unique. Settings are stored in `.vscode/settings.json` for a folder opened on its own, or in the saved `.code-workspace` file.
+Multi-root workspaces are scanned folder by folder. Federation names and workspace-folder names must be unique. If different app folders use the same federation name, discovery reports the conflicting folders and leaves saved settings unchanged. Settings are stored in `.vscode/settings.json` for a folder opened on its own, or in the saved `.code-workspace` file.
 
 Refresh reads known app directories and reuses parsed configs until a config, active env file, or tracked local import changes size or mtime. The tree keeps its previous results until a probe succeeds. Each successful cycle shares ZIP downloads by URL; later cycles use `If-Modified-Since` when available and reuse hashes on 304. Manifests are requested separately for each row.
+
+Producer sources follow `files`, `include`, `exclude`, and inherited settings from the selected tsconfig. Explicit `files` entries are included even with an empty `include`. Declaration files, downloaded types, output directories, and files outside the app or reached through symlinks are omitted. An unreadable or invalid tsconfig leaves the type estimate unknown.
 
 Saving a producer's included `.ts` or `.tsx` source in VS Code refreshes the local types estimate immediately and after `typesSettleMs`, without network requests. Periodic probes also cover changes outside the editor. Cache entries use file size and mtime; an edit preserving both may leave the previous result cached.
 

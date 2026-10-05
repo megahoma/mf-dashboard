@@ -641,3 +641,88 @@ test("refresh carries ZIP facts into staging and only commits them on success", 
   await session.refresh();
   assert.deepEqual(book.zips.get(url), { zipHash: "new", zipMtime: 2000 });
 });
+
+test("remote instance ids grow linearly and stay stable through deep chains, cycles and diamonds", () => {
+  const loaded = Array.from({ length: 31 }, (_, index) =>
+    app({
+      name: `app${index}`,
+      generateTypes: false,
+      consumeTypes: false,
+      remotes:
+        index < 30
+          ? [{ alias: `quoted"\\${index}`, name: `app${index + 1}`, url: null }]
+          : [{ alias: "cycle", name: "app0", url: null }],
+    }),
+  );
+  const session = new DashboardSession(
+    {
+      readSettings: () => settings(),
+      writeApps() {},
+      scan: () => ({}),
+      loadKnown: () => [],
+      async probe() {},
+      roots: () => [],
+    },
+    createProbeBook(),
+    () => {},
+  );
+  session.loaded = loaded;
+  const rows = session.nodes();
+  let current = rows[0];
+  for (let depth = 1; depth <= 31; depth++) {
+    current = current.children[0];
+    const segments = JSON.parse(current.id) as string[];
+    assert.equal(segments.length, depth + 1);
+    assert.ok(current.id.length < depth * 100);
+  }
+  assert.equal(current.children.length, 0);
+  assert.deepEqual(session.nodes(), rows);
+  session.loaded = [
+    app({
+      name: "root",
+      remotes: [
+        { alias: "left", name: "left", url: null },
+        { alias: "right", name: "right", url: null },
+      ],
+    }),
+    app({ name: "left", remotes: [{ alias: "shared", name: "shared", url: null }] }),
+    app({ name: "right", remotes: [{ alias: "shared", name: "shared", url: null }] }),
+    app({ name: "shared" }),
+  ];
+  const root = session.nodes()[0];
+  assert.notEqual(root.children[0].children[0].id, root.children[1].children[0].id);
+  assert.equal(root.children[0].children[0].name, root.children[1].children[0].name);
+});
+
+test("actual same-root duplicate discovery preserves settings and the previous tree", async (t) => {
+  const root = fs.mkdtempSync(path.join(tmpdir(), "mf-duplicate-session-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  for (const folder of ["one", "two"]) {
+    fs.mkdirSync(path.join(root, folder));
+    fs.writeFileSync(
+      path.join(root, folder, "module-federation.config.ts"),
+      "export default {name:'same'}",
+    );
+  }
+  const { scanWorkspace } = await import("../src/entities/microfrontend/discover.ts");
+  const session = new DashboardSession(
+    {
+      readSettings: () => settings({ apps: { kept: { path: "kept" } } }),
+      writeApps() {
+        assert.fail("must not publish partial discovery");
+      },
+      scan: scanWorkspace,
+      loadKnown: () => [],
+      async probe() {
+        assert.fail("must not probe failed discovery");
+      },
+      roots: () => [{ name: "root", path: root }],
+    },
+    createProbeBook(),
+    () => {},
+  );
+  session.loaded = [app({ name: "kept" })];
+  const before = session.nodes();
+  await assert.rejects(session.discover(), /duplicate federation name/);
+  assert.deepEqual(session.nodes(), before);
+});

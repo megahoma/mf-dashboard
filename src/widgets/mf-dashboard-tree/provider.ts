@@ -292,7 +292,18 @@ export class MfDashboardProvider
         return;
       }
       if (kind !== "source") continue;
-      const included = sourceContains(app.folder, app.tsconfig, app.typesFolder, file);
+      let included: boolean;
+      try {
+        included = sourceContains(app.folder, app.tsconfig, app.typesFolder, file);
+      } catch (error) {
+        this.warnOnce(`${app.name}\0source`, "types.sources.unreadable", {
+          producer: app.name,
+          ...safeError(error),
+        });
+        this.clearTypeCache();
+        this.notify();
+        continue;
+      }
       if (!included) continue;
       this.clearTypeCache();
       this.notify();
@@ -609,16 +620,25 @@ export class MfDashboardProvider
     if (!consumer) return "unknown";
     const probe = this.session.book.links.get(linkProbeId(link));
     let evidence: ProducerSnapshot | undefined;
-    if (producer && consumer.consumeTypes) {
+    if (producer && producer.generateTypes && consumer.consumeTypes) {
       evidence = this.producerCache.get(producer.name);
       if (!evidence) {
-        evidence = collectProducerEvidence(
-          producer,
-          this.session.loaded,
-          this.session.book,
-          this.confirmations,
-          this.observationLog,
-        );
+        try {
+          evidence = collectProducerEvidence(
+            producer,
+            this.session.loaded,
+            this.session.book,
+            this.confirmations,
+            this.observationLog,
+          );
+          this.warnings.delete(`${producer.name}\0source`);
+        } catch (error) {
+          this.warnOnce(`${producer.name}\0source`, "types.sources.unreadable", {
+            producer: producer.name,
+            ...safeError(error),
+          });
+          return "unknown";
+        }
         this.producerCache.set(producer.name, evidence);
       }
     }

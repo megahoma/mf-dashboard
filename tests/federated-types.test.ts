@@ -49,7 +49,7 @@ test("source snapshots respect inherited includes, excludes, output folders and 
     path.join(root, "base.json"),
     JSON.stringify({
       include: ["**/*.ts", "src/**/*.tsx"],
-      exclude: ["excluded", "src/*.spec.ts", "src/*"],
+      exclude: ["excluded", "src/*.spec.ts", "src/direct.ts"],
       compilerOptions: { outDir: "emitted" },
     }),
   );
@@ -155,7 +155,7 @@ test("link classification uses provided evidence, settle time and install confir
   assert.equal(describeLink({ ...input, producerZipMtime: null, generationConfirmed: true }), "ok");
 });
 
-test("directory pruning preserves includes outside the tsconfig directory but inside the app", (t) => {
+test("relative excludes follow TypeScript semantics inside the app", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-relative-exclude-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   fs.mkdirSync(path.join(root, "config"));
@@ -176,11 +176,11 @@ test("directory pruning preserves includes outside the tsconfig directory but in
   for (const exclude of ["../shared", "..", "../"]) {
     fs.writeFileSync(config, JSON.stringify({ include, exclude: [exclude] }));
     const snapshot = sourceSnapshot(root, "config/tsconfig.json", "@mf-types");
-    assert.deepEqual(snapshot, baseline, exclude);
-    assert.equal(sourceContains(root, "config/tsconfig.json", "@mf-types", source), true);
+    assert.deepEqual(snapshot.files, [], exclude);
+    assert.equal(sourceContains(root, "config/tsconfig.json", "@mf-types", source), false);
     assert.equal(
       confirmations.generationConfirmed("app", filesFingerprint(snapshot.files), "zip", {}),
-      true,
+      false,
     );
   }
 });

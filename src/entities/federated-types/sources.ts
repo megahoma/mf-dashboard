@@ -1,5 +1,9 @@
 import { noLog, type LogContext } from "../../shared/logging.ts";
 import fs from "node:fs";
+import glob from "fast-glob";
+import { createFilesMatcher, parseTsconfig, type TsConfigJsonResolved } from "get-tsconfig";
+import { parse as parseJsonc, type ParseError } from "jsonc-parser";
+import micromatch from "micromatch";
 import path from "node:path";
 import { filesFingerprint } from "../../shared/fingerprint.ts";
 
@@ -23,18 +27,6 @@ export interface SourceIdentity {
 }
 
 const sourceCache = new Map<string, { stamp: string; identity: SourceIdentity }>();
-
-interface IncludePattern {
-  base: string;
-  pattern: string;
-}
-
-interface TsConfigInfo {
-  outDir: IncludePattern | null;
-  exclude: IncludePattern[];
-  include: IncludePattern[];
-  hasInclude: boolean;
-}
 
 interface SourceEntry {
   name: string;
@@ -118,295 +110,267 @@ export function sourceContains(
   return sourceEntries(folder, tsconfig, typesFolder).some((entry) => entry.fullPath === full);
 }
 
+function readSourceConfig(file: string): TsConfigJsonResolved {
+  // Fresh library cache observes edits to every inherited config and package.json.
+  const cache = new Map<string, string>();
+  try {
+    const config = parseTsconfig(file, cache);
+    // get-tsconfig recovers malformed JSONC. Validate all raw inputs before using its result.
+    // Its readFileSync cache keys are covered by inherited-config tests; keep the version pinned.
+    for (const [key, text] of cache) {
+      if (!key.startsWith("readFileSync:") || typeof text !== "string") continue;
+      const errors: ParseError[] = [];
+      const value: unknown = parseJsonc(text, errors, {
+        allowTrailingComma: true,
+        allowEmptyContent: true,
+      });
+      if (
+        errors.length ||
+        (value !== undefined && (!value || typeof value !== "object" || Array.isArray(value)))
+      )
+        throw new Error("Malformed JSONC");
+      if (value === undefined) continue;
+      if (/[/\\]package\.json:utf8$/.test(key) && key !== `readFileSync:${file}:utf8`) continue;
+      const raw = value as Record<string, unknown>;
+      const inherited = raw.extends;
+      if (
+        inherited !== undefined &&
+        typeof inherited !== "string" &&
+        (!Array.isArray(inherited) || inherited.some((value) => typeof value !== "string"))
+      )
+        throw new Error("Invalid extends");
+      for (const field of ["files", "include", "exclude"] as const) {
+        const values = raw[field];
+        if (values === undefined) continue;
+        if (!Array.isArray(values) || values.some((value) => typeof value !== "string"))
+          throw new Error(`Invalid ${field}`);
+        if (field === "files") continue;
+        for (const pattern of values as string[]) {
+          const parts = pattern.replaceAll("\\", "/").split("/");
+          const recursive = parts.indexOf("**");
+          if (
+            (field === "include" && /(?:^|\/)\*\*\/?$/.test(parts.join("/"))) ||
+            (recursive >= 0 && parts.slice(recursive + 1).includes(".."))
+          )
+            throw new Error(`Invalid ${field} pattern`);
+        }
+      }
+      const options = raw.compilerOptions;
+      if (options !== undefined) {
+        if (!options || typeof options !== "object" || Array.isArray(options))
+          throw new Error("Invalid compilerOptions");
+        for (const field of ["outDir", "declarationDir"] as const) {
+          const option = (options as Record<string, unknown>)[field];
+          if (option !== undefined && typeof option !== "string")
+            throw new Error(`Invalid ${field}`);
+        }
+      }
+    }
+    return config;
+  } catch (error) {
+    throw new Error(`Invalid tsconfig: ${file}`, { cause: error });
+  }
+}
+
 function sourceEntries(
   folder: string,
   tsconfig: string | null,
   typesFolder: string,
 ): SourceEntry[] {
-  const root = path.resolve(folder);
-  const config = readTsconfig(root, tsconfig);
-  const skip = SKIP_DIRS;
-  const outputPaths = [
+  const folderPath = path.resolve(folder);
+  try {
+    if (fs.lstatSync(folderPath).isSymbolicLink()) return [];
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  const root = fs.realpathSync(folderPath);
+  let configFile = path.resolve(root, tsconfig?.trim() || "tsconfig.json");
+  const inside = (file: string): boolean => {
+    const relative = path.relative(root, file);
+    return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+  };
+  const outputs = [
     ...ROOT_OUTPUT_DIRS.map((name) => path.join(root, name)),
     ...(typesFolder ? [path.resolve(root, typesFolder)] : []),
-    ...(config.outDir ? [path.resolve(config.outDir.base, config.outDir.pattern)] : []),
-  ].filter((target) => isInside(root, target));
-  const excluded = (full: string): boolean =>
-    outputPaths.some((target) => full === target || full.startsWith(`${target}${path.sep}`)) ||
-    config.exclude.some(({ base, pattern }) => {
-      const rel = path.relative(base, full).split(path.sep).join("/");
-      if (rel === ".." || rel.startsWith("../")) return false;
-      const normalized = pattern.replaceAll("\\", "/").replace(/\/$/, "");
-      return /[*?]/.test(normalized)
-        ? globMatch(normalized, rel)
-        : rel === normalized || rel.startsWith(`${normalized}/`);
-    });
-  const pruneDirectory = (full: string): boolean =>
-    outputPaths.some((target) => full === target || full.startsWith(`${target}${path.sep}`)) ||
-    config.exclude.some(({ base, pattern }) => {
-      const normalized = pattern.replaceAll("\\", "/").replace(/\/$/, "");
-      if (/[*?]/.test(normalized)) return false;
-      const rel = path.relative(base, full).split(path.sep).join("/");
-      if (rel === ".." || rel.startsWith("../")) return false;
-      return rel === normalized || rel.startsWith(`${normalized}/`);
-    });
-  const files: SourceEntry[] = [];
-  if (!config.hasInclude) walk(root, root, skip, excluded, files);
-  else {
-    for (const item of config.include)
-      collectIncluded(root, item.base, item.pattern, skip, excluded, pruneDirectory, files);
-  }
-  const unique = [...new Map(files.map((file) => [file.name, file])).values()];
-  return unique;
-}
-
-function collectIncluded(
-  root: string,
-  base: string,
-  pattern: string,
-  skip: ReadonlySet<string>,
-  excluded: (full: string) => boolean,
-  pruneDirectory: (full: string) => boolean,
-  files: SourceEntry[],
-): void {
-  const normalized = pattern.replaceAll("\\", "/");
-  if (!/[*?]/.test(normalized)) {
-    const target = path.resolve(base, normalized);
-    if (!isInside(root, target)) return;
-    let stat: fs.Stats;
-    try {
-      stat = fs.statSync(target);
-    } catch {
-      return;
+  ].filter(inside);
+  const ownPath = (file: string): boolean => {
+    const relative = path.relative(root, file);
+    if (!inside(file)) return false;
+    if (outputs.some((output) => file === output || file.startsWith(`${output}${path.sep}`)))
+      return false;
+    let current = root;
+    for (const segment of relative.split(path.sep)) {
+      if (SKIP_DIRS.has(segment)) return false;
+      current = path.join(current, segment);
+      if (fs.lstatSync(current).isSymbolicLink()) return false;
     }
-    if (
-      fs.lstatSync(target).isSymbolicLink() ||
-      !isInside(fs.realpathSync(root), fs.realpathSync(target))
-    )
-      return;
-    if (stat.isDirectory()) walk(root, target, skip, excluded, files);
-    else addFile(root, target, skip, excluded, files);
-    return;
-  }
-  const prefix = normalized.split(/[*?]/)[0] ?? "";
-  const start = path.resolve(base, prefix.endsWith("/") ? prefix : path.dirname(prefix));
-  if (!isInside(root, start)) return;
-  if (fs.existsSync(start) && !isInside(fs.realpathSync(root), fs.realpathSync(start))) return;
-  if (
-    pruneDirectory(start) ||
-    path
-      .relative(root, start)
-      .split(path.sep)
-      .some((part) => skip.has(part))
-  )
-    return;
-  const matched: string[] = [];
-  walkPaths(start, skip, pruneDirectory, (full) => {
-    const rel = path.relative(base, full).split(path.sep).join("/");
-    if (globMatch(normalized, rel)) matched.push(full);
-  });
-  for (const full of matched) addFile(root, full, skip, excluded, files);
-}
-
-function walk(
-  root: string,
-  dir: string,
-  skip: ReadonlySet<string>,
-  excluded: (full: string) => boolean,
-  files: SourceEntry[],
-): void {
-  let entries: fs.Dirent[];
+    return true;
+  };
+  const ownFile = (file: string): boolean =>
+    ownPath(file) && /\.tsx?$/.test(file) && !file.endsWith(".d.ts");
   try {
-    entries = fs.readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return;
+    if (fs.lstatSync(root).isSymbolicLink()) return [];
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
   }
-  for (const entry of entries) {
-    const full = path.join(dir, entry.name);
-    if (skip.has(entry.name) || excluded(full)) continue;
-    if (entry.isSymbolicLink()) continue;
-    if (entry.isDirectory()) {
-      walk(root, full, skip, excluded, files);
-      continue;
+  let hasConfig = true;
+  try {
+    fs.statSync(configFile);
+    configFile = fs.realpathSync(configFile);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") hasConfig = false;
+    else throw error;
+  }
+  const config = hasConfig ? readSourceConfig(configFile) : {};
+  const configDirectory = hasConfig ? path.dirname(configFile) : root;
+  if (hasConfig) {
+    const outDir = config.compilerOptions?.outDir;
+    if (outDir) {
+      const output = path.resolve(path.dirname(configFile), outDir);
+      if (inside(output)) outputs.push(output);
     }
-    if (!entry.isFile()) continue;
-    if (!entry.name.endsWith(".ts") && !entry.name.endsWith(".tsx")) continue;
-    if (entry.name.endsWith(".d.ts")) continue;
-    const saved = fs.statSync(full);
+  }
+  // Preserve TS's implicit-directory rule: a basename containing a dot stays a file spec.
+  const normalize = (pattern: string): string => {
+    const slashes = pattern.replaceAll("\\", "/");
+    if (slashes === path.parse(slashes).root) return slashes;
+    return slashes.replace(/\/+$/, "") || (slashes.startsWith("/") ? "/" : "");
+  };
+  config.exclude = config.exclude?.map(normalize);
+  config.include = config.include?.map(normalize);
+  const caseSensitive = !createFilesMatcher({
+    path: configFile,
+    config: { include: ["__mf_case_probe__.ts"] },
+  })(path.join(path.dirname(configFile), "__MF_CASE_PROBE__.ts"));
+  const matches = createFilesMatcher(
+    {
+      path: hasConfig ? configFile : path.join(root, "tsconfig.json"),
+      config,
+    },
+    caseSensitive,
+  );
+  const explicit = new Set((config.files ?? []).map((file) => path.resolve(configDirectory, file)));
+  const names = [...explicit];
+  const absolutePattern = (pattern: string): string =>
+    path.resolve(configDirectory, pattern).split(path.sep).join("/");
+  const escape = (absolute: string): string => {
+    let base = configDirectory;
+    let relative = path.relative(base, absolute);
+    while (relative === ".." || relative.startsWith(`..${path.sep}`)) {
+      base = path.dirname(base);
+      relative = path.relative(base, absolute);
+    }
+    if (path.isAbsolute(relative)) {
+      base = path.parse(absolute).root;
+      relative = path.relative(base, absolute);
+    }
+    if (!relative) return glob.convertPathToPattern(base);
+    const pattern = glob.posix
+      .escapePath(relative.split(path.sep).join("/"))
+      .replace(/\\([*?])/g, (_match, wildcard: string) => (wildcard === "?" ? "[^/]" : "*"));
+    return `${glob.convertPathToPattern(base).replace(/\/$/, "")}/${pattern}`;
+  };
+  const includes = config.include ?? (config.files ? [] : ["**/*"]);
+  if (includes.length) {
+    // TS skips package directories only in wildcard segments; a literal include can opt in.
+    const implicitDirectories = new Set(["bower_components", "jspm_packages"]);
+    const explicitDirectories = includes.flatMap((pattern) => {
+      const parts = absolutePattern(pattern).split("/");
+      return parts.flatMap((part, index) =>
+        implicitDirectories.has(caseSensitive ? part : part.toLowerCase())
+          ? [
+              createFilesMatcher(
+                {
+                  path: hasConfig ? configFile : path.join(root, "tsconfig.json"),
+                  config: { include: [`${parts.slice(0, index + 1).join("/")}/*`], exclude: [] },
+                },
+                caseSensitive,
+              ),
+            ]
+          : [],
+      );
+    });
+    const patterns = includes.map((pattern) => {
+      const absolute = absolutePattern(pattern);
+      return escape(/(?:^|\/)[^.*?]+$/.test(absolute) ? `${absolute}/**/*` : absolute);
+    });
+    const excludes = (config.exclude ?? []).map(absolutePattern);
+    const ignore = [
+      ...excludes.flatMap((pattern) => [escape(pattern), escape(`${pattern}/**`)]),
+      ...outputs.flatMap((output) => {
+        const pattern = glob.convertPathToPattern(output);
+        return [pattern, `${pattern}/**`];
+      }),
+      "**/node_modules/**",
+      "**/.git/**",
+    ];
+    // fast-glob does not prune a directory when an ignore basename contains a wildcard.
+    const ignoredDirectories = ignore.map((pattern) =>
+      micromatch.matcher(pattern, {
+        dot: true,
+        nobrace: true,
+        noext: true,
+        nonegate: true,
+        nocase: !caseSensitive,
+      }),
+    );
+    const candidates = glob
+      .sync(patterns, {
+        cwd: root,
+        absolute: true,
+        dot: true,
+        followSymbolicLinks: false,
+        braceExpansion: false,
+        extglob: false,
+        caseSensitiveMatch: caseSensitive,
+        ignore,
+        fs: {
+          readdirSync: ((directory: string, options?: { withFileTypes: true }) => {
+            try {
+              const full = path.resolve(directory);
+              if (
+                !ownPath(full) ||
+                (full !== root &&
+                  implicitDirectories.has(
+                    caseSensitive ? path.basename(full) : path.basename(full).toLowerCase(),
+                  ) &&
+                  !explicitDirectories.some((match) =>
+                    match(path.join(full, "__mf_directory__.ts")),
+                  )) ||
+                ignoredDirectories.some((match) => match(full.split(path.sep).join("/")))
+              )
+                return [];
+              return options ? fs.readdirSync(directory, options) : fs.readdirSync(directory);
+            } catch (error) {
+              if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? ""))
+                return [];
+              throw error;
+            }
+          }) as glob.FileSystemAdapter["readdirSync"],
+        },
+      })
+      .filter((file) => ownFile(file) && matches(file));
+    const canonical = (file: string): string => (caseSensitive ? file : file.toLowerCase());
+    const selected = new Set([...names, ...candidates].map(canonical));
+    names.push(
+      ...candidates.filter(
+        (file) => !file.endsWith(".tsx") || !selected.has(canonical(`${file.slice(0, -4)}.ts`)),
+      ),
+    );
+  }
+  const files: SourceEntry[] = [];
+  for (const full of [...new Set(names.map((file) => path.resolve(file)))].sort()) {
+    if (!ownFile(full)) continue;
+    const stat = fs.statSync(full);
+    if (!stat.isFile()) continue;
     files.push({
       name: path.relative(root, full).split(path.sep).join("/"),
-      fullPath: full,
-      savedAt: saved.mtimeMs,
-      size: saved.size,
+      fullPath: path.join(folderPath, path.relative(root, full)),
+      savedAt: stat.mtimeMs,
+      size: stat.size,
     });
   }
-}
-
-function readTsconfig(folder: string, tsconfig: string | null): TsConfigInfo {
-  const rel = tsconfig && tsconfig.trim() !== "" ? tsconfig : "tsconfig.json";
-  return loadTsconfig(path.resolve(folder, rel), new Set());
-}
-
-function loadTsconfig(file: string, seen: Set<string>): TsConfigInfo {
-  const empty: TsConfigInfo = { outDir: null, exclude: [], include: [], hasInclude: false };
-  const resolved = path.resolve(file);
-  if (seen.has(resolved) || !fs.existsSync(resolved)) return empty;
-  seen.add(resolved);
-  let json: {
-    extends?: unknown;
-    compilerOptions?: { outDir?: unknown };
-    include?: unknown;
-    exclude?: unknown;
-  };
-  try {
-    const text = stripTrailingCommas(stripJsonComments(fs.readFileSync(resolved, "utf8")));
-    json = JSON.parse(text) as typeof json;
-  } catch {
-    return empty;
-  }
-  const parent =
-    typeof json.extends === "string" && json.extends !== ""
-      ? loadTsconfig(resolveExtends(path.dirname(resolved), json.extends), seen)
-      : empty;
-  const ownInclude = stringList(json.include);
-  const hasOwnInclude = Array.isArray(json.include);
-  const include = hasOwnInclude
-    ? ownInclude.map((pattern) => ({ base: path.dirname(resolved), pattern }))
-    : parent.include;
-  return {
-    outDir:
-      typeof json.compilerOptions?.outDir === "string"
-        ? { base: path.dirname(resolved), pattern: json.compilerOptions.outDir }
-        : parent.outDir,
-    exclude: Array.isArray(json.exclude)
-      ? stringList(json.exclude).map((pattern) => ({ base: path.dirname(resolved), pattern }))
-      : parent.exclude,
-    include,
-    hasInclude: hasOwnInclude || parent.hasInclude,
-  };
-}
-
-function stripJsonComments(text: string): string {
-  let result = "";
-  let quoted = false;
-  for (let i = 0; i < text.length; i++) {
-    const char = text[i];
-    if (quoted) {
-      result += char;
-      if (char === "\\") result += text[++i] ?? "";
-      else if (char === '"') quoted = false;
-    } else if (char === '"') {
-      quoted = true;
-      result += char;
-    } else if (char === "/" && text[i + 1] === "/") {
-      while (i < text.length && text[i] !== "\n") i++;
-      result += "\n";
-    } else if (char === "/" && text[i + 1] === "*") {
-      i += 2;
-      while (i < text.length && !(text[i] === "*" && text[i + 1] === "/")) i++;
-      i++;
-    } else result += char;
-  }
-  return result;
-}
-
-function stripTrailingCommas(text: string): string {
-  let result = "";
-  let quoted = false;
-  for (let i = 0; i < text.length; i++) {
-    const char = text[i];
-    if (quoted) {
-      result += char;
-      if (char === "\\") result += text[++i] ?? "";
-      else if (char === '"') quoted = false;
-    } else if (char === '"') {
-      quoted = true;
-      result += char;
-    } else if (char === "," && /[}\]]/.test(text.slice(i + 1).trimStart()[0] ?? "")) {
-      continue;
-    } else result += char;
-  }
-  return result;
-}
-
-function resolveExtends(fromDir: string, spec: string): string {
-  const withExt = spec.endsWith(".json") ? spec : `${spec}.json`;
-  return path.resolve(fromDir, withExt);
-}
-
-function stringList(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return value.filter((item): item is string => typeof item === "string");
-}
-
-function isInside(root: string, target: string): boolean {
-  const rel = path.relative(root, target);
-  return rel === "" || (!rel.startsWith(`..${path.sep}`) && rel !== ".." && !path.isAbsolute(rel));
-}
-
-function globMatch(pattern: string, rel: string): boolean {
-  const body = pattern
-    .split("**/")
-    .map((segment) =>
-      segment
-        .split("**")
-        .map((part) =>
-          part
-            .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-            .replaceAll("*", "[^/]*")
-            .replaceAll("?", "[^/]"),
-        )
-        .join(".*"),
-    )
-    .join("(?:.*/)?");
-  return new RegExp(`^${body}$`).test(rel);
-}
-
-function walkPaths(
-  dir: string,
-  skip: ReadonlySet<string>,
-  excluded: (full: string) => boolean,
-  visit: (full: string) => void,
-): void {
-  let entries: fs.Dirent[];
-  try {
-    entries = fs.readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return;
-  }
-  for (const entry of entries) {
-    if (entry.isSymbolicLink()) continue;
-    const full = path.join(dir, entry.name);
-    if (skip.has(entry.name)) continue;
-    if (entry.isDirectory()) {
-      if (!excluded(full)) walkPaths(full, skip, excluded, visit);
-    } else if (entry.isFile()) visit(full);
-  }
-}
-
-function addFile(
-  root: string,
-  full: string,
-  skip: ReadonlySet<string>,
-  excluded: (full: string) => boolean,
-  files: SourceEntry[],
-): void {
-  if (!isInside(root, full)) return;
-  if (
-    fs.lstatSync(full).isSymbolicLink() ||
-    !isInside(fs.realpathSync(root), fs.realpathSync(full))
-  )
-    return;
-  const rel = path.relative(root, full);
-  if (rel.split(path.sep).some((part) => skip.has(part)) || excluded(full)) return;
-  const name = path.basename(full);
-  if (!name.endsWith(".ts") && !name.endsWith(".tsx")) return;
-  if (name.endsWith(".d.ts")) return;
-  const saved = fs.statSync(full);
-  files.push({
-    name: rel.split(path.sep).join("/"),
-    fullPath: full,
-    savedAt: saved.mtimeMs,
-    size: saved.size,
-  });
+  return files;
 }

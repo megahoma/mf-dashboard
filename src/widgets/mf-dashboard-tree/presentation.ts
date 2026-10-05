@@ -181,7 +181,7 @@ function appNode(
       view.structure === "flat"
         ? []
         : app.remotes.map((remote) =>
-            linkNode(view, app, remote, byName, new Set(stack).add(app.name), `app:${app.name}`),
+            linkNode(view, app, remote, byName, new Set(stack).add(app.name), [`app:${app.name}`]),
           ),
   };
 }
@@ -244,7 +244,7 @@ function linkNode(
   remote: LocalApp["remotes"][number],
   byName: Map<string, LocalApp>,
   stack: ReadonlySet<string>,
-  parentId: string,
+  parentPath: readonly string[],
 ): DashboardNode {
   const link: RemoteLink = {
     consumer: parent.name,
@@ -264,11 +264,12 @@ function linkNode(
     exposes: linkProbe?.exposes ?? [],
     shared: linkProbe?.shared ?? [],
   });
-  const id = JSON.stringify([parentId, linkId]);
+  const nodePath = [...parentPath, linkId];
+  const id = JSON.stringify(nodePath);
   const nested =
     producer !== undefined && producer.port !== null && !stack.has(producer.name)
       ? producer.remotes.map((child) =>
-          linkNode(view, producer, child, byName, new Set(stack).add(producer.name), id),
+          linkNode(view, producer, child, byName, new Set(stack).add(producer.name), nodePath),
         )
       : [];
   return {

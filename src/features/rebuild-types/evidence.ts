@@ -21,7 +21,7 @@ export function dependencyEvidence(
 ) {
   const local = new Map(apps.map((item) => [item.name, { generateTypes: item.generateTypes }]));
   const dependencies = chainDependencies(app.remotes, local);
-  const dependencyZipHashes: Record<string, string> = {};
+  const dependencyZipHashes: Record<string, string> = Object.create(null);
   for (const name of dependencies) {
     const hash = published.get(name) ?? book.apps.get(appProbeId(name))?.zipHash;
     if (hash) dependencyZipHashes[name] = hash;

@@ -64,8 +64,13 @@ export function mergeMissingApps<T extends AppConfig>(
 ): Record<string, T> {
   const apps: Record<string, T> = { ...(existing ?? {}) };
   for (const [name, value] of Object.entries(found)) {
-    if (apps[name]) continue;
-    apps[name] = value;
+    if (Object.hasOwn(apps, name)) continue;
+    Object.defineProperty(apps, name, {
+      value,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
   }
   return apps;
 }
