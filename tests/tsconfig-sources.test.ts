@@ -27,6 +27,8 @@ const cases: [string, Record<string, unknown> | string][] = [
   ["empty include spec", { include: [""] }],
   ["empty exclude spec", { exclude: [""] }],
   ["current directory exclude", { exclude: ["."] }],
+  ["excluded include root", { include: ["src/**/*.ts"], exclude: ["src"] }],
+  ["excluded literal file", { include: ["src/a.ts"], exclude: ["src/a.ts"] }],
   ["relative base", { extends: "./configs/base.json" }],
   ["extends array", { extends: ["./configs/base.json", "./configs/second.json"] }],
   ["package extends", { extends: "@fixture/config" }],
@@ -47,6 +49,14 @@ const cases: [string, Record<string, unknown> | string][] = [
   ],
   ["literal brackets", { include: ["src/[literal]/**/*.ts"] }],
   ["literal parentheses", { include: ["src/(literal)/**/*.ts"] }],
+  ["literal brace list", { include: ["src/{a,b}/**/*.ts"] }],
+  [
+    "deeply nested braces in an exclude stay literal",
+    {
+      include: ["src/**/*.ts"],
+      exclude: [`src/${"{".repeat(4500)}a,b${"}".repeat(4500)}/**/*`],
+    },
+  ],
   ["question wildcard in a directory", { include: ["src/?ne/*.ts"] }],
   ["question wildcard inside a directory name", { include: ["src/o?e/*.ts"] }],
   ["question wildcard in a file name", { include: ["src/one/?.ts"] }],
@@ -68,6 +78,7 @@ for (const [title, config] of cases) {
       "src/foo.bar/a.ts",
       "src/[literal]/a.ts",
       "src/(literal)/a.ts",
+      "src/{a,b}/a.ts",
       "src/one/a.ts",
       "src/one/b.ts",
       "emitted/generated.ts",
@@ -119,6 +130,49 @@ for (const [title, config] of cases) {
       assert.equal(sourceContains(root, null, "@mf-types", path.join(root, name)), true);
   });
 }
+
+test("external include and exclude paths preserve local sources without scanning outside the app", (t) => {
+  const parent = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mf-external-patterns-")));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  const root = path.join(parent, "app");
+  fs.mkdirSync(path.join(root, "config"), { recursive: true });
+  fs.mkdirSync(path.join(root, "src"));
+  fs.mkdirSync(path.join(parent, "shared"));
+  const source = path.join(root, "src/a.ts");
+  fs.writeFileSync(source, "export const value = 1;");
+  fs.writeFileSync(path.join(parent, "shared/external.ts"), "external source");
+  fs.writeFileSync(
+    path.join(parent, "base.json"),
+    JSON.stringify({ exclude: ["node_modules", "generated"] }),
+  );
+  const variants: [string, Record<string, unknown>][] = [
+    ["tsconfig.json", { include: ["src/**/*.ts", "../shared/**/*.ts"] }],
+    ["tsconfig.json", { include: ["src/**/*.ts", "../missing/**/*.ts"] }],
+    ["tsconfig.json", { include: ["src/**/*.ts"], exclude: ["../node_modules"] }],
+    ["tsconfig.json", { extends: "../base.json", include: ["src/**/*.ts"] }],
+    ["config/tsconfig.json", { include: ["../src/**/*.ts", "../../shared/**/*.ts"] }],
+  ];
+  const read = t.mock.method(fs, "readdirSync");
+  for (const [configFile, config] of variants) {
+    fs.writeFileSync(path.join(root, configFile), JSON.stringify(config));
+    const before = sourceIdentity(root, configFile, "@mf-types");
+    assert.deepEqual(before.names, ["src/a.ts"], JSON.stringify(config));
+    assert.equal(sourceContains(root, configFile, "@mf-types", source), true);
+    assert.deepEqual(
+      sourceSnapshot(root, configFile, "@mf-types").files.map((file) => file.name),
+      ["src/a.ts"],
+    );
+    fs.appendFileSync(source, "\n// changed");
+    assert.notEqual(sourceIdentity(root, configFile, "@mf-types").fingerprint, before.fingerprint);
+  }
+  for (const call of read.mock.calls) {
+    const relative = path.relative(root, String(call.arguments[0]));
+    assert.ok(
+      relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative),
+      `Scanned outside app: ${String(call.arguments[0])}`,
+    );
+  }
+});
 
 test("a types folder outside the app does not hide its sources", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-types-outside-"));

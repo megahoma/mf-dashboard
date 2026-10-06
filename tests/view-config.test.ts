@@ -39,6 +39,11 @@ test("the extension bundle loads without project dependencies or extra implement
     format: "cjs",
     external: ["vscode"],
     mainFields,
+    alias: Object.fromEntries(
+      [...(pkg.scripts?.compile ?? "").matchAll(/--alias:([^=\s]+)=(\S+)/g)].map(
+        ([, name, replacement]) => [name, replacement],
+      ),
+    ),
   });
   const result = spawnSync(
     process.execPath,
