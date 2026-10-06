@@ -1,9 +1,9 @@
 import { noLog, type LogContext } from "../../shared/logging.ts";
 import fs from "node:fs";
-import glob from "fast-glob";
+import * as glob from "tinyglobby";
 import { createFilesMatcher, parseTsconfig, type TsConfigJsonResolved } from "get-tsconfig";
 import { parse as parseJsonc, type ParseError } from "jsonc-parser";
-import micromatch from "micromatch";
+import picomatch from "picomatch";
 import path from "node:path";
 import { filesFingerprint } from "../../shared/fingerprint.ts";
 
@@ -267,9 +267,9 @@ function sourceEntries(
       relative = path.relative(base, absolute);
     }
     if (!relative) return glob.convertPathToPattern(base);
-    const pattern = glob.posix
+    const pattern = glob
       .escapePath(relative.split(path.sep).join("/"))
-      .replace(/\\([*?])/g, (_match, wildcard: string) => (wildcard === "?" ? "[^/]" : "*"));
+      .replace(/\\?([*?])/g, (_match, wildcard: string) => (wildcard === "?" ? "[^/]" : "*"));
     return `${glob.convertPathToPattern(base).replace(/\/$/, "")}/${pattern}`;
   };
   const includes = config.include ?? (config.files ? [] : ["**/*"]);
@@ -306,9 +306,9 @@ function sourceEntries(
       "**/node_modules/**",
       "**/.git/**",
     ];
-    // fast-glob does not prune a directory when an ignore basename contains a wildcard.
+    // Prune skipped directories before reading them, including wildcard excludes.
     const ignoredDirectories = ignore.map((pattern) =>
-      micromatch.matcher(pattern, {
+      picomatch(pattern, {
         dot: true,
         nobrace: true,
         noext: true,
@@ -316,18 +316,23 @@ function sourceEntries(
         nocase: !caseSensitive,
       }),
     );
+    // tinyglobby suppresses traversal errors; retain failures so incomplete scans cannot be saved.
+    let scanError: unknown;
     const candidates = glob
-      .sync(patterns, {
+      .globSync(patterns, {
         cwd: root,
         absolute: true,
         dot: true,
         followSymbolicLinks: false,
+        expandDirectories: false,
         braceExpansion: false,
         extglob: false,
         caseSensitiveMatch: caseSensitive,
-        ignore,
+        // Subtree patterns also match their root; literal crawl-root ignores become empty in tinyglobby.
+        ignore: ignore.filter((pattern) => pattern.endsWith("/**")),
         fs: {
           readdirSync: ((directory: string, options?: { withFileTypes: true }) => {
+            if (scanError) return [];
             try {
               const full = path.resolve(directory);
               if (
@@ -342,16 +347,18 @@ function sourceEntries(
                 ignoredDirectories.some((match) => match(full.split(path.sep).join("/")))
               )
                 return [];
-              return options ? fs.readdirSync(directory, options) : fs.readdirSync(directory);
+              return options ? fs.readdirSync(full, options) : fs.readdirSync(full);
             } catch (error) {
               if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? ""))
                 return [];
+              scanError = error;
               throw error;
             }
           }) as glob.FileSystemAdapter["readdirSync"],
         },
       })
       .filter((file) => ownFile(file) && matches(file));
+    if (scanError) throw scanError;
     const canonical = (file: string): string => (caseSensitive ? file : file.toLowerCase());
     const selected = new Set([...names, ...candidates].map(canonical));
     names.push(
