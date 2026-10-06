@@ -131,6 +131,49 @@ for (const [title, config] of cases) {
   });
 }
 
+test("external include and exclude paths preserve local sources without scanning outside the app", (t) => {
+  const parent = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mf-external-patterns-")));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  const root = path.join(parent, "app");
+  fs.mkdirSync(path.join(root, "config"), { recursive: true });
+  fs.mkdirSync(path.join(root, "src"));
+  fs.mkdirSync(path.join(parent, "shared"));
+  const source = path.join(root, "src/a.ts");
+  fs.writeFileSync(source, "export const value = 1;");
+  fs.writeFileSync(path.join(parent, "shared/external.ts"), "external source");
+  fs.writeFileSync(
+    path.join(parent, "base.json"),
+    JSON.stringify({ exclude: ["node_modules", "generated"] }),
+  );
+  const variants: [string, Record<string, unknown>][] = [
+    ["tsconfig.json", { include: ["src/**/*.ts", "../shared/**/*.ts"] }],
+    ["tsconfig.json", { include: ["src/**/*.ts", "../missing/**/*.ts"] }],
+    ["tsconfig.json", { include: ["src/**/*.ts"], exclude: ["../node_modules"] }],
+    ["tsconfig.json", { extends: "../base.json", include: ["src/**/*.ts"] }],
+    ["config/tsconfig.json", { include: ["../src/**/*.ts", "../../shared/**/*.ts"] }],
+  ];
+  const read = t.mock.method(fs, "readdirSync");
+  for (const [configFile, config] of variants) {
+    fs.writeFileSync(path.join(root, configFile), JSON.stringify(config));
+    const before = sourceIdentity(root, configFile, "@mf-types");
+    assert.deepEqual(before.names, ["src/a.ts"], JSON.stringify(config));
+    assert.equal(sourceContains(root, configFile, "@mf-types", source), true);
+    assert.deepEqual(
+      sourceSnapshot(root, configFile, "@mf-types").files.map((file) => file.name),
+      ["src/a.ts"],
+    );
+    fs.appendFileSync(source, "\n// changed");
+    assert.notEqual(sourceIdentity(root, configFile, "@mf-types").fingerprint, before.fingerprint);
+  }
+  for (const call of read.mock.calls) {
+    const relative = path.relative(root, String(call.arguments[0]));
+    assert.ok(
+      relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative),
+      `Scanned outside app: ${String(call.arguments[0])}`,
+    );
+  }
+});
+
 test("a types folder outside the app does not hide its sources", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-types-outside-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
