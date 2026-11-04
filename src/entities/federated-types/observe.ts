@@ -1,6 +1,11 @@
 import { noLog, safeError, type LogContext } from "../../shared/logging.ts";
 import fs from "node:fs";
-import { installedFreshness, sourceFreshness, type InstallConfirmationView } from "./freshness.ts";
+import {
+  EMPTY_TYPES_FINGERPRINT,
+  installedFreshness,
+  sourceFreshness,
+  type InstallConfirmationView,
+} from "./freshness.ts";
 import { treeFingerprint } from "./tree-fingerprint.ts";
 import { typesState, type TypesStatus } from "./state.ts";
 
@@ -45,6 +50,7 @@ export function describeLink(
     linkUrl: string | null;
     generationConfirmed: boolean;
     installConfirmation: InstallConfirmationView | null;
+    archiveMatches?: boolean;
     checkedAt: number;
     typesSettleMs: number;
     installed: InstalledEvidence;
@@ -76,12 +82,21 @@ export function describeLink(
     filesFingerprint: input.installed.filesFingerprint,
     url: input.linkUrl,
     confirmation: input.installConfirmation,
+    archiveMatches: input.archiveMatches,
   });
   const status = typesState({
     generateTypes: producer?.generateTypes ?? false,
     consumeTypes: true,
     sourceFreshness: source,
     installedFreshness: installed,
+    installedChanged:
+      !input.linkZipReachable &&
+      input.installed.folderExists &&
+      !!input.installed.filesFingerprint &&
+      input.installed.filesFingerprint !== EMPTY_TYPES_FINGERPRINT &&
+      input.installConfirmation != null &&
+      input.installConfirmation.url === input.linkUrl &&
+      input.installConfirmation.filesFingerprint !== input.installed.filesFingerprint,
     zipReachable: input.linkZipReachable,
     folderExists: input.installed.folderExists,
     sourceSavedAt: producer?.sourceSavedAt ?? null,

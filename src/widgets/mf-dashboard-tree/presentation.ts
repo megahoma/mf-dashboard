@@ -318,9 +318,23 @@ function model(
   let tooltip = row.tooltip;
   if (input.role === "external" && !input.folder)
     tooltip = `${view.terms.folder}: ${view.terms.noWorkspace}\n${tooltip}`;
-  if (input.role === "link" && input.typesState === "unknown")
+  if (input.role === "link" && (row.kind === "silent" || input.typesState === "changed")) {
+    const labels = {
+      none: view.terms.typesDisabled,
+      ok: view.terms.typesCurrent,
+      "stale-source": view.terms.stale,
+      unfetched: view.terms.unfetched,
+      changed: view.terms.typesChanged,
+      manual: view.terms.typesManual,
+      unknown: view.terms.typesUnknown,
+    };
+    const label = `@mf-types: ${labels[input.typesState]}`;
+    row.description = `${row.description} · ${label}`;
+    tooltip = `${tooltip}\n${label}`;
+  }
+  if (input.role === "link" && row.kind !== "silent" && input.typesState === "unknown")
     tooltip = `${tooltip}\n${view.terms.typesUnknown}`;
-  if (input.role === "link" && input.typesState === "none")
+  if (input.role === "link" && row.kind !== "silent" && input.typesState === "none")
     tooltip = `${tooltip}\n${view.terms.typesDisabled}`;
   if (contextValue === "unfetched.pending") tooltip = `${tooltip}\n${view.terms.refetchPending}`;
   if (linkId && view.refetchErrors.has(linkId)) tooltip = `${tooltip}\n${view.terms.refetchFailed}`;

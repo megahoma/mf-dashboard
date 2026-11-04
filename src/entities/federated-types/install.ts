@@ -48,6 +48,10 @@ export interface InstallTypesResult {
   filesFingerprint: string;
 }
 
+export interface ArchiveComparison extends InstallTypesResult {
+  matches: boolean;
+}
+
 // Download, check, then swap. The live types directory is not removed before the archive checks out.
 export function installTypesArchive(input: InstallTypesInput): Promise<InstallTypesResult> {
   return destinationLock(path.resolve(input.destination), () => writeTypesArchive(input));
@@ -84,6 +88,21 @@ export function confirmInstalledArchive(input: InstallTypesInput): Promise<Insta
 }
 
 async function checkInstalledArchive(input: InstallTypesInput): Promise<InstallTypesResult> {
+  const result = await compareArchive(input);
+  if (!result.matches)
+    throw new DiagnosticError("unzip: installed files do not match the archive", {
+      stage: "destination",
+      reason: "fingerprint-mismatch",
+    });
+  return { zipHash: result.zipHash, filesFingerprint: result.filesFingerprint };
+}
+
+// Verify an external install without changing the consumer's files.
+export function compareInstalledArchive(input: InstallTypesInput): Promise<ArchiveComparison> {
+  return destinationLock(path.resolve(input.destination), () => compareArchive(input));
+}
+
+async function compareArchive(input: InstallTypesInput): Promise<ArchiveComparison> {
   const loaded = await loadZip(input);
   const destination = path.resolve(input.destination);
   if (!fs.existsSync(destination) || !fs.statSync(destination).isDirectory()) {
@@ -101,12 +120,11 @@ async function checkInstalledArchive(input: InstallTypesInput): Promise<InstallT
     });
   const fingerprint = filesFingerprint(files);
   const extracted = await fingerprintArchive(loaded.archive);
-  if (fingerprint !== extracted)
-    throw new DiagnosticError("unzip: installed files do not match the archive", {
-      stage: "destination",
-      reason: "fingerprint-mismatch",
-    });
-  return { zipHash: loaded.zipHash, filesFingerprint: fingerprint };
+  return {
+    zipHash: loaded.zipHash,
+    filesFingerprint: fingerprint,
+    matches: fingerprint === extracted,
+  };
 }
 
 async function loadZip(

@@ -6,6 +6,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { localApp } from "./support/app.ts";
+import net from "node:net";
+import { EventEmitter } from "node:events";
+import { createConfirmationStore } from "../src/entities/federated-types/index.ts";
 import * as vscode from "./support/vscode.ts";
 import { terms } from "../src/shared/config/index.ts";
 
@@ -19,6 +22,110 @@ registerHooks({
 });
 const { ManifestDocuments } = await import("../src/features/open-manifest/documents.ts");
 const { MfDashboardProvider } = await import("../src/widgets/mf-dashboard-tree/provider.ts");
+
+test("refresh recognizes external watch output and keeps offline type changes visible", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-watch-refresh-"));
+  const consumer = path.join(root, "workshop");
+  const producer = path.join(root, "palette");
+  const destination = path.join(consumer, "@mf-types", "paint");
+  const sdk = path.join(consumer, "node_modules", "adm-zip");
+  for (const folder of [consumer, producer, destination, sdk])
+    fs.mkdirSync(folder, { recursive: true });
+  let text = "export type Pigment = 'blue';";
+  let online = true;
+  let downloads = 0;
+  fs.writeFileSync(path.join(consumer, "package.json"), "{}");
+  fs.writeFileSync(
+    path.join(consumer, "rsbuild.config.ts"),
+    `export default defineConfig({server:{port:4400},plugins:[pluginModuleFederation({name:'workshop',dts:true,remotes:{paint:'palette@http://localhost:4401/mf-manifest.json'}})]});`,
+  );
+  fs.writeFileSync(
+    path.join(producer, "rsbuild.config.ts"),
+    `export default defineConfig({server:{port:4401},plugins:[pluginModuleFederation({name:'palette',dts:true,manifest:true})]});`,
+  );
+  fs.writeFileSync(path.join(destination, "index.d.ts"), text);
+  fs.writeFileSync(
+    path.join(sdk, "index.js"),
+    `const fs=require('node:fs'),path=require('node:path');
+    module.exports=class {
+      constructor(blob){this.items=JSON.parse(blob.subarray(4).toString());}
+      getEntries(){return this.items.map(item=>({entryName:item.file,isDirectory:false}));}
+      extractAllTo(folder){for(const item of this.items)fs.writeFileSync(path.join(folder,item.file),item.text);}
+    };`,
+  );
+  Object.assign(vscode.workspace, {
+    workspaceFolders: [{ name: "sample", uri: vscode.Uri.file(root) }],
+  });
+  t.after(() => {
+    Reflect.deleteProperty(vscode.workspace, "workspaceFolders");
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  t.mock.method(vscode.workspace, "getConfiguration", () => ({
+    async update() {},
+    inspect: () => ({
+      workspaceValue: { workshop: { path: "workshop" }, palette: { path: "palette" } },
+    }),
+    get: <T>(key: string): T | undefined =>
+      (key === "structure" ? "tree" : undefined) as T | undefined,
+  }));
+  t.mock.method(net, "connect", () => {
+    const socket = Object.assign(new EventEmitter(), { setTimeout() {}, destroy() {} });
+    queueMicrotask(() => socket.emit(online ? "connect" : "error", new Error("offline")));
+    return socket as unknown as net.Socket;
+  });
+  t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
+    if (!online) throw new Error("offline");
+    if (String(input).endsWith(".json"))
+      return Response.json({
+        metaData: { publicPath: "http://localhost:4401/", types: { zip: "types.zip" } },
+      });
+    downloads++;
+    const bytes = Buffer.concat([
+      Buffer.from([0x50, 0x4b, 3, 4]),
+      Buffer.from(JSON.stringify([{ file: "index.d.ts", text }])),
+    ]);
+    return new Response(bytes, {
+      headers: { "last-modified": new Date(Date.now() + 60_000).toUTCString() },
+    });
+  });
+  const store = createConfirmationStore();
+  let persisted = 0;
+  const provider = new MfDashboardProvider(
+    () => terms,
+    store,
+    () => {
+      persisted++;
+    },
+  );
+  t.after(() => provider.dispose());
+  await provider.refresh();
+  const row = () => provider.getChildren().find((node) => node.name === "workshop")!.children[0];
+  const link = { consumer: "workshop", alias: "paint", remoteName: "palette" };
+  const initial = store.install(link);
+  assert.ok(initial);
+  assert.equal(
+    provider.session.typesForLink({ ...link, url: "http://localhost:4401/mf-manifest.json" }),
+    "ok",
+  );
+  assert.equal(persisted, 1);
+  await provider.refresh();
+  assert.equal(downloads, 3, "one initial probe, one comparison, then only the next probe");
+  text = "export type Pigment = 'violet';";
+  fs.writeFileSync(path.join(destination, "index.d.ts"), text);
+  await provider.refresh();
+  assert.equal(persisted, 2);
+  assert.notEqual(store.install(link)?.zipHash, initial.zipHash);
+  assert.equal(row().kind, "listen");
+  online = false;
+  fs.writeFileSync(
+    path.join(destination, "index.d.ts"),
+    "export type Pigment = 'changed offline';",
+  );
+  await provider.refresh();
+  assert.equal(row().kind, "silent");
+  assert.ok(row().description.includes(`@mf-types: ${terms.typesChanged}`));
+  assert.equal(persisted, 2);
+});
 
 test("stat failures in installed types do not prevent rendering the dashboard", (t) => {
   const producer = localApp("producer", "/producer", { generateTypes: false });
