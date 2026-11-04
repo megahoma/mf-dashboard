@@ -346,5 +346,10 @@
     "jsonc-parser": "3.3.1",
     "picomatch": "4.0.7",
     "tinyglobby": "0.2.17"
+  },
+  "overrides": {
+    "@vscode/vsce": {
+      "minimatch": "11.0.1"
+    }
   }
 }
