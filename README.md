@@ -94,6 +94,7 @@ All settings use the `mf-dashboard.*` namespace.
 | `mf-dashboard.extraManifestUrls`     | `[]`          | External manifest URLs shown as root rows. Only valid HTTP(S) URLs are requested.                                          |
 | `mf-dashboard.packageManager`        | `auto`        | Start command manager: `auto`, `npm`, `pnpm`, `yarn`, or `bun`.                                                            |
 | `mf-dashboard.probeIntervalMs`       | `5000`        | Interval between port, manifest, and ZIP checks in milliseconds; minimum `1000`.                                           |
+| `mf-dashboard.types.autoCheck`       | `true`        | Automatically check types; disable for manual checks while ports and manifests keep updating.                              |
 | `mf-dashboard.typesSettleMs`         | `15000`       | Delay after saving source before types can count as stale, in milliseconds.                                                |
 | `mf-dashboard.terminal.reveal`       | `true`        | Show the terminal when starting an app.                                                                                    |
 | `mf-dashboard.scripts.start`         | `dev`         | `package.json` script key for Start when the app has no override.                                                          |

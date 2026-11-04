@@ -10,6 +10,7 @@ export interface WorkspaceDefaults {
   "mf-dashboard.packageManager": "auto";
   "mf-dashboard.probeIntervalMs": number;
   "mf-dashboard.typesSettleMs": number;
+  "mf-dashboard.types.autoCheck": boolean;
   "mf-dashboard.terminal.reveal": boolean;
   "mf-dashboard.commands.rebuildTypes": string;
   "mf-dashboard.commands.refetchTypes": string;
@@ -35,6 +36,7 @@ export function defaultWorkspaceSettings(): WorkspaceDefaults {
     "mf-dashboard.packageManager": "auto",
     "mf-dashboard.probeIntervalMs": 5000,
     "mf-dashboard.typesSettleMs": 15000,
+    "mf-dashboard.types.autoCheck": true,
     "mf-dashboard.terminal.reveal": true,
     "mf-dashboard.commands.rebuildTypes": "",
     "mf-dashboard.commands.refetchTypes": "",

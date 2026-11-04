@@ -40,6 +40,22 @@ export class EventEmitter<T> {
   }
 }
 
+export class TreeItem {
+  readonly label: string;
+  readonly collapsibleState: number;
+  constructor(label: string, collapsibleState: number) {
+    this.label = label;
+    this.collapsibleState = collapsibleState;
+  }
+}
+export class ThemeIcon {
+  readonly id: string;
+  constructor(id: string) {
+    this.id = id;
+  }
+}
+export const TreeItemCollapsibleState = { None: 0, Collapsed: 1, Expanded: 2 };
+
 export const languages = {
   createDiagnosticCollection: () => ({ set(_entries: unknown) {}, dispose() {} }),
 };

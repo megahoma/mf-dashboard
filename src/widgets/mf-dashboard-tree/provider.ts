@@ -17,6 +17,7 @@ import {
   createProbeBook,
   linkProbeId,
   scanWorkspace,
+  type LocalApp,
   type RemoteLink,
 } from "../../entities/microfrontend/index.ts";
 import { diagnosticUpdates, extraManifestSettingsFile } from "../../entities/status/index.ts";
@@ -38,7 +39,7 @@ import {
   startInvocation,
 } from "../../features/start-app/index.ts";
 import {
-  linkRowId,
+  linksOf,
   loadKnownApps,
   savedFileKind,
   DashboardSession,
@@ -62,6 +63,7 @@ function readWorkspaceSettings(): DashboardSettings & {
   startScript: string;
   rebuildCommand: string;
   refetchCommand: string;
+  typesAutoCheck: boolean;
 } {
   const config = vscode.workspace.getConfiguration("mf-dashboard");
   const inspected = config.inspect<unknown>("apps");
@@ -77,6 +79,7 @@ function readWorkspaceSettings(): DashboardSettings & {
     packageManager: config.get<string>("packageManager") ?? "auto",
     probeIntervalMs: finiteNumber(config.get("probeIntervalMs"), 5000),
     typesSettleMs: finiteNumber(config.get("typesSettleMs"), 15000),
+    typesAutoCheck: config.get<boolean>("types.autoCheck") ?? true,
     terminalReveal: config.get<boolean>("terminal.reveal") ?? true,
     startScript: config.get<string>("scripts.start") ?? "dev",
     rebuildCommand: config.get<string>("commands.rebuildTypes") ?? "",
@@ -132,7 +135,17 @@ export class MfDashboardProvider
   private readonly persistConfirmations: () => void | PromiseLike<void>;
   private readonly producerCache = new Map<string, ProducerSnapshot>();
   private readonly publishedZipHashes = new Map<string, string>();
-  private readonly typeCache = new Map<string, ReturnType<typeof describeLink>>();
+  private readonly typeCache = new Map<
+    string,
+    {
+      status: ReturnType<typeof describeLink>;
+      checkedAt: number;
+      signature: string;
+    }
+  >();
+  private explicitTypeCheck = false;
+  private requestedTypeLinks: ReadonlySet<string> | undefined;
+  private requestedTypeNode: DashboardNode | undefined;
   private readonly installChecks = new Map<string, InstallCheck>();
   private view: { nodes: DashboardNode[]; stamp: string } | null = null;
   private timer: ReturnType<typeof setTimeout> | undefined;
@@ -164,16 +177,25 @@ export class MfDashboardProvider
         scan: scanWorkspace,
         loadKnown: loadKnownApps,
         probe: async (target, input) => {
-          await probeWorkspace(target, input);
+          const checkTypes = this.canCheckTypes();
+          if (this.requestedTypeNode)
+            this.requestedTypeLinks =
+              this.typeLinksForNode(this.requestedTypeNode, input.apps) ?? new Set();
+          await probeWorkspace(target, {
+            ...input,
+            checkTypes,
+            typeLinks: this.requestedTypeLinks,
+          });
           if (
-            await verifyTypeInstalls(
+            checkTypes &&
+            (await verifyTypeInstalls(
               input.apps,
               input.links,
               target,
               this.confirmations,
               this.installChecks,
               input.log,
-            )
+            ))
           ) {
             try {
               await this.persistConfirmations();
@@ -192,12 +214,17 @@ export class MfDashboardProvider
     );
     this.session.terms = termsOf();
     this.session.typesForLink = (link) => this.cachedTypes(link);
+    this.session.typesAutoCheck = readWorkspaceSettings().typesAutoCheck;
+    this.session.typesCheckedAt = (link) => this.typeSnapshot(link)?.checkedAt ?? null;
     this.session.beforeRefreshChange = (log) => {
       this.observationLog = log ?? this.log;
+      this.session.typesAutoCheck = readWorkspaceSettings().typesAutoCheck;
       this.clearTypeCache();
+      const active = new Set(linksOf(this.session.loaded).map(linkProbeId));
+      for (const key of this.typeCache.keys()) if (!active.has(key)) this.typeCache.delete(key);
     };
     this.session.onRefreshFailed = () => {
-      this.clearTypeCache();
+      this.clearTypeCache(readWorkspaceSettings().typesAutoCheck);
     };
     this.manifestRegistration = vscode.workspace.registerTextDocumentContentProvider(
       MANIFEST_SCHEME,
@@ -296,7 +323,66 @@ export class MfDashboardProvider
   }
 
   refresh(source = "manual"): Promise<void> {
-    return this.run(() => this.session.refresh(source));
+    return this.run(() =>
+      source === "manual"
+        ? this.withTypeCheck(() => this.session.refresh(source))
+        : this.session.refresh(source),
+    );
+  }
+
+  checkTypes(node?: DashboardNode): Promise<void> {
+    return this.run(async () => {
+      if (node && !this.typeLinksForNode(node)) return;
+      await this.withTypeCheck(() => this.session.refresh("types"), node);
+    });
+  }
+
+  typesSettingsChanged(): void {
+    const automatic = readWorkspaceSettings().typesAutoCheck;
+    this.session.typesAutoCheck = automatic;
+    if (!automatic) {
+      for (const timer of this.saveTimers.values()) clearTimeout(timer);
+      this.saveTimers.clear();
+    }
+    this.clearTypeCache();
+    this.change.fire();
+  }
+
+  private async withTypeCheck(operation: () => Promise<void>, node?: DashboardNode): Promise<void> {
+    this.explicitTypeCheck = true;
+    this.requestedTypeNode = node;
+    this.requestedTypeLinks = node ? (this.typeLinksForNode(node) ?? new Set()) : undefined;
+    try {
+      await operation();
+    } finally {
+      this.explicitTypeCheck = false;
+      this.requestedTypeLinks = undefined;
+      this.requestedTypeNode = undefined;
+    }
+  }
+
+  private canCheckTypes(link?: RemoteLink): boolean {
+    if (this.explicitTypeCheck)
+      return !link || !this.requestedTypeLinks || this.requestedTypeLinks.has(linkProbeId(link));
+    return readWorkspaceSettings().typesAutoCheck;
+  }
+
+  private typeLinksForNode(
+    node: DashboardNode,
+    apps: readonly LocalApp[] = this.session.loaded,
+  ): ReadonlySet<string> | null {
+    const parsed = node.linkId ? parseLinkId(node.linkId) : null;
+    const app = apps.find((item) => item.name === (parsed?.consumer ?? node.name));
+    if (!app?.consumeTypes) return null;
+    if (!node.linkId && node.id !== `app:${app.name}`) return null;
+    const links = linksOf([app]).filter(
+      (link) =>
+        !node.linkId ||
+        (parsed?.alias === link.alias &&
+          parsed.remoteName === link.remoteName &&
+          node.name === link.remoteName),
+    );
+    return links.length > 0 ? new Set(links.map(linkProbeId)) : null;
   }
 
   discover(): Promise<void> {
@@ -309,10 +395,10 @@ export class MfDashboardProvider
     for (const app of this.session.loaded) {
       const kind = savedFileKind(app, file, settings.envMode);
       if (kind === "config") {
-        await this.refresh();
+        await this.refresh("config");
         return;
       }
-      if (kind !== "source") continue;
+      if (kind !== "source" || !settings.typesAutoCheck) continue;
       let included: boolean;
       try {
         included = sourceContains(app.folder, app.tsconfig, app.typesFolder, file);
@@ -332,7 +418,7 @@ export class MfDashboardProvider
       if (previous) clearTimeout(previous);
       const timer = setTimeout(() => {
         this.saveTimers.delete(app.name);
-        if (this.disposed) return;
+        if (this.disposed || !readWorkspaceSettings().typesAutoCheck) return;
         this.clearTypeCache();
         this.notify();
       }, settings.typesSettleMs);
@@ -341,7 +427,7 @@ export class MfDashboardProvider
   }
 
   private async reload(source: string, log: LogContext): Promise<void> {
-    await this.session.refresh(source, log);
+    await this.withTypeCheck(() => this.session.refresh(source, log));
   }
 
   relabel(next: DashboardTerms = this.termsOf()): void {
@@ -578,6 +664,8 @@ export class MfDashboardProvider
     item.description = row.description;
     item.tooltip = row.tooltip;
     item.contextValue = row.contextValue;
+    if (!readWorkspaceSettings().typesAutoCheck && this.typeLinksForNode(row))
+      item.contextValue += " check-types";
     item.iconPath = new vscode.ThemeIcon(icons[row.kind]);
     return item;
   }
@@ -598,6 +686,7 @@ export class MfDashboardProvider
   // The probe book does not record whether a types path is a directory.
   // Comparing that shape keeps Reveal types current without building the tree again.
   private typesStamp(): string {
+    if (!readWorkspaceSettings().typesAutoCheck) return "";
     const rows: string[] = [];
     for (const app of this.session.loaded) {
       rows.push(directoryStamp(typesRoot(app.folder, app.typesFolder)));
@@ -609,16 +698,54 @@ export class MfDashboardProvider
   }
 
   private cachedTypes(link: RemoteLink): ReturnType<typeof describeLink> {
-    const id = linkRowId(link);
-    const cached = this.typeCache.get(id);
-    if (cached) return cached;
+    const consumer = this.session.loaded.find((app) => app.name === link.consumer);
+    if (consumer?.consumeTypes === false) return "none";
+    const cached = this.typeSnapshot(link);
+    if (cached) return cached.status;
+    if (!this.canCheckTypes(link)) return "unchecked";
     const status = this.observe(link);
-    this.typeCache.set(id, status);
+    this.typeCache.set(linkProbeId(link), {
+      status,
+      checkedAt: Date.now(),
+      signature: this.typeSignature(link),
+    });
     return status;
   }
 
-  private clearTypeCache(): void {
-    this.typeCache.clear();
+  private typeSignature(link: RemoteLink): string {
+    const consumer = this.session.loaded.find((app) => app.name === link.consumer);
+    const producer = this.session.loaded.find((app) => app.name === link.remoteName);
+    return JSON.stringify([
+      consumer?.folder,
+      consumer?.configFile,
+      consumer?.consumeTypes,
+      consumer?.typesFolder,
+      producer?.folder,
+      producer?.configFile,
+      producer?.port,
+      producer?.manifestPath,
+      producer?.generateTypes,
+      producer?.tsconfig,
+      producer?.typesFolder,
+    ]);
+  }
+
+  private typeSnapshot(link: RemoteLink) {
+    const id = linkProbeId(link);
+    const cached = this.typeCache.get(id);
+    if (cached && cached.signature !== this.typeSignature(link)) {
+      this.typeCache.delete(id);
+      return undefined;
+    }
+    return cached;
+  }
+
+  private clearTypeCache(resetTypes = this.canCheckTypes()): void {
+    if (resetTypes) {
+      if (this.explicitTypeCheck && this.requestedTypeLinks)
+        for (const key of this.requestedTypeLinks) this.typeCache.delete(key);
+      else this.typeCache.clear();
+    }
     this.producerCache.clear();
     this.view = null;
   }

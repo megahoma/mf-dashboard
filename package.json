@@ -45,6 +45,11 @@
     ],
     "commands": [
       {
+        "command": "mf-dashboard.checkTypes",
+        "title": "%command.checkTypes%",
+        "icon": "$(refresh)"
+      },
+      {
         "command": "mf-dashboard.refresh",
         "title": "%command.refresh%",
         "icon": "$(refresh)"
@@ -103,6 +108,10 @@
     "menus": {
       "commandPalette": [
         {
+          "command": "mf-dashboard.checkTypes",
+          "when": "config.mf-dashboard.types.autoCheck == false"
+        },
+        {
           "command": "mf-dashboard.openConfig",
           "when": "false"
         },
@@ -137,6 +146,11 @@
         }
       ],
       "view/item/context": [
+        {
+          "command": "mf-dashboard.checkTypes",
+          "when": "view == mf-dashboard && config.mf-dashboard.types.autoCheck == false && viewItem =~ /(^| )check-types($| )/",
+          "group": "inline@0"
+        },
         {
           "command": "mf-dashboard.start",
           "when": "view == mf-dashboard && viewItem =~ /^silent($| )/",
@@ -234,6 +248,11 @@
           "minimum": 1000,
           "default": 5000,
           "description": "%configuration.probeIntervalMs%"
+        },
+        "mf-dashboard.types.autoCheck": {
+          "type": "boolean",
+          "default": true,
+          "description": "%configuration.types.autoCheck%"
         },
         "mf-dashboard.typesSettleMs": {
           "type": "number",

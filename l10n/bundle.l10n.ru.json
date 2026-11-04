@@ -21,6 +21,8 @@
   "types up to date": "типы актуальны",
   "types require manual verification": "типы требуют ручной проверки",
   "types changed; freshness unknown": "типы изменены; актуальность неизвестна",
+  "types not checked": "типы не проверены",
+  "types last checked": "последняя проверка типов",
   "types download failed": "загрузка типов не удалась",
   "Refresh": "Обновить",
   "Find microfrontends": "Найти микрофронты",

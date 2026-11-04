@@ -12,7 +12,7 @@ export interface TypesStateInput {
 }
 
 export type TypesStatus =
-  "none" | "ok" | "stale-source" | "unfetched" | "changed" | "manual" | "unknown";
+  "none" | "ok" | "stale-source" | "unfetched" | "changed" | "manual" | "unknown" | "unchecked";
 
 // consumeTypes is first: a disabled consumer has no stale, unfetched, or type commands.
 // A stale source waits out typesSettleMs. Until then the save does not change the status.

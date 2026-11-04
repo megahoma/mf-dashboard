@@ -12,6 +12,8 @@
   "configuration.packageManager": "auto reads the repository package manager. npm, pnpm, yarn, and bun are explicit.",
   "configuration.probeIntervalMs": "Milliseconds between port, manifest, and zip checks.",
   "configuration.typesSettleMs": "Milliseconds after a source save before a zip is treated as stale.",
+  "configuration.types.autoCheck": "Automatically check type files, producer sources, and types ZIP archives. When disabled, ports and manifests still update; use Check @mf-types to check types manually.",
+  "command.checkTypes": "Check @mf-types",
   "configuration.terminal.reveal": "Show the terminal when Start runs a script.",
   "configuration.scripts.start": "package.json script key used by Start. The default is dev.",
   "configuration.commands.rebuildTypes": "Command that replaces dts generation. Empty uses the plugin. Placeholders: {folder}, {name}, {port}, {tsconfig}.",
