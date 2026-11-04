@@ -3,6 +3,7 @@ export interface TypesStateInput {
   consumeTypes: boolean;
   sourceFreshness: "fresh" | "stale" | "unknown";
   installedFreshness: "fresh" | "stale" | "unknown";
+  installedChanged?: boolean;
   zipReachable: boolean;
   folderExists: boolean;
   sourceSavedAt: number | null;
@@ -10,7 +11,8 @@ export interface TypesStateInput {
   typesSettleMs: number;
 }
 
-export type TypesStatus = "none" | "ok" | "stale-source" | "unfetched" | "manual" | "unknown";
+export type TypesStatus =
+  "none" | "ok" | "stale-source" | "unfetched" | "changed" | "manual" | "unknown";
 
 // consumeTypes is first: a disabled consumer has no stale, unfetched, or type commands.
 // A stale source waits out typesSettleMs. Until then the save does not change the status.
@@ -20,6 +22,7 @@ export function typesState(input: TypesStateInput): TypesStatus {
   const settled =
     input.sourceSavedAt != null && input.checkedAt - input.sourceSavedAt >= input.typesSettleMs;
   if (input.sourceFreshness === "stale" && settled) return "stale-source";
+  if (input.installedChanged) return "changed";
   if ((!input.folderExists && input.zipReachable) || input.installedFreshness === "stale")
     return "unfetched";
   if (input.sourceFreshness === "unknown" || input.installedFreshness === "unknown")

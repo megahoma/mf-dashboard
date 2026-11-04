@@ -1,7 +1,12 @@
 export { describeLink, readInstalledEvidence } from "./observe.ts";
 export type { ProducerEvidence, InstalledEvidence } from "./observe.ts";
-export { confirmInstalledArchive, installTypesArchive, readTree } from "./install.ts";
-export type { InstallTypesInput, InstallTypesResult } from "./install.ts";
+export {
+  compareInstalledArchive,
+  confirmInstalledArchive,
+  installTypesArchive,
+  readTree,
+} from "./install.ts";
+export type { ArchiveComparison, InstallTypesInput, InstallTypesResult } from "./install.ts";
 export { installedFreshness, sourceFreshness } from "./freshness.ts";
 export type { InstallConfirmationView } from "./freshness.ts";
 export { sourceSnapshot, sourceContains, sourceIdentity } from "./sources.ts";

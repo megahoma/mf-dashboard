@@ -1,3 +1,7 @@
+import { filesFingerprint } from "../../shared/fingerprint.ts";
+
+export const EMPTY_TYPES_FINGERPRINT = filesFingerprint([]);
+
 export interface InstallConfirmationView {
   zipHash: string;
   filesFingerprint: string;
@@ -17,15 +21,24 @@ export function sourceFreshness(input: {
   return "unknown";
 }
 
-// Directory mtime is not evidence. A saved hash that no longer matches the link zip is stale.
+// A content comparison takes priority over an older install confirmation.
 export function installedFreshness(input: {
   folderExists: boolean;
   zipHash: string | null;
   filesFingerprint: string | null;
   url: string | null;
   confirmation: InstallConfirmationView | null;
+  archiveMatches?: boolean;
 }): "fresh" | "stale" | "unknown" {
-  if (!input.folderExists) return input.zipHash != null ? "stale" : "unknown";
+  if (!input.folderExists || input.filesFingerprint === EMPTY_TYPES_FINGERPRINT) return "stale";
+  if (!input.filesFingerprint) return "unknown";
+  if (input.archiveMatches !== undefined) return input.archiveMatches ? "fresh" : "stale";
+  if (
+    input.confirmation != null &&
+    (input.confirmation.filesFingerprint !== input.filesFingerprint ||
+      (input.url != null && input.confirmation.url !== input.url))
+  )
+    return "stale";
   if (
     input.confirmation == null ||
     input.zipHash == null ||

@@ -37,6 +37,8 @@ MF Dashboard is a VS Code extension for working with Module Federation microfron
 
 A root app's status comes from its local port. A link also checks types and its URL, so the same app can have different statuses in different rows. Closed local ports take priority, followed by types issues, then URL issues. With `consumeTypes: false`, types issues do not affect the link status.
 
+Stopped links also show their `@mf-types` state beside the port status. Missing or empty type directories are reported even offline. Files changed since their last verified install show “types changed; freshness unknown” until the published archive can be checked; unchanged local files alone do not prove remote freshness.
+
 URL issues and unreachable external manifests appear as warnings in Problems. Types issues appear as information; listening, stopped, and reachable rows do not add diagnostics.
 
 ## Detection
@@ -60,6 +62,8 @@ Discovery skips `node_modules`, `.git`, `dist`, and `mf-dashboard.ignorePaths`. 
 Multi-root workspaces are scanned folder by folder. Federation names and workspace-folder names must be unique. If different app folders use the same federation name, discovery reports the conflicting folders and leaves saved settings unchanged. Settings are stored in `.vscode/settings.json` for a folder opened on its own, or in the saved `.code-workspace` file.
 
 Refresh reads known app directories and reuses parsed configs until a config, active env file, or tracked local import changes size or mtime. The tree keeps its previous results until a probe succeeds. Each successful cycle shares ZIP downloads by URL; later cycles use `If-Modified-Since` when available and reuse hashes on 304. Manifests are requested separately for each row.
+
+Types installed by Rsbuild watch or another tool are verified automatically against the published ZIP. This read-only comparison may download the archive once more when its hash or the installed files change. Matching files receive an install confirmation; unchanged matches and mismatches are reused without repeating the comparison. The consumer's type files are never replaced by this check.
 
 Producer sources follow `files`, `include`, `exclude`, and inherited settings from the selected tsconfig. Explicit `files` entries are included even with an empty `include`. Declaration files, downloaded types, output directories, and files outside the app or reached through symlinks are omitted. An unreadable or invalid tsconfig leaves the type estimate unknown.
 

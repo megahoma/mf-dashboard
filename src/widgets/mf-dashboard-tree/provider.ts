@@ -11,6 +11,7 @@ import { icons } from "../../shared/config/index.ts";
 import { createSerialQueue } from "../../shared/queue.ts";
 import { installRemoteTypes } from "../../features/refetch-types/remote.ts";
 import { rebuildTypes } from "../../features/rebuild-types/workflow.ts";
+import { verifyTypeInstalls, type InstallCheck } from "../../features/observe-types/verify.ts";
 import {
   appProbeId,
   createProbeBook,
@@ -132,6 +133,7 @@ export class MfDashboardProvider
   private readonly producerCache = new Map<string, ProducerSnapshot>();
   private readonly publishedZipHashes = new Map<string, string>();
   private readonly typeCache = new Map<string, ReturnType<typeof describeLink>>();
+  private readonly installChecks = new Map<string, InstallCheck>();
   private view: { nodes: DashboardNode[]; stamp: string } | null = null;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private readonly saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -161,7 +163,25 @@ export class MfDashboardProvider
         writeApps: writeWorkspaceApps,
         scan: scanWorkspace,
         loadKnown: loadKnownApps,
-        probe: (target, input) => probeWorkspace(target, input),
+        probe: async (target, input) => {
+          await probeWorkspace(target, input);
+          if (
+            await verifyTypeInstalls(
+              input.apps,
+              input.links,
+              target,
+              this.confirmations,
+              this.installChecks,
+              input.log,
+            )
+          ) {
+            try {
+              await this.persistConfirmations();
+            } catch (error) {
+              (input.log ?? log).event("error", "confirmations.save.failed", safeError(error));
+            }
+          }
+        },
         roots: workspaceRoots,
       },
       book,
@@ -191,6 +211,7 @@ export class MfDashboardProvider
     for (const timer of this.saveTimers.values()) clearTimeout(timer);
     this.saveTimers.clear();
     this.view = null;
+    this.installChecks.clear();
     this.manifestRegistration.dispose();
     this.manifests.dispose();
     this.diagnostics.dispose();
@@ -673,6 +694,13 @@ export class MfDashboardProvider
       });
       installed = { folderExists: true, filesFingerprint: "" };
     }
+    const check = this.installChecks.get(linkProbeId(link));
+    const archiveMatches =
+      check?.zipHash === probe?.zipHash &&
+      check?.url === link.url &&
+      check?.filesFingerprint === installed.filesFingerprint
+        ? check?.matches
+        : undefined;
     return describeLink(
       {
         consumeTypes: consumer.consumeTypes,
@@ -688,6 +716,7 @@ export class MfDashboardProvider
         linkUrl: link.url,
         generationConfirmed: evidence?.generationConfirmed ?? false,
         installConfirmation: this.confirmations.install(link),
+        archiveMatches,
         checkedAt: Date.now(),
         typesSettleMs: readWorkspaceSettings().typesSettleMs,
         installed,
