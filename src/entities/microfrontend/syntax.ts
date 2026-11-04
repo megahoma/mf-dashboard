@@ -54,7 +54,7 @@ function commonJsRoot(write: AstPath, target: AstPath): AstPath | null {
 }
 
 // Babel marks binding reassignment, but member writes and aliases need a separate guard.
-export function hasMemberWrites(binding: Binding): boolean {
+export function hasMemberWrites(binding: Binding, handled?: ReadonlySet<t.Node>): boolean {
   const pending = [binding];
   const visited = new Set<Binding>();
   for (let alias = pending.pop(); alias; alias = pending.pop()) {
@@ -87,7 +87,7 @@ export function hasMemberWrites(binding: Binding): boolean {
           parent?.isUpdateExpression() ||
           (parent?.isUnaryExpression({ operator: "delete" }) && target.key === "argument"))
       )
-        return true;
+        if (!handled?.has(parent.node)) return true;
       if (parent?.isVariableDeclarator() && target.key === "init") {
         for (const name of Object.keys(parent.get("id").getBindingIdentifiers())) {
           const next = parent.scope.getBinding(name);

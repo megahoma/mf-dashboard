@@ -215,6 +215,102 @@ class StaticConfig {
     const value = this.evaluate(exported.object, frame, depth);
     return object(value) ? value[exported.imported] : UNKNOWN;
   }
+  private localObject(
+    binding: Binding,
+    reference: AstPath,
+    frame: Map<Binding, Value>,
+    depth: number,
+  ): Value {
+    const declaration = binding.path;
+    const owner = declaration.getFunctionParent();
+    if (
+      binding.kind !== "const" ||
+      !declaration.isVariableDeclarator() ||
+      !declaration.get("id").isIdentifier() ||
+      !declaration.get("init").isObjectExpression() ||
+      !owner ||
+      reference.getFunctionParent() !== owner
+    )
+      return this.unknown(reference, "unsupported-write");
+    const writes: AstPath[] = [];
+    for (const use of binding.referencePaths) {
+      const member = use.parentPath;
+      const write = member?.parentPath;
+      if (
+        member?.isMemberExpression() &&
+        use.key === "object" &&
+        write?.isAssignmentExpression({ operator: "=" }) &&
+        member.key === "left" &&
+        write.parentPath.isExpressionStatement()
+      ) {
+        if (
+          write.getFunctionParent() !== owner ||
+          (write.node.start ?? 0) < (declaration.node.end ?? 0)
+        )
+          return this.unknown(write, "unsupported-write");
+        writes.push(write);
+      } else if (
+        !(member?.isMemberExpression() && use.key === "object") &&
+        !member?.isReturnStatement() &&
+        !member?.isSpreadElement() &&
+        !(
+          member?.isObjectProperty() &&
+          use.key === "value" &&
+          member.parentPath?.parentPath?.isReturnStatement()
+        )
+      )
+        return this.unknown(use, "unsupported-object-reference");
+      let access: AstPath = use;
+      while (access.parentPath?.isMemberExpression() && access.key === "object")
+        access = access.parentPath;
+      if (
+        access.key === "callee" &&
+        (access.parentPath?.isCallExpression() || access.parentPath?.isNewExpression())
+      )
+        return this.unknown(use, "unsupported-object-reference");
+    }
+    // Only direct local writes are interpreted; aliases and nested mutations keep their guard.
+    if (hasMemberWrites(binding, new Set(writes.map((write) => write.node))))
+      return this.unknown(reference, "unsupported-write");
+    const result = this.evaluate(declaration.get("init") as AstPath, frame, depth);
+    if (!object(result)) return UNKNOWN;
+    writes.sort((left, right) => (left.node.start ?? 0) - (right.node.start ?? 0));
+    for (const write of writes) {
+      if ((write.node.start ?? 0) >= (reference.node.start ?? 0)) continue;
+      const branches: { test: AstPath; consequent: boolean }[] = [];
+      for (
+        let child = write;
+        child.parentPath && child.parentPath !== owner;
+        child = child.parentPath
+      ) {
+        const parent = child.parentPath;
+        if (parent.isIfStatement()) {
+          branches.unshift({ test: parent.get("test"), consequent: child.key === "consequent" });
+        } else if (!parent.isBlockStatement() && !parent.isExpressionStatement())
+          return this.unknown(write, "unsupported-write-control");
+      }
+      let selected = true;
+      for (const branch of branches) {
+        const condition = this.evaluate(branch.test, frame, depth);
+        if (!primitive(condition)) return this.unknown(branch.test, "unresolved-write-condition");
+        if (Boolean(condition) !== branch.consequent) {
+          selected = false;
+          break;
+        }
+      }
+      if (!selected || !write.isAssignmentExpression()) continue;
+      const member = write.get("left");
+      if (!member.isMemberExpression()) return UNKNOWN;
+      const key = member.node.computed
+        ? this.evaluate(member.get("property") as AstPath, frame, depth)
+        : member.node.property.type === "Identifier"
+          ? member.node.property.name
+          : UNKNOWN;
+      if (!primitive(key)) return this.unknown(member, "unresolved-property-key");
+      result[String(key)] = this.evaluate(write.get("right"), frame, depth);
+    }
+    return result;
+  }
   private value(p: AstPath, frame: Map<Binding, Value>, depth: number): Value {
     const ev = (child: AstPath | null): Value => this.evaluate(child, frame, depth);
     if (p.isStringLiteral() || p.isNumericLiteral() || p.isBooleanLiteral()) return p.node.value;
@@ -233,7 +329,7 @@ class StaticConfig {
         return p.node.name === "undefined" ? undefined : this.unknown(p, "unbound-reference");
       if (!binding.constant) return this.unknown(p, "mutable-binding");
       // Apply the same write guard to locals and helper parameters.
-      if (hasMemberWrites(binding)) return this.unknown(p, "unsupported-write");
+      if (hasMemberWrites(binding)) return this.localObject(binding, p, frame, depth);
       if (frame.has(binding)) return frame.get(binding);
       const declaration = binding.path;
       if (declaration.isImportSpecifier() || declaration.isImportDefaultSpecifier()) {
