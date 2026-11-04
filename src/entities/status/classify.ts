@@ -19,7 +19,8 @@ export interface StatusInput {
   manifestEnabled: boolean;
   buildVersion: string | null;
   url: string | null;
-  typesState: "none" | "ok" | "stale-source" | "unfetched" | "changed" | "manual" | "unknown";
+  typesState:
+    "none" | "ok" | "stale-source" | "unfetched" | "changed" | "manual" | "unknown" | "unchecked";
   requestFailure?: string | null;
 }
 

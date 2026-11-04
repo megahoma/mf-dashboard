@@ -21,6 +21,8 @@ export const terms = {
   typesCurrent: "types up to date",
   typesManual: "types require manual verification",
   typesChanged: "types changed; freshness unknown",
+  typesUnchecked: "types not checked",
+  typesCheckedAt: "types last checked",
   refetchFailed: "types download failed",
   refresh: "Refresh",
   discover: "Find microfrontends",

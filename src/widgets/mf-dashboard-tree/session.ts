@@ -257,7 +257,7 @@ function workspaceRelative(root: string, folder: string): string {
   return relative.split(path.sep).join("/");
 }
 
-function linksOf(apps: readonly LocalApp[]): RemoteLink[] {
+export function linksOf(apps: readonly LocalApp[]): RemoteLink[] {
   const links: RemoteLink[] = [];
   for (const app of apps) {
     for (const remote of app.remotes) {
@@ -278,6 +278,8 @@ export class DashboardSession {
   structure: DashboardStructure = "tree";
   terms: DashboardTerms = terms;
   typesForLink: (link: RemoteLink) => StatusInput["typesState"] = () => "unknown";
+  typesAutoCheck = true;
+  typesCheckedAt: (link: RemoteLink) => number | null = () => null;
   beforeRefreshChange: (log?: LogContext) => void = () => {};
   onRefreshFailed: () => void = () => {};
   probeRunning = false;

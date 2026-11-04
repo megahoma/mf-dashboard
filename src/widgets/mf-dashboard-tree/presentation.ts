@@ -43,6 +43,8 @@ export interface DashboardView {
   readonly scriptGaps: ReadonlySet<string>;
   readonly rebuildErrors: ReadonlyMap<string, string>;
   typesForLink(link: RemoteLink): StatusInput["typesState"];
+  readonly typesAutoCheck?: boolean;
+  typesCheckedAt?(link: RemoteLink): number | null;
   actionFor(node: unknown): RowAction | null;
 }
 
@@ -264,6 +266,9 @@ function linkNode(
     exposes: linkProbe?.exposes ?? [],
     shared: linkProbe?.shared ?? [],
   });
+  const checkedAt = view.typesAutoCheck === false ? view.typesCheckedAt?.(link) : null;
+  if (checkedAt != null)
+    row.tooltip = `${row.tooltip}\n${view.terms.typesCheckedAt}: ${new Date(checkedAt).toLocaleString()}`;
   const nodePath = [...parentPath, linkId];
   const id = JSON.stringify(nodePath);
   const nested =
@@ -318,7 +323,10 @@ function model(
   let tooltip = row.tooltip;
   if (input.role === "external" && !input.folder)
     tooltip = `${view.terms.folder}: ${view.terms.noWorkspace}\n${tooltip}`;
-  if (input.role === "link" && (row.kind === "silent" || input.typesState === "changed")) {
+  if (
+    input.role === "link" &&
+    (row.kind === "silent" || input.typesState === "changed" || input.typesState === "unchecked")
+  ) {
     const labels = {
       none: view.terms.typesDisabled,
       ok: view.terms.typesCurrent,
@@ -327,6 +335,7 @@ function model(
       changed: view.terms.typesChanged,
       manual: view.terms.typesManual,
       unknown: view.terms.typesUnknown,
+      unchecked: view.terms.typesUnchecked,
     };
     const label = `@mf-types: ${labels[input.typesState]}`;
     row.description = `${row.description} · ${label}`;

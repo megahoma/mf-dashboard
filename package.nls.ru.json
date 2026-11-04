@@ -12,6 +12,8 @@
   "configuration.packageManager": "auto читает менеджер репозитория. npm, pnpm, yarn и bun задаются явно.",
   "configuration.probeIntervalMs": "Пауза в миллисекундах между проверками порта, манифеста и zip.",
   "configuration.typesSettleMs": "Пауза в миллисекундах после сохранения исходника, прежде чем zip считается устаревшим.",
+  "configuration.types.autoCheck": "Автоматически проверять файлы типов, исходники продюсеров и ZIP типов. При отключении порты и манифесты продолжают обновляться; для проверки типов используйте «Проверить @mf-types».",
+  "command.checkTypes": "Проверить @mf-types",
   "configuration.terminal.reveal": "Показывать терминал, когда Запустить выполняет script.",
   "configuration.scripts.start": "Ключ script в package.json для команды Запустить. По умолчанию dev.",
   "configuration.commands.rebuildTypes": "Команда вместо генерации dts. Пустая строка вызывает плагин. Подстановки: {folder}, {name}, {port}, {tsconfig}.",

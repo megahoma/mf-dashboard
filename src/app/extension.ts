@@ -85,15 +85,18 @@ export function activate(context: vscode.ExtensionContext): void {
         provider.setStructure(structure === "flat" ? "flat" : "tree");
       }
       if (event.affectsConfiguration("mf-dashboard.probeIntervalMs")) provider.armProbe();
+      if (event.affectsConfiguration("mf-dashboard.types.autoCheck"))
+        provider.typesSettingsChanged();
       if (
         event.affectsConfiguration("mf-dashboard.apps") ||
         event.affectsConfiguration("mf-dashboard.envMode") ||
         event.affectsConfiguration("mf-dashboard.ignorePaths") ||
         event.affectsConfiguration("mf-dashboard.extraManifestUrls") ||
-        event.affectsConfiguration("mf-dashboard.typesSettleMs")
+        event.affectsConfiguration("mf-dashboard.typesSettleMs") ||
+        event.affectsConfiguration("mf-dashboard.types.autoCheck")
       ) {
         void provider
-          .refresh()
+          .refresh("settings")
           .catch((error: unknown) =>
             log.event("error", "settings.refresh.failed", safeError(error)),
           );
@@ -101,6 +104,9 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.window.registerTreeDataProvider("mf-dashboard", provider),
     vscode.commands.registerCommand("mf-dashboard.refresh", () => provider.refresh()),
+    vscode.commands.registerCommand("mf-dashboard.checkTypes", (node?: DashboardNode) =>
+      provider.checkTypes(node),
+    ),
     vscode.commands.registerCommand("mf-dashboard.discover", async () => {
       await provider.discover();
       if (provider.session.loaded.length === 0)
@@ -149,7 +155,7 @@ async function openPanel(provider: MfDashboardProvider, log: LogContext): Promis
         inspected.workspaceValue !== undefined ||
         inspected.globalValue !== undefined);
     if (startupLoad(appsDefined) === "discover") await provider.discover();
-    else await provider.refresh();
+    else await provider.refresh("startup");
   } finally {
     provider.armProbe();
   }

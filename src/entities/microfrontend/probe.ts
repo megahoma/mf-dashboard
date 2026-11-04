@@ -65,6 +65,8 @@ export interface ProbeCycleInput {
   links: readonly RemoteLink[];
   extraManifestUrls: readonly string[];
   log?: LogContext;
+  checkTypes?: boolean;
+  typeLinks?: ReadonlySet<string>;
 }
 
 const MONTHS: Record<string, number> = {
@@ -184,7 +186,16 @@ export function createProbeCycle(
         manifestRequests: 0,
         zipRequests: 0,
       };
-      const manifest = (url: string | null) => probeManifest(url, net, cache, log);
+      const checkTypes = input.checkTypes !== false;
+      const producers = input.typeLinks
+        ? new Set(
+            input.links
+              .filter((link) => input.typeLinks!.has(linkProbeId(link)))
+              .map((link) => link.remoteName),
+          )
+        : null;
+      const manifest = (url: string | null, types = checkTypes) =>
+        probeManifest(url, net, cache, log, types);
       log.event("debug", "probe.started", {
         apps: input.apps.length,
         links: input.links.length,
@@ -192,14 +203,30 @@ export function createProbeCycle(
       });
       const run = (async () => {
         for (const app of input.apps)
-          putAppResult(book, app.name, await probeConnectedApp(app, net, manifest, log));
+          putAppResult(
+            book,
+            app.name,
+            await probeConnectedApp(
+              app,
+              net,
+              (url) => manifest(url, checkTypes && (producers == null || producers.has(app.name))),
+              log,
+            ),
+          );
         for (const link of input.links)
-          putLinkResult(book, { link, ...(await manifest(link.url)) });
+          putLinkResult(book, {
+            link,
+            ...(await manifest(
+              link.url,
+              checkTypes && (!input.typeLinks || input.typeLinks.has(linkProbeId(link))),
+            )),
+          });
         for (const url of input.extraManifestUrls)
-          putExternalResult(book, url, await manifest(url));
-        for (const url of book.zips.keys()) {
-          if (!cache.seen.has(url)) book.zips.delete(url);
-        }
+          putExternalResult(book, url, await manifest(url, checkTypes && !input.typeLinks));
+        if (checkTypes && !input.typeLinks)
+          for (const url of book.zips.keys()) {
+            if (!cache.seen.has(url)) book.zips.delete(url);
+          }
       })();
       inflight = run
         .then(
@@ -352,6 +379,7 @@ async function probeManifest(
   net: Net,
   cache?: ZipCache,
   log: LogContext = noLog,
+  checkTypes = true,
 ): Promise<ArtifactProbe> {
   const blank = emptyArtifact();
   if (!isHttpUrl(url)) {
@@ -397,6 +425,7 @@ async function probeManifest(
     });
     return { ...blank, manifestReachable: true, buildVersion, ...modules };
   }
+  if (!checkTypes) return { ...blank, manifestReachable: true, buildVersion, zipUrl, ...modules };
   const zip = await probeZip(zipUrl, net, cache);
   if (!zip) return { ...blank, manifestReachable: true, buildVersion, zipUrl, ...modules };
   return {
