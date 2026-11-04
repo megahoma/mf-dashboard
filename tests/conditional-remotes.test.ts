@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -100,6 +101,115 @@ test("a false outer branch does not need to resolve a nested condition", () => {
     discoverSource(source, path.resolve("rsbuild.config.ts"), {})?.remotes[0]?.name,
     "canvas",
   );
+});
+
+test("optional and wrapped member calls never publish obsolete remote links", () => {
+  for (const call of [
+    "links.refresh?.();",
+    "links.refresh!();",
+    "(links.refresh as () => void)();",
+    "(links.refresh satisfies (() => void))();",
+    "(links.refresh<void>)();",
+    "links.refresh``;",
+  ]) {
+    const source = `function buildOptions() {
+      const links = {
+        panel: 'old@http://localhost:4201/mf-manifest.json',
+        refresh<T>(..._args: T[]) { this.panel = 'new@http://localhost:4202/mf-manifest.json'; },
+      };
+      links.extra = 'extra@http://localhost:4203/mf-manifest.json';
+      ${call}
+      return { name: 'portal', remotes: links };
+    }
+    export default pluginModuleFederation(buildOptions());`;
+    assert.deepEqual(
+      discoverSource(source, path.resolve("rsbuild.config.ts"), {})?.remotes,
+      [],
+      call,
+    );
+  }
+});
+
+test("assignment keys and values read the prior state and if conditions keep their entry state", () => {
+  const source = `function buildOptions() {
+    const links = { panel: 'canvas@http://localhost:4201' };
+    links.panel = links.panel + '/mf-manifest.json';
+    if (links.panel === 'canvas@http://localhost:4201/mf-manifest.json') {
+      links.panel = 'updated@http://localhost:4202/mf-manifest.json';
+      links.extra = 'extra@http://localhost:4203/mf-manifest.json';
+    }
+    links[links.extra ? 'computed' : 'wrong'] = links.panel;
+    return { name: 'portal', remotes: links };
+  }
+  export default pluginModuleFederation(buildOptions());`;
+  assert.deepEqual(discoverSource(source, path.resolve("rsbuild.config.ts"), {})?.remotes, [
+    { alias: "panel", name: "updated", url: "http://localhost:4202/mf-manifest.json" },
+    { alias: "extra", name: "extra", url: "http://localhost:4203/mf-manifest.json" },
+    { alias: "computed", name: "updated", url: "http://localhost:4202/mf-manifest.json" },
+  ]);
+});
+
+test("object snapshots stay independent between helper invocations", () => {
+  const source = `function linksFor(name) {
+    const links = { panel: 'initial@http://localhost:4201/mf-manifest.json' };
+    if (name !== 'off') { links.panel = name + '@http://localhost:4202/mf-manifest.json'; }
+    return links;
+  }
+  export default pluginModuleFederation({
+    name: 'portal', remotes: { ...linksFor('first'), ...linksFor('second') },
+  });`;
+  assert.equal(
+    discoverSource(source, path.resolve("rsbuild.config.ts"), {})?.remotes[0]?.name,
+    "second",
+  );
+});
+
+test("depth-limited snapshots do not poison a later shallow read", () => {
+  const chain = Array.from(
+    { length: 58 },
+    (_, index) => `const r${index} = ${index ? `r${index - 1}` : "links.panel"};`,
+  ).join("\n");
+  const source = `function buildOptions() {
+    const links = { panel: 'old@http://localhost:4201/mf-manifest.json' };
+    links.extra = 'extra@http://localhost:4202/mf-manifest.json';
+    ${chain}
+    return { name: 'portal', remotes: { deep: r57, shallow: r0 } };
+  }
+  export default pluginModuleFederation(buildOptions());`;
+  assert.deepEqual(discoverSource(source, path.resolve("rsbuild.config.ts"), {})?.remotes, [
+    { alias: "deep", name: "deep", url: null },
+    { alias: "shallow", name: "old", url: "http://localhost:4201/mf-manifest.json" },
+  ]);
+});
+
+test("many object-dependent conditions finish within a bounded worker", () => {
+  const count = 32;
+  const writes = Array.from(
+    { length: count },
+    (_, index) =>
+      `if (links.panel) { links.remote${index} = 'remote${index}@http://localhost:4300/mf-manifest.json'; }`,
+  ).join("\n");
+  const source = `function buildOptions() {
+    const links = { panel: 'canvas@http://localhost:4201/mf-manifest.json' };
+    ${writes}
+    return { name: 'portal', remotes: links };
+  }
+  export default pluginModuleFederation(buildOptions());`;
+  const module = new URL("../src/entities/microfrontend/config.ts", import.meta.url).href;
+  const script = `import { discoverSource } from ${JSON.stringify(module)};
+    const app = discoverSource(${JSON.stringify(source)}, ${JSON.stringify(path.resolve("rsbuild.config.ts"))}, {});
+    process.stdout.write(JSON.stringify(app?.remotes.map(remote => remote.alias)));`;
+  const result = spawnSync(
+    process.execPath,
+    ["--experimental-strip-types", "--input-type=module", "-e", script],
+    { encoding: "utf8", timeout: 5000 },
+  );
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), [
+    "panel",
+    ...Array.from({ length: count }, (_, index) => `remote${index}`),
+  ]);
 });
 
 test("unsupported mutations and unresolved branches do not publish obsolete remote links", () => {

@@ -86,6 +86,9 @@ class StaticConfig {
   readonly origins = new WeakMap<object, string>();
   readonly plugins = new Set<Value>();
   private readonly active = new Set<t.Node>();
+  private evaluationCutoffs = 0;
+  // A snapshot belongs to one helper invocation and one source position.
+  private readonly objectSnapshots = new WeakMap<Map<Binding, Value>, Map<t.Node, ObjectValue>>();
   private configResult: { value: Value } | undefined;
   readonly parsed: Program;
   readonly env: Record<string, string>;
@@ -196,7 +199,10 @@ class StaticConfig {
   }
   evaluate(p: AstPath | null, frame = new Map<Binding, Value>(), depth = 0): Value {
     if (!p?.node) return undefined;
-    if (depth > 64 || this.active.has(p.node)) return this.unknown(p, "evaluation-cycle-or-depth");
+    if (depth > 64 || this.active.has(p.node)) {
+      this.evaluationCutoffs++;
+      return this.unknown(p, "evaluation-cycle-or-depth");
+    }
     this.active.add(p.node);
     try {
       return this.value(p, frame, depth + 1);
@@ -232,6 +238,13 @@ class StaticConfig {
       reference.getFunctionParent() !== owner
     )
       return this.unknown(reference, "unsupported-write");
+    let snapshots = this.objectSnapshots.get(frame);
+    if (!snapshots) {
+      snapshots = new Map();
+      this.objectSnapshots.set(frame, snapshots);
+    }
+    const cached = snapshots.get(reference.node);
+    if (cached) return cached;
     const writes: AstPath[] = [];
     for (const use of binding.referencePaths) {
       const member = use.parentPath;
@@ -261,22 +274,41 @@ class StaticConfig {
       )
         return this.unknown(use, "unsupported-object-reference");
       let access: AstPath = use;
-      while (access.parentPath?.isMemberExpression() && access.key === "object")
-        access = access.parentPath;
+      while (access.parentPath) {
+        const parent = access.parentPath;
+        if (
+          ((parent.isMemberExpression() || parent.isOptionalMemberExpression()) &&
+            access.key === "object") ||
+          ((parent.isParenthesizedExpression() ||
+            parent.isTSAsExpression() ||
+            parent.isTSSatisfiesExpression() ||
+            parent.isTSNonNullExpression() ||
+            parent.isTSTypeAssertion() ||
+            parent.isTSInstantiationExpression()) &&
+            access.key === "expression")
+        )
+          access = parent;
+        else break;
+      }
       if (
-        access.key === "callee" &&
-        (access.parentPath?.isCallExpression() || access.parentPath?.isNewExpression())
+        (access.key === "callee" &&
+          (access.parentPath?.isCallExpression() ||
+            access.parentPath?.isOptionalCallExpression() ||
+            access.parentPath?.isNewExpression())) ||
+        (access.key === "tag" && access.parentPath?.isTaggedTemplateExpression())
       )
         return this.unknown(use, "unsupported-object-reference");
     }
     // Only direct local writes are interpreted; aliases and nested mutations keep their guard.
     if (hasMemberWrites(binding, new Set(writes.map((write) => write.node))))
       return this.unknown(reference, "unsupported-write");
+    const cutoffs = this.evaluationCutoffs;
     const result = this.evaluate(declaration.get("init") as AstPath, frame, depth);
     if (!object(result)) return UNKNOWN;
     writes.sort((left, right) => (left.node.start ?? 0) - (right.node.start ?? 0));
     for (const write of writes) {
-      if ((write.node.start ?? 0) >= (reference.node.start ?? 0)) continue;
+      // A key or RHS reads the state before its own assignment completes.
+      if ((write.node.end ?? 0) >= (reference.node.start ?? 0)) continue;
       const branches: { test: AstPath; consequent: boolean }[] = [];
       for (
         let child = write;
@@ -309,6 +341,8 @@ class StaticConfig {
       if (!primitive(key)) return this.unknown(member, "unresolved-property-key");
       result[String(key)] = this.evaluate(write.get("right"), frame, depth);
     }
+    // Cutoff values depend on the caller's depth/stack, so they cannot be reused.
+    if (this.evaluationCutoffs === cutoffs) snapshots.set(reference.node, result);
     return result;
   }
   private value(p: AstPath, frame: Map<Binding, Value>, depth: number): Value {
