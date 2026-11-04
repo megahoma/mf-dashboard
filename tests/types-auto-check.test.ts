@@ -11,6 +11,7 @@ import * as vscode from "./support/vscode.ts";
 import {
   createConfirmationStore,
   readInstalledEvidence,
+  sourceIdentity,
 } from "../src/entities/federated-types/index.ts";
 import { appProbeId } from "../src/entities/microfrontend/index.ts";
 import { terms } from "../src/shared/config/index.ts";
@@ -26,7 +27,7 @@ const { MfDashboardProvider } = await import("../src/widgets/mf-dashboard-tree/p
 
 function fixture(t: TestContext, automatic = false) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mf-manual-check-")));
-  const options = { automatic, portOpen: true, version: "first" };
+  const options = { automatic, portOpen: true, version: "first", lastModified: true };
   const definitions = [
     {
       name: "studio",
@@ -102,7 +103,9 @@ function fixture(t: TestContext, automatic = false) {
         },
       });
     return new Response(archive, {
-      headers: { "last-modified": new Date(Date.now() + 60_000).toUTCString() },
+      headers: options.lastModified
+        ? { "last-modified": new Date(Date.now() + 60_000).toUTCString() }
+        : undefined,
     });
   });
   const reads = t.mock.method(fs, "readFileSync");
@@ -129,6 +132,8 @@ function fixture(t: TestContext, automatic = false) {
   const zipRequests = () => requests.filter((url) => url.endsWith(".zip"));
   return {
     root,
+    store,
+    zipHash,
     options,
     provider,
     requests,
@@ -212,6 +217,68 @@ test("manual checks inspect only the selected link or consumer and retain the da
   assert.ok(
     f.typeScans("editor", "paint") > 0,
     "the main Refresh command explicitly checks all types",
+  );
+});
+
+test("a scoped check includes generation dependency ZIPs without Last-Modified", async (t) => {
+  const f = fixture(t);
+  f.options.lastModified = false;
+  const config = path.join(f.root, "palette", "rsbuild.config.ts");
+  fs.writeFileSync(
+    config,
+    fs
+      .readFileSync(config, "utf8")
+      .replace(
+        '"remotes":{}',
+        '"remotes":{"clock":"timeline@http://localhost:4502/mf-manifest.json"}',
+      ),
+  );
+  await f.provider.refresh("startup");
+  const producer = f.provider.session.loaded.find((app) => app.name === "palette")!;
+  f.store.saveGeneration(
+    producer.name,
+    sourceIdentity(producer.folder, producer.tsconfig, producer.typesFolder).fingerprint,
+    f.zipHash,
+    { timeline: f.zipHash },
+  );
+  const link = {
+    consumer: "studio",
+    alias: "paint",
+    remoteName: "palette",
+    url: "http://localhost:4501/mf-manifest.json",
+  };
+  await f.provider.refresh();
+  assert.equal(f.provider.session.typesForLink(link), "ok");
+  assert.equal(f.provider.session.book.apps.get(appProbeId("palette"))?.zipMtime, null);
+  const before = [
+    f.sourceReads("timeline"),
+    f.typeScans("studio", "track"),
+    f.typeScans("editor", "paint"),
+    f.typeScans("palette", "clock"),
+  ];
+  const downloads = f.zipRequests().length;
+  await f.provider.checkTypes(f.row().children.find((node) => node.name === "palette")!);
+  assert.equal(f.provider.session.typesForLink(link), "ok");
+  assert.equal(f.provider.session.book.apps.get(appProbeId("timeline"))?.zipHash, f.zipHash);
+  assert.deepEqual(
+    [
+      ...new Set(
+        f
+          .zipRequests()
+          .slice(downloads)
+          .map((url) => new URL(url).port),
+      ),
+    ].sort(),
+    ["4501", "4502"],
+  );
+  assert.deepEqual(
+    [
+      f.sourceReads("timeline"),
+      f.typeScans("studio", "track"),
+      f.typeScans("editor", "paint"),
+      f.typeScans("palette", "clock"),
+    ],
+    before,
   );
 });
 

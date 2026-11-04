@@ -194,6 +194,16 @@ export function createProbeCycle(
               .map((link) => link.remoteName),
           )
         : null;
+      if (producers) {
+        const local = new Map(input.apps.map((app) => [app.name, app]));
+        // Generation confirmations include the producer's direct local dependency hashes.
+        for (const name of [...producers]) {
+          const producer = local.get(name);
+          if (!producer?.generateTypes) continue;
+          for (const remote of producer.remotes)
+            if (local.get(remote.name)?.generateTypes) producers.add(remote.name);
+        }
+      }
       const manifest = (url: string | null, types = checkTypes) =>
         probeManifest(url, net, cache, log, types);
       log.event("debug", "probe.started", {
