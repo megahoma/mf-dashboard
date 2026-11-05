@@ -18,6 +18,10 @@ export interface LocalApp {
   manifestPath: string;
   compilerInstance: string | null;
   remotes: { alias: string; name: string; url: string | null }[];
+  buildConfigFile?: string;
+  generatedZipPath?: string | null;
+  configDependencies?: readonly string[];
+  hasExposes?: boolean;
 }
 
 const UNKNOWN = Symbol("unknown");
@@ -359,8 +363,10 @@ class StaticConfig {
       return ev(p.get("expression") as AstPath);
     if (p.isIdentifier()) {
       const binding = p.scope.getBinding(p.node.name);
-      if (!binding)
+      if (!binding) {
+        if (p.node.name === "__dirname") return path.dirname(this.imports.fileOf(p));
         return p.node.name === "undefined" ? undefined : this.unknown(p, "unbound-reference");
+      }
       if (!binding.constant) return this.unknown(p, "mutable-binding");
       // Apply the same write guard to locals and helper parameters.
       if (hasMemberWrites(binding)) return this.localObject(binding, p, frame, depth);
@@ -537,6 +543,20 @@ class StaticConfig {
           ? this.call(config as FunctionValue, [], depth)
           : config;
       }
+      const reference = this.apiReference(callee);
+      const method = reference?.members.length === 1 ? reference.members[0] : undefined;
+      if (
+        p.isCallExpression() &&
+        (reference?.source === "node:path" || reference?.source === "path") &&
+        (method === "join" || method === "resolve")
+      ) {
+        const parts = args.map(ev);
+        if (parts.every((part) => typeof part === "string")) {
+          if (method === "join") return path.join(...parts);
+          if (parts.some((part) => path.isAbsolute(part))) return path.resolve(...parts);
+        }
+        return this.unknown(p, "unresolved-output-path");
+      }
       if (
         callee.isIdentifier({ name: "require" }) &&
         !callee.scope.getBinding("require") &&
@@ -671,40 +691,55 @@ export function discoverSource(
   env: Record<string, string>,
 ): LocalApp | null {
   const parsed = parseProgram(source, filePath);
-  return parsed ? discoverProgram(parsed, source, filePath, env) : null;
+  return parsed ? readConfigCandidate(parsed, source, filePath, env).app : null;
 }
-export function discoverProgram(
+
+interface ConfigCandidate {
+  app: LocalApp | null;
+  port: number | null;
+  outputDir: string | null;
+  bundlerZipName?: string;
+}
+
+export function readConfigCandidate(
   parsed: Program,
   source: string,
   filePath: string,
   env: Record<string, string>,
   dependencies?: Set<string>,
   log: LogContext = noLog,
-): LocalApp | null {
+): ConfigCandidate {
   const evaluator = new StaticConfig(parsed, env, dependencies, log);
   const options = evaluator.options();
-  if (!options) return null;
-  const name = string(options.name);
-  if (!name) return null;
   const config = evaluator.config();
   const server = object(config) && object(config.server) ? config.server : null;
   const devServer = object(config) && object(config.devServer) ? config.devServer : null;
+  const port = portValue(server?.port) ?? portValue(devServer?.port);
+  const outputDir = buildOutputDir(config);
+  const name = options && string(options.name);
+  if (!options || !name) return { app: null, port, outputDir };
   const dts = object(options.dts) ? options.dts : null;
   const generateTypes = dts ? flag(dts.generateTypes, true) : options.dts === true;
   const consumeTypes = dts ? flag(dts.consumeTypes, true) : options.dts === true;
   const generate = dts && object(dts.generateTypes) ? dts.generateTypes : null;
   const consume = dts && object(dts.consumeTypes) ? dts.consumeTypes : null;
+  const generatedFolder =
+    generate?.typesFolder === undefined ? "@mf-types" : string(generate.typesFolder);
+  const zipName = generatedFolder ? `${generatedFolder}.zip` : null;
+  const dtsOutput = generate?.outputDir;
+  const zipOutput = dtsOutput === undefined ? outputDir : string(dtsOutput);
+  const exposes = options.exposes;
   const manifest = object(options.manifest) ? options.manifest : null;
   let prefix = "";
   if (source.includes("import.meta.env.ASSET_PREFIX") && env.ASSET_PREFIX?.trim())
     prefix = env.ASSET_PREFIX.trim();
   else if (server) prefix = string(server.base) ?? "";
   const fileName = string(manifest?.fileName) ?? "mf-manifest.json";
-  return {
+  const app: LocalApp = {
     name,
     folder: path.dirname(filePath),
     configFile: evaluator.origins.get(options) ?? filePath,
-    port: portValue(server?.port) ?? portValue(devServer?.port),
+    port,
     manifest: flag(options.manifest, false),
     generateTypes,
     consumeTypes,
@@ -721,20 +756,34 @@ export function discoverProgram(
     remotes: object(options.remotes)
       ? Object.entries(options.remotes).map(([alias, value]) => readRemote(alias, value))
       : [],
+    ...(generateTypes && {
+      buildConfigFile: filePath,
+      generatedZipPath:
+        zipName && zipOutput ? path.resolve(path.dirname(filePath), zipOutput, zipName) : null,
+      hasExposes:
+        exposes === UNKNOWN ||
+        (object(exposes) && Object.keys(exposes).length > 0) ||
+        (Array.isArray(exposes) && exposes.length > 0),
+    }),
+  };
+  return {
+    app,
+    port,
+    outputDir,
+    bundlerZipName: generateTypes && dtsOutput === undefined && zipName ? zipName : undefined,
   };
 }
-export function readPort(
-  parsed: Program,
-  env: Record<string, string>,
-  dependencies?: Set<string>,
-  log: LogContext = noLog,
-): number | null {
-  const config = new StaticConfig(parsed, env, dependencies, log).config();
-  return object(config)
-    ? (portValue(object(config.server) ? config.server.port : undefined) ??
-        portValue(object(config.devServer) ? config.devServer.port : undefined))
-    : null;
+
+function buildOutputDir(config: Value): string | null {
+  if (!object(config)) return null;
+  const { output, build } = config;
+  if (output !== undefined && !object(output)) return null;
+  if (build !== undefined && !object(build)) return null;
+  const distPath = output?.distPath;
+  const directory = output?.path ?? (object(distPath) ? distPath.root : distPath) ?? build?.outDir;
+  return directory === undefined ? "dist" : string(directory);
 }
+
 function portValue(value: Value): number | null {
   const port =
     typeof value === "number"

@@ -100,7 +100,7 @@ test("refresh and discover are declared commands", () => {
   assert.equal(ru["command.discover"], "Найти микрофронты");
 });
 
-test("refresh is the view title action", () => {
+test("refresh and the localized workspace types update are available in the view title", () => {
   const title = pkg.contributes.menus?.["view/title"] ?? [];
   assert.deepEqual(
     title.find((item) => item.command === "mf-dashboard.refresh"),
@@ -110,6 +110,13 @@ test("refresh is the view title action", () => {
       group: "navigation",
     },
   );
+  const update = title.find((item) => item.command === "mf-dashboard.rebuildAllTypes");
+  assert.equal(update?.when, "view == mf-dashboard");
+  assert.match(update?.group ?? "", /^navigation/);
+  const command = pkg.contributes.commands?.find((item) => item.command === update?.command);
+  assert.equal(command?.title, "%command.rebuildAllTypes%");
+  assert.equal(en["command.rebuildAllTypes"], "Update all @mf-types");
+  assert.equal(ru["command.rebuildAllTypes"], "Обновить все @mf-types");
 });
 
 test("a package and a launch compile the extension before the host starts", () => {

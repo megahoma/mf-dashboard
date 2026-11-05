@@ -2,7 +2,7 @@ import { noLog, safeError, type LogContext } from "../../shared/logging.ts";
 import fs from "node:fs";
 import { parse as parseEnv } from "dotenv";
 import path from "node:path";
-import { discoverProgram, readPort, type LocalApp } from "./config.ts";
+import { readConfigCandidate, type LocalApp } from "./config.ts";
 import { parseProgram } from "./syntax.ts";
 export { discoverSource } from "./config.ts";
 export type { LocalApp } from "./config.ts";
@@ -17,6 +17,10 @@ export interface ScanOptions {
 const CONFIG_FILE =
   /^(module-federation|webpack|rspack|rsbuild|vite)\.config\.(?:mjs|cjs|js|mts|cts|ts|jsx|tsx)$/;
 const ALWAYS_SKIP = new Set(["node_modules", ".git", "dist"]);
+
+function isFederationConfig(file: string): boolean {
+  return path.basename(file).startsWith("module-federation.config.");
+}
 
 export function readAppFolder(
   folder: string,
@@ -129,6 +133,8 @@ function discoverDirectory(
   if (files.length === 0) return [];
   const env = readModeEnv(dir, envMode);
   const apps: LocalApp[] = [];
+  const bundlerOutputs: (string | null)[] = [];
+  let standaloneZipName: string | undefined;
   let loosePort: number | null = null;
   for (const file of files) {
     log.event("trace", "discovery.candidate", { file });
@@ -146,8 +152,16 @@ function discoverDirectory(
     }
     const parsed = parseProgram(text, file, log);
     if (!parsed) continue;
-    const app = discoverProgram(parsed, text, file, env, dependencies, log);
-    const port = app?.port ?? readPort(parsed, env, dependencies, log);
+    const { app, port, outputDir, bundlerZipName } = readConfigCandidate(
+      parsed,
+      text,
+      file,
+      env,
+      dependencies,
+      log,
+    );
+    const federationConfig = isFederationConfig(file);
+    if (!federationConfig) bundlerOutputs.push(outputDir);
     if (port !== null) loosePort = port;
     if (!app) {
       log.event("trace", "discovery.skipped", {
@@ -158,14 +172,39 @@ function discoverDirectory(
     }
     log.event("trace", "discovery.found", { app: app.name, file });
     const existing = apps.find((item) => item.name === app.name);
-    if (!existing) apps.push(app);
-    else if (existing.port === null && app.port !== null) existing.port = app.port;
+    if (!existing) {
+      apps.push(app);
+      if (federationConfig) standaloneZipName = bundlerZipName;
+    } else {
+      if (existing.port === null && app.port !== null) existing.port = app.port;
+      if (
+        app.buildConfigFile &&
+        existing.buildConfigFile &&
+        isFederationConfig(existing.buildConfigFile) &&
+        !federationConfig
+      ) {
+        existing.buildConfigFile = app.buildConfigFile;
+        existing.generatedZipPath = app.generatedZipPath;
+      }
+    }
   }
-  if (apps.length === 1 && apps[0].port === null && loosePort !== null) apps[0].port = loosePort;
+  if (apps.length === 1) {
+    const [app] = apps;
+    if (app.port === null) app.port = loosePort;
+    if (
+      standaloneZipName &&
+      app.buildConfigFile &&
+      isFederationConfig(app.buildConfigFile) &&
+      bundlerOutputs.length
+    ) {
+      const outputDir = bundlerOutputs.length === 1 ? bundlerOutputs[0] : null;
+      app.generatedZipPath = outputDir ? path.resolve(dir, outputDir, standaloneZipName) : null;
+    }
+  }
   return apps;
 }
 
-function readModeEnv(dir: string, mode: string): Record<string, string> {
+export function readModeEnv(dir: string, mode: string): Record<string, string> {
   const env: Record<string, string> = {};
   if (!/^[A-Za-z0-9_-]+$/.test(mode)) return env;
   for (const name of [`.env.${mode}`, `.env.${mode}.local`]) {

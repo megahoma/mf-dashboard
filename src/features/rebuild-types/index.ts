@@ -1,5 +1,5 @@
-export { assertCanGenerate, assertPublished, generateFederatedTypes } from "./generate.ts";
-export type { GeneratedZip } from "./generate.ts";
+export { assertCanGenerate, assertPublished, generateFederatedTypes } from "./generate.mts";
+export type { GeneratedZip } from "./generate.mts";
 export { chainDependencies, rebuildPlan } from "./plan.ts";
 export type { ChainNode, PlannedStep } from "./plan.ts";
 export { hashManifestZip, manifestZipUrl } from "./zip-url.ts";

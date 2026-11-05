@@ -24,6 +24,7 @@ export interface SourceIdentity {
   savedAt: number | null;
   fingerprint: string;
   names: string[];
+  tsconfigFingerprint: string;
 }
 
 const sourceCache = new Map<string, { stamp: string; identity: SourceIdentity }>();
@@ -42,7 +43,12 @@ export function sourceIdentity(
   typesFolder: string,
   log: LogContext = noLog,
 ): SourceIdentity {
-  const entries = sourceEntries(folder, tsconfig, typesFolder);
+  let tsconfigFingerprint = "";
+  const entries = sourceEntries(folder, tsconfig, typesFolder, (config) => {
+    tsconfigFingerprint = filesFingerprint([
+      { name: "tsconfig", bytes: Buffer.from(JSON.stringify(config)) },
+    ]);
+  });
   const stamp = entries
     .map((entry) => `${entry.name}\0${entry.size}\0${entry.savedAt}`)
     .sort()
@@ -56,7 +62,7 @@ export function sourceIdentity(
       reads: 0,
       files: entries.length,
     });
-    return { ...hit.identity, names: [...hit.identity.names] };
+    return { ...hit.identity, names: [...hit.identity.names], tsconfigFingerprint };
   }
   log.event("debug", "fingerprint.sources.miss", {
     folder,
@@ -76,6 +82,7 @@ export function sourceIdentity(
       })),
     ),
     names: entries.map((entry) => entry.name).sort(),
+    tsconfigFingerprint,
   };
   sourceCache.set(key, { stamp, identity });
   return { ...identity, names: [...identity.names] };
@@ -176,6 +183,7 @@ function sourceEntries(
   folder: string,
   tsconfig: string | null,
   typesFolder: string,
+  onConfig?: (config: TsConfigJsonResolved) => void,
 ): SourceEntry[] {
   const folderPath = path.resolve(folder);
   try {
@@ -224,6 +232,7 @@ function sourceEntries(
     else throw error;
   }
   const config = hasConfig ? readSourceConfig(configFile) : {};
+  if (hasConfig) onConfig?.(config);
   const configDirectory = hasConfig ? path.dirname(configFile) : root;
   if (hasConfig) {
     const outDir = config.compilerOptions?.outDir;

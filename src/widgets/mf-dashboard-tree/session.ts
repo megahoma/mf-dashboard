@@ -30,6 +30,7 @@ export interface AppSetting {
   path: string;
   workspaceFolder?: string;
   manifestPath?: string;
+  typesZipPath?: string;
   scripts?: { start?: string };
 }
 
@@ -217,8 +218,9 @@ export function loadKnownApps(
       const key = `${root.path}\0${abs}\0${envMode}\0${name}`;
       const cached = cache.lookup(key, abs, envMode);
       const dependencies = new Set<string>();
-      const match = cached ?? readAppFolder(abs, envMode, name, dependencies, log);
-      if (!match) continue;
+      const parsed = cached ?? readAppFolder(abs, envMode, name, dependencies, log);
+      if (!parsed) continue;
+      const match = cached ?? { ...parsed, configDependencies: [...dependencies] };
       if (!cached) cache.store(key, abs, envMode, match, [...dependencies]);
       fallback ??= match;
       if (match.name !== name) continue;

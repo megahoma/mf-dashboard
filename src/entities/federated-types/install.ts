@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import fs from "node:fs";
-import { mkdtemp, mkdir, rename, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rename, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { filesFingerprint } from "../../shared/fingerprint.ts";
@@ -56,12 +56,47 @@ export interface ArchiveComparison extends InstallTypesResult {
 
 // Download, check, then swap. The live types directory is not removed before the archive checks out.
 export function installTypesArchive(input: InstallTypesInput): Promise<InstallTypesResult> {
-  return destinationLock(path.resolve(input.destination), () => writeTypesArchive(input));
+  return destinationLock(path.resolve(input.destination), async () =>
+    writeTypesArchive(input.destination, await loadZip(input)),
+  );
 }
 
-async function writeTypesArchive(input: InstallTypesInput): Promise<InstallTypesResult> {
-  const loaded = await loadZip(input);
-  const destination = path.resolve(input.destination);
+export function installLocalTypesArchive(
+  input: Pick<InstallTypesInput, "destination" | "appDir"> & {
+    zipPath: string;
+    expectedZipHash: string;
+    confirmedFilesFingerprint?: string;
+  },
+): Promise<InstallTypesResult & { changed: boolean }> {
+  return destinationLock(path.resolve(input.destination), async () => {
+    const bytes = await readFile(input.zipPath);
+    const zipHash = sha256(bytes);
+    if (zipHash !== input.expectedZipHash)
+      throw new DiagnosticError("unzip: local ZIP changed during the update", {
+        stage: "archive",
+        reason: "fingerprint-mismatch",
+      });
+    const { filesFingerprint: fingerprint } = await readInstalledEvidenceAsync(
+      input.destination,
+      undefined,
+      true,
+    );
+    const hasFiles = fingerprint && fingerprint !== filesFingerprint([]);
+    if (hasFiles && fingerprint === input.confirmedFilesFingerprint)
+      return { zipHash, filesFingerprint: fingerprint, changed: false };
+    const archive = checkedArchive(bytes, input.appDir);
+    if (hasFiles && fingerprint === (await fingerprintArchive(archive)))
+      return { zipHash, filesFingerprint: fingerprint, changed: false };
+    const installed = await writeTypesArchive(input.destination, { archive, zipHash });
+    return { ...installed, changed: true };
+  });
+}
+
+async function writeTypesArchive(
+  target: string,
+  loaded: { archive: ZipArchive; zipHash: string },
+): Promise<InstallTypesResult> {
+  const destination = path.resolve(target);
   await mkdir(path.dirname(destination), { recursive: true });
   const staging = await mkdtemp(path.join(path.dirname(destination), ".install-"));
   const backup = `${destination}.backup-${Date.now()}-${Math.random().toString(16).slice(2)}`;

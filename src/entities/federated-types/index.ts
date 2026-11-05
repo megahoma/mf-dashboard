@@ -4,6 +4,7 @@ export {
   compareInstalledArchive,
   createArchiveComparisonBatch,
   confirmInstalledArchive,
+  installLocalTypesArchive,
   installTypesArchive,
   readTree,
 } from "./install.ts";

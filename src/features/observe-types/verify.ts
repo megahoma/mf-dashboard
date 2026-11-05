@@ -55,6 +55,10 @@ export async function verifyTypeInstalls(
         saved.filesFingerprint === installed.filesFingerprint &&
         saved.url === link.url
       ) {
+        if (!saved.fromManifest) {
+          confirmations.saveInstall(link, installed.filesFingerprint, probe.zipHash, true);
+          changed = true;
+        }
         checks.delete(linkProbeId(link));
         continue;
       }
@@ -83,7 +87,7 @@ export async function verifyTypeInstalls(
         continue;
       checks.set(linkProbeId(link), { ...result, url: link.url });
       if (result.matches) {
-        confirmations.saveInstall(link, result.filesFingerprint, result.zipHash);
+        confirmations.saveInstall(link, result.filesFingerprint, result.zipHash, true);
         changed = true;
       }
       log.event("debug", "types.install.observed", {

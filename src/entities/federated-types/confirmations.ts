@@ -7,6 +7,7 @@ export interface InstallConfirmation {
   url: string;
   zipHash: string;
   filesFingerprint: string;
+  fromManifest?: boolean;
 }
 
 export interface GenerationConfirmation {
@@ -14,6 +15,7 @@ export interface GenerationConfirmation {
   zipHash: string;
   sourceFingerprint: string;
   builtDependencyHashes: Record<string, string>;
+  local?: { zipPath: string; inputsFingerprint: string };
 }
 
 export interface ConfirmationSnapshot {
@@ -22,14 +24,21 @@ export interface ConfirmationSnapshot {
 }
 
 export interface ConfirmationStore {
-  saveInstall(link: RemoteLink, filesFingerprint: string, zipHash: string): void;
+  saveInstall(
+    link: RemoteLink,
+    filesFingerprint: string,
+    zipHash: string,
+    fromManifest?: boolean,
+  ): void;
   install(link: Pick<RemoteLink, "consumer" | "alias" | "remoteName">): InstallConfirmation | null;
+  installedAt(link: Pick<RemoteLink, "consumer" | "alias">): InstallConfirmation | null;
   generation(name: string): GenerationConfirmation | null;
   saveGeneration(
     name: string,
     sourceFingerprint: string,
     zipHash: string,
     builtDependencyHashes: Record<string, string>,
+    local?: GenerationConfirmation["local"],
   ): void;
   generationConfirmed(
     name: string,
@@ -41,37 +50,53 @@ export interface ConfirmationStore {
 }
 
 export function createConfirmationStore(snapshot?: ConfirmationSnapshot): ConfirmationStore {
-  const installs = new Map<string, InstallConfirmation>();
+  const installs = new Map<string, InstallConfirmation[]>();
   const generations = new Map<string, GenerationConfirmation>();
-  for (const record of snapshot?.installs ?? []) installs.set(edgeKey(record), copyInstall(record));
+  for (const record of snapshot?.installs ?? []) {
+    // Legacy snapshots can contain a confirmation for each remote behind one alias.
+    const key = installKey(record);
+    const records = installs.get(key) ?? [];
+    records.push(copyInstall(record));
+    installs.set(key, records);
+  }
   for (const record of snapshot?.generations ?? [])
     generations.set(record.name, copyGeneration(record));
   return {
-    saveInstall(link, fingerprint, zipHash) {
+    saveInstall(link, fingerprint, zipHash, fromManifest) {
       if (link.url == null || link.url.trim() === "") return;
-      installs.set(edgeKey(link), {
-        consumer: link.consumer,
-        alias: link.alias,
-        remoteName: link.remoteName,
-        url: link.url,
-        filesFingerprint: fingerprint,
-        zipHash,
-      });
+      installs.set(installKey(link), [
+        {
+          consumer: link.consumer,
+          alias: link.alias,
+          remoteName: link.remoteName,
+          url: link.url,
+          filesFingerprint: fingerprint,
+          zipHash,
+          ...(fromManifest !== undefined && { fromManifest }),
+        },
+      ]);
     },
     install(link) {
-      const record = installs.get(edgeKey(link));
+      const record = installs
+        .get(installKey(link))
+        ?.find((item) => item.remoteName === link.remoteName);
+      return record ? copyInstall(record) : null;
+    },
+    installedAt(link) {
+      const record = installs.get(installKey(link))?.[0];
       return record ? copyInstall(record) : null;
     },
     generation(name) {
       const record = generations.get(name);
       return record ? copyGeneration(record) : null;
     },
-    saveGeneration(name, sourceFingerprint, zipHash, builtDependencyHashes) {
+    saveGeneration(name, sourceFingerprint, zipHash, builtDependencyHashes, local) {
       generations.set(name, {
         name,
         sourceFingerprint,
         zipHash,
         builtDependencyHashes: { ...builtDependencyHashes },
+        ...(local && { local: { ...local } }),
       });
     },
     generationConfirmed(name, sourceFingerprint, zipHash, builtDependencyHashes) {
@@ -85,15 +110,16 @@ export function createConfirmationStore(snapshot?: ConfirmationSnapshot): Confir
     },
     snapshot() {
       return {
-        installs: [...installs.values()].map(copyInstall),
+        installs: [...installs.values()].flatMap((records) => records.map(copyInstall)),
         generations: [...generations.values()].map(copyGeneration),
       };
     },
   };
 }
 
-function edgeKey(link: { consumer: string; alias: string; remoteName: string }): string {
-  return `${link.consumer}\0${link.alias}\0${link.remoteName}`;
+function installKey(link: { consumer: string; alias: string }): string {
+  // All remote names behind an alias share this consumer's installed directory.
+  return `${link.consumer}\0${link.alias}`;
 }
 
 function sameHashes(left: Record<string, string>, right: Record<string, string>): boolean {
@@ -108,5 +134,9 @@ function copyInstall(record: InstallConfirmation): InstallConfirmation {
 }
 
 function copyGeneration(record: GenerationConfirmation): GenerationConfirmation {
-  return { ...record, builtDependencyHashes: { ...record.builtDependencyHashes } };
+  return {
+    ...record,
+    builtDependencyHashes: { ...record.builtDependencyHashes },
+    ...(record.local && { local: { ...record.local } }),
+  };
 }

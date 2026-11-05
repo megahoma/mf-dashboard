@@ -1,4 +1,10 @@
-export { discoverSource, readEnvFile, scanWorkspace, readAppFolder } from "./discover.ts";
+export {
+  discoverSource,
+  readEnvFile,
+  readModeEnv,
+  scanWorkspace,
+  readAppFolder,
+} from "./discover.ts";
 export type { LocalApp, ScanOptions } from "./discover.ts";
 export { manifestTooltipLines, readManifestModules } from "./manifest-modules.ts";
 export type { ManifestLineTerms, ManifestModules, ManifestShared } from "./manifest-modules.ts";

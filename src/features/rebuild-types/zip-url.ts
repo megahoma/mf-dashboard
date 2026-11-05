@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { resolveZipUrl } from "../../entities/microfrontend/index.ts";
+import { resolveZipUrl } from "../../entities/microfrontend/probe.ts";
 import { readLimitedBody } from "../../shared/http-body.ts";
 import { DiagnosticError } from "../../shared/diagnostic-error.ts";
 

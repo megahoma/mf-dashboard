@@ -77,6 +77,12 @@
         "icon": "$(tools)"
       },
       {
+        "command": "mf-dashboard.rebuildAllTypes",
+        "title": "%command.rebuildAllTypes%",
+        "icon": "$(package)",
+        "enablement": "isWorkspaceTrusted"
+      },
+      {
         "command": "mf-dashboard.refetchTypes",
         "title": "%command.refetchTypes%",
         "icon": "$(sync)"
@@ -150,6 +156,11 @@
           "command": "mf-dashboard.useTree",
           "when": "view == mf-dashboard && config.mf-dashboard.structure == flat",
           "group": "navigation@1"
+        },
+        {
+          "command": "mf-dashboard.rebuildAllTypes",
+          "when": "view == mf-dashboard",
+          "group": "navigation@2"
         }
       ],
       "view/item/context": [
@@ -301,6 +312,10 @@
               "manifestPath": {
                 "type": "string"
               },
+              "typesZipPath": {
+                "type": "string",
+                "description": "%configuration.apps.typesZipPath%"
+              },
               "scripts": {
                 "type": "object",
                 "properties": {
@@ -320,7 +335,7 @@
     "lint": "rslint --type-check .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "compile": "esbuild src/app/extension.ts src/entities/federated-types/evidence-worker.ts --bundle --platform=node --format=cjs --main-fields=module,main --alias:tinyglobby=./node_modules/tinyglobby/dist/index.cjs --outdir=dist --outbase=src --entry-names=[name] --external:vscode --define:import.meta.url=undefined",
+    "compile": "esbuild src/app/extension.ts src/entities/federated-types/evidence-worker.ts src/features/rebuild-types/generate-process.ts --bundle --platform=node --format=cjs --main-fields=module,main --alias:tinyglobby=./node_modules/tinyglobby/dist/index.cjs --outdir=dist --outbase=src --entry-names=[name] --external:vscode --define:import.meta.url=undefined",
     "package": "vsce package",
     "vscode:prepublish": "npm run compile",
     "prepare": "husky"

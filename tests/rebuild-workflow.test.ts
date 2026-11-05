@@ -116,10 +116,14 @@ test("rebuild installs dependencies before generation and saves the newly built 
   assert.deepEqual(confirmations.generation("parent")?.builtDependencyHashes, {
     child: "new-child",
   });
-  assert.equal(
-    confirmations.install({ consumer: "parent", alias: "child", remoteName: "child" })?.url,
-    parent.remotes[0].url,
-  );
+  const installed = confirmations.install({
+    consumer: "parent",
+    alias: "child",
+    remoteName: "child",
+  });
+  assert.ok(installed);
+  assert.equal(installed.url, parent.remotes[0].url);
+  assert.equal(installed.fromManifest, false);
 
   // The probe still has the old hash, but Last-Modified lets the child skip the next rebuild.
   const childProbe = book.apps.get(appProbeId("child"));
