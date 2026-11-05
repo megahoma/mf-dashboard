@@ -58,10 +58,19 @@ interface MfOptions {
 }
 
 interface RsbuildConfig {
+  plugins?: unknown[];
   server?: { port?: number };
   devServer?: { port?: number };
   output?: { distPath?: { root?: string } };
 }
+
+type RsbuildConfigExport =
+  | RsbuildConfig
+  | ((params: {
+      command: "build";
+      env: string;
+      envMode: string;
+    }) => RsbuildConfig | Promise<RsbuildConfig>);
 
 interface DtsApi {
   isTSProject: (dts: unknown, context: string) => boolean;
@@ -90,7 +99,9 @@ export interface GeneratedZip extends LocalGeneratedZip {
 
 interface GenerationInput {
   appDir: string;
+  name: string;
   configFile: string;
+  envMode: string;
 }
 
 export interface LocalGenerationInput extends GenerationInput {
@@ -172,8 +183,8 @@ export function generateFederatedTypes(
   });
 }
 
-function prepareGeneration(input: GenerationInput) {
-  const loaded = loadProject(input.appDir, input.configFile);
+async function prepareGeneration(input: GenerationInput) {
+  const loaded = await loadProject(input);
   const { dts, mfRequire } = loadDts(input.appDir);
   if (!dts.isTSProject(loaded.mf.dts, input.appDir)) {
     throw new Error(
@@ -201,7 +212,7 @@ function prepareGeneration(input: GenerationInput) {
     `${typesFolderOf(loaded.mf)}.zip`,
   );
   return {
-    name: loaded.mf.name ?? "host",
+    name: input.name,
     port: loaded.port,
     zipPath,
     mfRequire,
@@ -217,14 +228,14 @@ function prepareGeneration(input: GenerationInput) {
 }
 
 async function generateTypesOnDisk(input: GenerationInput) {
-  const { generate, name, port } = prepareGeneration(input);
+  const { generate, name, port } = await prepareGeneration(input);
   return { ...(await generate()), name, port };
 }
 
 export async function generateLocalTypesOnDisk(
   input: LocalGenerationInput,
 ): Promise<LocalGenerationResult> {
-  const { mfRequire, remote, compilerCwd, zipPath, generate } = prepareGeneration(input);
+  const { mfRequire, remote, compilerCwd, zipPath, generate } = await prepareGeneration(input);
   const inputs = await listCompilerInputs(mfRequire, remote, input.appDir, compilerCwd);
   return rebuildLocalArchive(input, zipPath, inputs, generate);
 }
@@ -286,10 +297,7 @@ export async function assertPublished(input: {
   return published.zipUrl;
 }
 
-function loadProject(
-  appDir: string,
-  configFile: string,
-): { mf: MfOptions; port: number | null; outputDir: string } {
+async function loadProject({ appDir, configFile, name, envMode }: GenerationInput) {
   const appRequire = createRequire(path.join(appDir, "package.json"));
   let enhancedEntry: string;
   let cliEntry: string;
@@ -306,8 +314,10 @@ function loadProject(
     createJiti: (id: string, options: Record<string, unknown>) => (id: string) => unknown;
   };
   const capturePath = writeCapturePlugin();
-  const previous = (globalThis as { __mfCaptured?: MfOptions }).__mfCaptured;
-  (globalThis as { __mfCaptured?: MfOptions }).__mfCaptured = undefined;
+  const state = globalThis as { __mfCapturedPlugins?: Map<unknown, MfOptions> };
+  const previous = state.__mfCapturedPlugins;
+  const captured = new Map<unknown, MfOptions>();
+  state.__mfCapturedPlugins = captured;
   try {
     const jiti = createJiti(configFile, {
       interopDefault: true,
@@ -315,23 +325,35 @@ function loadProject(
       moduleCache: false,
       alias: { "@module-federation/rsbuild-plugin": capturePath },
     });
-    const loaded = jiti(configFile) as { default?: RsbuildConfig } & RsbuildConfig;
-    const config = loaded.default ?? loaded;
-    const mf = (globalThis as { __mfCaptured?: MfOptions }).__mfCaptured;
-    if (!mf)
+    const loaded = jiti(configFile) as
+      (RsbuildConfigExport & { default?: RsbuildConfigExport }) | null;
+    const exported = loaded?.default ?? loaded;
+    const config =
+      typeof exported === "function"
+        ? await exported({ command: "build", env: process.env.NODE_ENV ?? "production", envMode })
+        : exported;
+    const plugins = config?.plugins;
+    let mf = captured.get(config);
+    if (Array.isArray(plugins)) {
+      mf = plugins.map((plugin) => captured.get(plugin)).find((options) => options?.name === name);
+    } else if (!mf && !Object.hasOwn(config ?? {}, "plugins") && captured.size === 1) {
+      // Discovery also accepts a single top-level plugin call without a plugins list.
+      mf = captured.values().next().value;
+    }
+    if (mf?.name !== name)
       throw new Error(
-        `could not read Module Federation options from ${configFile}. ${REBUILD_HINT}`,
+        `could not read Module Federation options for ${name} from ${configFile}. ${REBUILD_HINT}`,
       );
     const port =
-      typeof config.server?.port === "number"
+      typeof config?.server?.port === "number"
         ? config.server.port
-        : typeof config.devServer?.port === "number"
+        : typeof config?.devServer?.port === "number"
           ? config.devServer.port
           : null;
-    const outputDir = config.output?.distPath?.root || "dist";
+    const outputDir = config?.output?.distPath?.root || "dist";
     return { mf, port, outputDir };
   } finally {
-    (globalThis as { __mfCaptured?: MfOptions }).__mfCaptured = previous;
+    state.__mfCapturedPlugins = previous;
     rmSync(path.dirname(capturePath), { recursive: true, force: true });
   }
 }
@@ -343,10 +365,12 @@ function writeCapturePlugin(): string {
     capturePath,
     `
 exports.pluginModuleFederation = function pluginModuleFederation(options) {
-  globalThis.__mfCaptured = options;
-  return { name: "capture-mf", setup() {} };
+  const plugin = { name: "capture-mf", setup() {} };
+  globalThis.__mfCapturedPlugins.set(plugin, options);
+  return plugin;
 };
 exports.ModuleFederationPlugin = exports.pluginModuleFederation;
+exports.createModuleFederationConfig = (options) => options;
 `,
   );
   return capturePath;

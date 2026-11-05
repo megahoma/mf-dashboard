@@ -178,9 +178,10 @@ export async function rebuildAllTypes(
             installed.changed ||
             !sameRemote ||
             previous.zipHash !== installed.zipHash ||
-            previous.filesFingerprint !== installed.filesFingerprint
+            previous.filesFingerprint !== installed.filesFingerprint ||
+            previous.fromManifest === undefined
           ) {
-            confirmations.saveInstall(link, installed.filesFingerprint, installed.zipHash);
+            confirmations.saveInstall(link, installed.filesFingerprint, installed.zipHash, false);
             dirty = true;
           }
           continue;
@@ -243,7 +244,9 @@ export async function rebuildAllTypes(
             : undefined;
         const result = await io.generateLocalFederatedTypes({
           appDir: app.folder,
+          name: app.name,
           configFile: app.buildConfigFile ?? app.configFile,
+          envMode: context.envMode,
           env: readModeEnv(app.folder, context.envMode),
           workspaceFingerprint: inputs,
           confirmed,

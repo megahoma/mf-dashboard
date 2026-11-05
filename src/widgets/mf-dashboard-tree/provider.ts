@@ -764,6 +764,7 @@ export class MfDashboardProvider
           "mf-dashboard.scripts.start": settings.startScript,
           "mf-dashboard.apps": settings.apps,
           rebuildCommand: settings.rebuildCommand,
+          envMode: settings.envMode,
         },
         refetchCommand: () => readWorkspaceSettings().refetchCommand,
         persist: this.persistConfirmations,

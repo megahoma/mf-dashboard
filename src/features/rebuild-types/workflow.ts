@@ -17,7 +17,7 @@ export interface RebuildContext {
   book: ProbeBook;
   confirmations: ConfirmationStore;
   published: Map<string, string>;
-  settings: ScriptSettings & { rebuildCommand: string };
+  settings: ScriptSettings & { rebuildCommand: string; envMode: string };
   refetchCommand(): string;
   persist(): void | PromiseLike<void>;
   rebuilt(name: string): void;
@@ -115,7 +115,9 @@ export async function rebuildTypes(
       zipHash = (
         await operations.generateFederatedTypes({
           appDir: app.folder,
-          configFile: app.configFile,
+          name: app.name,
+          configFile: app.buildConfigFile ?? app.configFile,
+          envMode: context.settings.envMode,
           port: app.port,
           manifestPath,
         })

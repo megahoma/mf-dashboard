@@ -106,8 +106,13 @@ function installGeneratorFixture(folder: string, generate: string) {
     "@module-federation/enhanced/index.js": "",
     "@module-federation/cli/index.js": "",
     "@module-federation/rsbuild-plugin/index.js":
-      "exports.pluginModuleFederation = options => globalThis.__mfCaptured = options;",
-    "jiti/index.js": "exports.createJiti = () => file => require(file);",
+      "module.exports = require(globalThis.__mfFixturePluginAlias);",
+    "jiti/index.js": `
+exports.createJiti = (_id, { alias }) => (file) => {
+  globalThis.__mfFixturePluginAlias = alias["@module-federation/rsbuild-plugin"];
+  return require(file);
+};
+`,
     "@module-federation/sdk/index.js": 'exports.TEMP_DIR = ".federation";',
     "typescript/package.json": JSON.stringify({
       bin: { tsc: path.join(path.dirname(typeScriptPackage), "bin", "tsc") },
@@ -442,40 +447,50 @@ test("types verified against a staging manifest can be reused when staging is of
 
 test("types from a local substitute are replaced after its producer leaves the workspace", async (t) => {
   const f = fixture(t);
-  const url = "https://staging.example/catalog/mf-manifest.json";
+  const catalog = f.app("catalog", 4501);
+  const dependency = remote(catalog);
   const shell = f.app("shell", 4502, {
     consumeTypes: true,
-    remotes: [{ alias: "catalog", name: "catalog", url }],
+    remotes: [dependency],
   });
   const file = typeFile(shell, "catalog");
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, "local-only types");
-  const link = { consumer: shell.name, alias: "catalog", remoteName: "catalog", url };
-  f.confirmations.saveInstall(link, treeFingerprint(path.dirname(file)), "local-zip", false);
-  const confirmations = createConfirmationStore(f.confirmations.snapshot());
+  const link = {
+    consumer: shell.name,
+    alias: dependency.alias,
+    remoteName: dependency.name,
+    url: dependency.url,
+  };
   const requests: string[] = [];
-  const context = f.context([shell], { confirmations });
   const io: NonNullable<Parameters<typeof rebuildAllTypes>[1]> = {
     ...unused,
     async installRemoteTypes(_app, _dependency, manifestUrl) {
       requests.push(manifestUrl);
-      fs.writeFileSync(file, "staging types");
-      return { zipHash: "staging-zip", filesFingerprint: treeFingerprint(path.dirname(file)) };
+      fs.writeFileSync(file, "manifest types");
+      return { zipHash: "manifest-zip", filesFingerprint: treeFingerprint(path.dirname(file)) };
     },
     generateLocalFederatedTypes: mockGeneration((appDir) => {
-      return writeZip(path.join(appDir, "dist", "@mf-types.zip"), fs.readFileSync(file, "utf8"));
+      const types = appDir === catalog.folder ? "local-only types" : fs.readFileSync(file, "utf8");
+      return writeZip(path.join(appDir, "dist", "@mf-types.zip"), types);
     }),
   };
+  const first = await rebuildAllTypes(f.context([catalog, shell]), io);
+  assert.deepEqual(first.failed, []);
+  assert.deepEqual(first.installed, [{ consumer: "shell", alias: "catalog" }]);
+  assert.deepEqual(requests, []);
+  assert.equal(f.confirmations.install(link)?.fromManifest, false);
+
+  const confirmations = createConfirmationStore(f.confirmations.snapshot());
+  const context = f.context([shell], { confirmations });
   const report = await rebuildAllTypes(context, io);
-  assert.deepEqual(requests, [url]);
+  assert.deepEqual(requests, [dependency.url]);
   assert.deepEqual(report.rebuilt, ["shell"]);
   assert.match(
     fs.readFileSync(path.join(shell.folder, "dist", "@mf-types.zip"), "utf8"),
-    /staging types/,
+    /manifest types/,
   );
   assert.equal(confirmations.install(link)?.fromManifest, true);
   assert.deepEqual((await rebuildAllTypes(context, io)).current, ["shell"]);
-  assert.deepEqual(requests, [url]);
+  assert.deepEqual(requests, [dependency.url]);
 });
 
 test("changing the external remote behind an alias replaces the previously installed types", async (t) => {
@@ -568,23 +583,30 @@ test("a legacy alias snapshot reuses the record matching the configured remote a
   assert.deepEqual(changed.current, []);
 });
 
-test("the built-in generator runs in the app directory with the discovery environment", async (t) => {
+test("the built-in generator calls a Rsbuild config function with the discovery environment", async (t) => {
   const f = fixture(t);
   const { folder } = f.app("catalog", 4501);
   const envKey = "MF_DASHBOARD_TEST_GENERATION_MODE";
   const original = process.env[envKey];
   fs.writeFileSync(path.join(folder, ".env.development"), `${envKey}=base\n`);
-  fs.writeFileSync(path.join(folder, ".env.development.local"), `${envKey}=local\n`);
+  fs.writeFileSync(
+    path.join(folder, ".env.development.local"),
+    `${envKey}=local\nNODE_ENV=development\n`,
+  );
   fs.writeFileSync(path.join(folder, "tsconfig.json"), '{"files":["index.ts"]}');
   fs.writeFileSync(
     path.join(folder, "rsbuild.config.cjs"),
     `
 const { pluginModuleFederation } = require("@module-federation/rsbuild-plugin");
-module.exports = { plugins: [pluginModuleFederation({
-  name: "catalog",
-  exposes: { "./index": "./index.ts" },
-  dts: { generateTypes: process.env.${envKey} === "local" ? true : false }
-})] };
+module.exports = ({ command, env, envMode }) => {
+  if (command !== "build" || env !== "development" || envMode !== "development")
+    throw new Error("unexpected Rsbuild config parameters");
+  return { plugins: [pluginModuleFederation({
+    name: "catalog",
+    exposes: { "./index": "./index.ts" },
+    dts: { generateTypes: process.env.${envKey} === "local" ? true : false }
+  })] };
+};
 `,
   );
   installGeneratorFixture(
@@ -609,6 +631,96 @@ fs.writeFileSync("dist/@mf-types.zip", Buffer.concat([
     "local",
   );
   assert.equal(process.env[envKey], original);
+});
+
+test("the built-in generator installs the archive from the active Rsbuild plugin", async (t) => {
+  const f = fixture(t);
+  const { folder } = f.app("catalog", 4501);
+  fs.writeFileSync(path.join(folder, "tsconfig.json"), '{"files":["index.ts"]}');
+  fs.writeFileSync(path.join(folder, "preview.ts"), "preview");
+  const configFile = path.join(folder, "rsbuild.config.cjs");
+  const config = `
+const { pluginModuleFederation } = require("@module-federation/rsbuild-plugin");
+const catalog = pluginModuleFederation({
+  name: "catalog", exposes: { "./index": "./index.ts" }, dts: { generateTypes: true }
+});
+const preview = pluginModuleFederation({
+  name: "preview", exposes: { "./preview": "./preview.ts" }, dts: { generateTypes: true }
+});
+module.exports = { server: { port: 4501 }, plugins: [catalog] };
+`;
+  fs.writeFileSync(configFile, config);
+  installGeneratorFixture(
+    folder,
+    `
+const [exposed] = Object.values(dtsManagerOptions.remote.moduleFederationConfig.exposes);
+fs.mkdirSync("dist", { recursive: true });
+fs.writeFileSync("dist/@mf-types.zip", Buffer.concat([
+  Buffer.from([0x50, 0x4b, 3, 4]), fs.readFileSync(exposed)
+]));
+`,
+  );
+  const app = readAppFolder(folder, "development", "catalog");
+  assert.equal(app?.name, "catalog");
+  const shell = f.app("shell", 4502, {
+    generateTypes: false,
+    consumeTypes: true,
+    remotes: [remote(app)],
+  });
+  const report = await rebuildAllTypes(f.context([app, shell]));
+  assert.deepEqual(report.failed, []);
+  assert.deepEqual(report.rebuilt, ["catalog"]);
+  assert.equal(fs.readFileSync(typeFile(shell, "catalog"), "utf8"), "catalog");
+
+  fs.writeFileSync(configFile, config.replace("plugins: [catalog]", "plugins: [preview]"));
+  const changed = await rebuildAllTypes(f.context([app, shell]));
+  assert.deepEqual(changed.rebuilt, []);
+  assert.match(
+    changed.failed[0]?.reason ?? "",
+    /could not read Module Federation options for catalog/,
+  );
+  assert.equal(fs.readFileSync(typeFile(shell, "catalog"), "utf8"), "catalog");
+});
+
+test("the built-in generator loads a separate federation config and uses the Rsbuild output", async (t) => {
+  const f = fixture(t);
+  const { folder } = f.app("catalog", 4501);
+  fs.writeFileSync(path.join(folder, "tsconfig.json"), '{"files":["index.ts"]}');
+  fs.writeFileSync(
+    path.join(folder, "module-federation.config.js"),
+    `
+const { createModuleFederationConfig } = require("@module-federation/rsbuild-plugin");
+module.exports = createModuleFederationConfig({
+  name: "catalog", exposes: { "./index": "./index.ts" }, dts: { generateTypes: true }
+});
+`,
+  );
+  const configFile = path.join(folder, "rsbuild.config.cjs");
+  fs.writeFileSync(
+    configFile,
+    `
+const { pluginModuleFederation } = require("@module-federation/rsbuild-plugin");
+const federation = require("./module-federation.config");
+module.exports = { output: { distPath: { root: "build/types" } }, plugins: [pluginModuleFederation(federation)] };
+`,
+  );
+  installGeneratorFixture(
+    folder,
+    `
+fs.mkdirSync("build/types", { recursive: true });
+fs.writeFileSync("build/types/@mf-types.zip", Buffer.from([0x50, 0x4b, 3, 4, 1]));
+`,
+  );
+  const app = readAppFolder(folder, "development", "catalog");
+  assert.ok(app?.generateTypes);
+  assert.equal(app.buildConfigFile, configFile);
+  const report = await rebuildAllTypes(f.context([app]));
+  assert.deepEqual(report.failed, []);
+  assert.deepEqual(report.rebuilt, ["catalog"]);
+  assert.equal(
+    f.confirmations.generation("catalog")?.local?.zipPath,
+    path.join(folder, "build/types/@mf-types.zip"),
+  );
 });
 
 test("third-party extraction rebuilds declarations outside the compiler program", async (t) => {
