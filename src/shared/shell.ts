@@ -58,7 +58,7 @@ export function runShell(command: string, cwd: string, timeoutMs: number): Promi
   });
 }
 
-async function stopProcessTree(pid: number | undefined): Promise<void> {
+export async function stopProcessTree(pid: number | undefined): Promise<void> {
   if (pid === undefined) return;
   if (process.platform === "win32") {
     await new Promise<void>((resolve, reject) => {
@@ -90,5 +90,5 @@ async function stopProcessTree(pid: number | undefined): Promise<void> {
     if (!signal(0)) return;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  throw new Error("Shell process group did not exit after SIGKILL");
+  throw new Error("Process group did not exit after SIGKILL");
 }

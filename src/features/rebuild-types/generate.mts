@@ -10,6 +10,8 @@ import { fileURLToPath } from "node:url";
 import { createSerialQueue } from "../../shared/queue.ts";
 import { runEvidenceTask } from "../../entities/federated-types/evidence-worker-client.mts";
 import { DiagnosticError, type DiagnosticDetails } from "../../shared/diagnostic-error.ts";
+import { stopProcessTree } from "../../shared/shell.ts";
+import { REBUILD_TIMEOUT_MS } from "./command.ts";
 import {
   compilerInputsFingerprint,
   listCompilerInputs,
@@ -122,6 +124,7 @@ const oneGeneration = createSerialQueue();
 
 export function generateLocalFederatedTypes(
   input: LocalGenerationInput,
+  timeoutMs = REBUILD_TIMEOUT_MS,
 ): Promise<LocalGenerationResult> {
   return oneGeneration(
     () =>
@@ -136,13 +139,35 @@ export function generateLocalFederatedTypes(
           env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
           execArgv: bundled ? [] : undefined,
           stdio: ["ignore", "ignore", "ignore", "ipc"],
+          detached: process.platform !== "win32",
         });
         let reply: GenerationReply | undefined;
+        let timedOut = false;
+        const timer = setTimeout(() => {
+          timedOut = true;
+          void stopProcessTree(child.pid).then(
+            () =>
+              reject(
+                new DiagnosticError(`Type generation timed out after ${timeoutMs} ms`, {
+                  stage: "generation",
+                  reason: "timeout",
+                  timeoutMs,
+                }),
+              ),
+            (cause: unknown) =>
+              reject(new Error("Could not stop timed-out type generator process tree", { cause })),
+          );
+        }, timeoutMs);
         child.once("message", (message) => {
           reply = message as GenerationReply;
         });
-        child.once("error", reject);
+        child.once("error", (error) => {
+          clearTimeout(timer);
+          if (!timedOut) reject(error);
+        });
         child.once("close", (code, signal) => {
+          clearTimeout(timer);
+          if (timedOut) return;
           if (reply && "error" in reply) {
             reject(
               reply.details
@@ -153,7 +178,8 @@ export function generateLocalFederatedTypes(
           else reject(new Error(`Type generator exited (${signal ?? code})`));
         });
         child.send(input, (error) => {
-          if (error) {
+          if (error && !timedOut) {
+            clearTimeout(timer);
             child.kill();
             reject(error);
           }

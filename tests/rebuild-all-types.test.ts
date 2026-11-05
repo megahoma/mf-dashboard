@@ -20,6 +20,7 @@ import {
 import { verifyTypeInstalls } from "../src/features/observe-types/verify.ts";
 import { rebuildAllTypes, type RebuildAllContext } from "../src/features/rebuild-types/all.ts";
 import {
+  generateLocalFederatedTypes,
   rebuildLocalArchive,
   type LocalGeneratedZip,
   type LocalGenerationInput,
@@ -631,6 +632,73 @@ fs.writeFileSync("dist/@mf-types.zip", Buffer.concat([
     "local",
   );
   assert.equal(process.env[envKey], original);
+});
+
+test("a timed-out generator is stopped before the rebuild continues", async (t) => {
+  const f = fixture(t);
+  const stalled = f.app("catalog", 4501);
+  const independent = f.app("reports", 4502);
+  const consumer = f.app("shell", 4503, {
+    generateTypes: false,
+    consumeTypes: true,
+    remotes: [remote(stalled)],
+  });
+  const timeoutMs = 1_500;
+  const pidFile = path.join(stalled.folder, "generator-pid");
+  for (const app of [stalled, independent]) {
+    const hook =
+      app === stalled
+        ? `afterGenerate() {
+             require("node:fs").writeFileSync("generator-pid", String(process.pid));
+             return new Promise(resolve => setTimeout(resolve, 5000));
+           }`
+        : "";
+    const configFile = path.join(app.folder, "rsbuild.config.cjs");
+    fs.writeFileSync(
+      configFile,
+      `
+const { pluginModuleFederation } = require("@module-federation/rsbuild-plugin");
+module.exports = { plugins: [pluginModuleFederation({
+  name: "${app.name}",
+  exposes: { "./index": "./index.ts" },
+  dts: { generateTypes: { compilerInstance: "tsgo", ${hook} } }
+})] };
+`,
+    );
+    app.buildConfigFile = configFile;
+    installGeneratorFixture(
+      app.folder,
+      `
+fs.mkdirSync("dist", { recursive: true });
+fs.writeFileSync("dist/@mf-types.zip", Buffer.from([0x50, 0x4b, 3, 4, 1]));
+`,
+    );
+  }
+
+  const report = await rebuildAllTypes(
+    f.context([consumer, independent, stalled], {
+      progress(name) {
+        if (name === independent.name) {
+          const pid = Number(fs.readFileSync(pidFile, "utf8"));
+          assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+        }
+      },
+    }),
+    {
+      ...unused,
+      generateLocalFederatedTypes: (input) =>
+        generateLocalFederatedTypes(input, input.name === stalled.name ? timeoutMs : undefined),
+    },
+  );
+  assert.deepEqual(report.failed, [
+    { app: "catalog", reason: `Type generation timed out after ${timeoutMs} ms` },
+  ]);
+  assert.deepEqual(report.skipped, [
+    { app: "shell", reason: "Dependency catalog could not be updated" },
+  ]);
+  assert.deepEqual(report.installed, []);
+  assert.deepEqual(report.rebuilt, ["reports"]);
+  assert.equal(f.confirmations.generation(stalled.name), null);
 });
 
 test("the built-in generator installs the archive from the active Rsbuild plugin", async (t) => {

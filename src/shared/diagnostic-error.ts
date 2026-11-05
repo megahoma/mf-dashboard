@@ -1,4 +1,4 @@
-const STAGES = ["manifest", "archive", "shell", "destination"] as const;
+const STAGES = ["manifest", "archive", "shell", "destination", "generation"] as const;
 const REASONS = [
   "http-status",
   "timeout",

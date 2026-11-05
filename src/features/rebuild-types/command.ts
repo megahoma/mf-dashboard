@@ -2,7 +2,7 @@ import type { LocalApp } from "../../entities/microfrontend/index.ts";
 import type { LogContext } from "../../shared/logging.ts";
 import { fillTemplate, runShell } from "../../shared/shell.ts";
 
-const REBUILD_TIMEOUT_MS = 5 * 60_000;
+export const REBUILD_TIMEOUT_MS = 5 * 60_000;
 
 export async function runRebuildCommand(
   app: LocalApp,
