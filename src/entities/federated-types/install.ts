@@ -8,6 +8,7 @@ import { filesFingerprint } from "../../shared/fingerprint.ts";
 import { readLimitedBody } from "../../shared/http-body.ts";
 import { createKeyedLock } from "../../shared/queue.ts";
 import { DiagnosticError } from "../../shared/diagnostic-error.ts";
+import { readInstalledEvidenceAsync, runEvidenceTask } from "./evidence-worker-client.mts";
 
 const destinationLock = createKeyedLock();
 
@@ -41,6 +42,7 @@ export interface InstallTypesInput {
   appDir: string;
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
+  expectedZipHash?: string;
 }
 
 export interface InstallTypesResult {
@@ -88,7 +90,11 @@ export function confirmInstalledArchive(input: InstallTypesInput): Promise<Insta
 }
 
 async function checkInstalledArchive(input: InstallTypesInput): Promise<InstallTypesResult> {
-  const result = await compareArchive(input);
+  const loaded = await loadZip(input);
+  const result = await compareArchive(input, {
+    zipHash: loaded.zipHash,
+    filesFingerprint: await fingerprintArchive(loaded.archive),
+  });
   if (!result.matches)
     throw new DiagnosticError("unzip: installed files do not match the archive", {
       stage: "destination",
@@ -99,11 +105,44 @@ async function checkInstalledArchive(input: InstallTypesInput): Promise<InstallT
 
 // Verify an external install without changing the consumer's files.
 export function compareInstalledArchive(input: InstallTypesInput): Promise<ArchiveComparison> {
-  return destinationLock(path.resolve(input.destination), () => compareArchive(input));
+  return createArchiveComparisonBatch()(input);
 }
 
-async function compareArchive(input: InstallTypesInput): Promise<ArchiveComparison> {
-  const loaded = await loadZip(input);
+// Share outcomes for this refresh, including failures; archive bytes are released after each task.
+export function createArchiveComparisonBatch(): typeof compareInstalledArchive {
+  const archives = new Map<string, Promise<InstallTypesResult>>();
+  return (input) =>
+    destinationLock(path.resolve(input.destination), async () => {
+      const key = JSON.stringify([input.url, input.expectedZipHash ?? ""]);
+      let archive = archives.get(key);
+      if (!archive) {
+        // Decoder availability belongs to this consumer, before any shared archive work begins.
+        resolveAdmZip(input.appDir);
+        archive = (async () => {
+          const buffer = await loadZipBytes(input);
+          const zipHash = sha256(buffer);
+          if (input.expectedZipHash && zipHash !== input.expectedZipHash)
+            throw new DiagnosticError("unzip: archive changed since probe", {
+              stage: "archive",
+              reason: "fingerprint-mismatch",
+            });
+          const filesFingerprint = await runEvidenceTask<string>({
+            kind: "archive",
+            bytes: buffer,
+            appDir: input.appDir,
+          });
+          return { zipHash, filesFingerprint };
+        })();
+        archives.set(key, archive);
+      }
+      return compareArchive(input, await archive);
+    });
+}
+
+async function compareArchive(
+  input: InstallTypesInput,
+  loaded: InstallTypesResult,
+): Promise<ArchiveComparison> {
   const destination = path.resolve(input.destination);
   if (!fs.existsSync(destination) || !fs.statSync(destination).isDirectory()) {
     throw new DiagnosticError("unzip: types directory is missing", {
@@ -111,25 +150,29 @@ async function compareArchive(input: InstallTypesInput): Promise<ArchiveComparis
       reason: "directory-missing",
     });
   }
-  assertTreeInside(destination);
-  const files = readTree(destination);
-  if (files.length === 0)
+  const installed = await readInstalledEvidenceAsync(destination, undefined, true);
+  const fingerprint = installed.filesFingerprint;
+  if (fingerprint === filesFingerprint([]))
     throw new DiagnosticError("unzip: types directory is empty", {
       stage: "destination",
       reason: "directory-empty",
     });
-  const fingerprint = filesFingerprint(files);
-  const extracted = await fingerprintArchive(loaded.archive);
+  if (!fingerprint) throw new Error("unzip: could not read types directory");
   return {
     zipHash: loaded.zipHash,
     filesFingerprint: fingerprint,
-    matches: fingerprint === extracted,
+    matches: fingerprint === loaded.filesFingerprint,
   };
 }
 
 async function loadZip(
   input: InstallTypesInput,
 ): Promise<{ archive: ZipArchive; zipHash: string }> {
+  const buffer = await loadZipBytes(input);
+  return { archive: checkedArchive(buffer, input.appDir), zipHash: sha256(buffer) };
+}
+
+async function loadZipBytes(input: InstallTypesInput): Promise<Buffer> {
   const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const fetchImpl = input.fetchImpl ?? fetch;
   const signal = AbortSignal.timeout(timeoutMs);
@@ -173,16 +216,24 @@ async function loadZip(
       reason: "invalid-zip",
     });
   }
-  let archive: ZipArchive;
+  return buffer;
+}
+
+function checkedArchive(buffer: Buffer, appDir: string): ZipArchive {
   try {
-    archive = openArchive(buffer, input.appDir);
+    const archive = openArchive(buffer, appDir);
     const entries = archive.entries();
     if (!entries.some((entry) => !entry.directory)) throw new Error("unzip: archive has no files");
     for (const entry of entries) assertZipEntry(entry);
+    return archive;
   } catch (error) {
     throw unzipError(error);
   }
-  return { archive, zipHash: sha256(buffer) };
+}
+
+export async function fingerprintArchiveBytes(bytes: Uint8Array, appDir: string): Promise<string> {
+  const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return fingerprintArchive(checkedArchive(buffer, appDir));
 }
 
 async function fingerprintArchive(archive: ZipArchive): Promise<string> {
@@ -222,6 +273,17 @@ function loadAdmZip(appDir: string): new (source: Buffer) => AdmZipFile {
     const enhanced = appRequire.resolve("@module-federation/enhanced");
     const dts = createRequire(enhanced).resolve("@module-federation/dts-plugin");
     return createRequire(dts)("adm-zip") as new (source: Buffer) => AdmZipFile;
+  }
+}
+
+function resolveAdmZip(appDir: string): string {
+  const appRequire = createRequire(path.join(appDir, "package.json"));
+  try {
+    return appRequire.resolve("adm-zip");
+  } catch {
+    const enhanced = appRequire.resolve("@module-federation/enhanced");
+    const dts = createRequire(enhanced).resolve("@module-federation/dts-plugin");
+    return createRequire(dts).resolve("adm-zip");
   }
 }
 

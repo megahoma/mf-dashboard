@@ -313,7 +313,14 @@ test("saving a source and the settle timer each rebuild the tree once", async (t
   await provider.fileSaved(source);
   provider.getChildren();
   assert.equal(builds.count, baseline + 1);
+  const settled = new Promise<void>((resolve) => {
+    const listener = provider.onDidChangeTreeData(() => {
+      listener.dispose();
+      resolve();
+    });
+  });
   t.mock.timers.tick(15_000);
+  await settled;
   provider.getChildren();
   assert.equal(builds.count, baseline + 2);
 });

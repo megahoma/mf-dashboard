@@ -22,6 +22,7 @@ export interface InstalledEvidence {
 export function readInstalledEvidence(
   destination: string | null,
   log: LogContext = noLog,
+  fresh = false,
 ): InstalledEvidence {
   let folderExists: boolean;
   try {
@@ -33,7 +34,7 @@ export function readInstalledEvidence(
   }
   if (!folderExists || destination == null) return { folderExists: false, filesFingerprint: null };
   try {
-    return { folderExists: true, filesFingerprint: treeFingerprint(destination, log) };
+    return { folderExists: true, filesFingerprint: treeFingerprint(destination, log, fresh) };
   } catch (error) {
     log.event("debug", "types.installed.read-failed", { path: destination, ...safeError(error) });
     return { folderExists: true, filesFingerprint: "" };

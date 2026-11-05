@@ -6,6 +6,7 @@ import { readManifestModules, type ManifestShared } from "./manifest-modules.ts"
 
 // Manifest requests in the proved 2.9.1 path use a 10s timeout.
 const REQUEST_TIMEOUT_MS = 10_000;
+const REQUEST_CONCURRENCY = 8;
 
 export interface Net {
   connect(port: number): Promise<boolean>;
@@ -164,6 +165,28 @@ export function putLinkResult(book: ProbeBook, result: LinkProbeResult): void {
   book.links.set(nextId, result);
 }
 
+function putLinkResults(book: ProbeBook, results: readonly LinkProbeResult[]): void {
+  if (results.length === 0) return;
+  const currentIds = new Map<string, string>();
+  // Preserve matching IDs' insertion positions just like standalone writes.
+  for (const { link } of results) {
+    const edge = edgeKey(link);
+    if (!currentIds.has(edge)) currentIds.set(edge, linkProbeId(link));
+  }
+  for (const [id, stored] of book.links) {
+    const nextId = currentIds.get(edgeKey(stored.link));
+    if (nextId !== undefined && id !== nextId) book.links.delete(id);
+  }
+  for (const result of results) {
+    const edge = edgeKey(result.link);
+    const id = linkProbeId(result.link);
+    const previous = currentIds.get(edge)!;
+    if (previous !== id) book.links.delete(previous);
+    book.links.set(id, result);
+    currentIds.set(edge, id);
+  }
+}
+
 export function putExternalResult(book: ProbeBook, url: string, result: ArtifactProbe): void {
   book.extras.set(externalManifestId(url), result);
 }
@@ -181,6 +204,9 @@ export function createProbeCycle(
       const cache: ZipCache = {
         book,
         cycle: new Map(),
+        pendingZips: new Map(),
+        manifests: new Map(),
+        request: createRequestQueue(),
         seen: new Set(),
         log,
         manifestRequests: 0,
@@ -212,27 +238,39 @@ export function createProbeCycle(
         extras: input.extraManifestUrls.length,
       });
       const run = (async () => {
-        for (const app of input.apps)
-          putAppResult(
-            book,
-            app.name,
-            await probeConnectedApp(
-              app,
-              net,
-              (url) => manifest(url, checkTypes && (producers == null || producers.has(app.name))),
-              log,
+        const [apps, links, extras] = await Promise.all([
+          Promise.all(
+            input.apps.map((app) =>
+              probeConnectedApp(
+                app,
+                net,
+                (url) =>
+                  manifest(url, checkTypes && (producers == null || producers.has(app.name))),
+                log,
+                cache.request,
+              ),
             ),
-          );
-        for (const link of input.links)
-          putLinkResult(book, {
-            link,
-            ...(await manifest(
-              link.url,
-              checkTypes && (!input.typeLinks || input.typeLinks.has(linkProbeId(link))),
-            )),
-          });
-        for (const url of input.extraManifestUrls)
-          putExternalResult(book, url, await manifest(url, checkTypes && !input.typeLinks));
+          ),
+          Promise.all(
+            input.links.map((link) =>
+              manifest(
+                link.url,
+                checkTypes && (!input.typeLinks || input.typeLinks.has(linkProbeId(link))),
+              ),
+            ),
+          ),
+          Promise.all(
+            input.extraManifestUrls.map((url) => manifest(url, checkTypes && !input.typeLinks)),
+          ),
+        ]);
+        input.apps.forEach((app, index) => putAppResult(book, app.name, apps[index]));
+        putLinkResults(
+          book,
+          input.links.map((link, index) => ({ link, ...links[index] })),
+        );
+        input.extraManifestUrls.forEach((url, index) =>
+          putExternalResult(book, url, extras[index]),
+        );
         if (checkTypes && !input.typeLinks)
           for (const url of book.zips.keys()) {
             if (!cache.seen.has(url)) book.zips.delete(url);
@@ -270,10 +308,12 @@ async function probeConnectedApp(
   net: Net,
   manifest: (url: string) => Promise<ArtifactProbe>,
   log: LogContext = noLog,
+  request: RequestQueue = (work) => work(),
 ): Promise<ProbeResult> {
   if (app.port == null) return emptyResult(false);
   const started = Date.now();
-  const opened = await callNet(net.connect(app.port));
+  const port = app.port;
+  const opened = await request(() => callNet(net.connect(port)));
   log.event("trace", "port.checked", {
     app: app.name,
     port: app.port,
@@ -316,32 +356,72 @@ export function resolveZipUrl(manifestUrl: string, manifest: unknown): string | 
 }
 
 type ZipProbe = Pick<ArtifactProbe, "zipMtime" | "zipHash">;
+type RequestQueue = <T>(work: () => Promise<T>) => Promise<T>;
+
+function createRequestQueue(): RequestQueue {
+  let active = 0;
+  const waiting: (() => void)[] = [];
+  return async (work) => {
+    if (active >= REQUEST_CONCURRENCY) await new Promise<void>((resolve) => waiting.push(resolve));
+    else active++;
+    try {
+      return await work();
+    } finally {
+      const next = waiting.shift();
+      if (next) next();
+      else active--;
+    }
+  };
+}
+
+function request<T>(work: () => Promise<T>, cache?: ZipCache): Promise<T> {
+  const timed = () => withTimeout(work(), REQUEST_TIMEOUT_MS);
+  return cache ? cache.request(timed) : timed();
+}
 
 interface ZipCache {
   book: ProbeBook;
   cycle: Map<string, ZipFact>;
+  pendingZips: Map<string, Promise<ZipProbe | null>>;
+  manifests: Map<string, Promise<ArtifactProbe>>;
+  request: RequestQueue;
   seen: Set<string>;
   log: LogContext;
   manifestRequests: number;
   zipRequests: number;
 }
 
-async function probeZip(url: string, net: Net, cache?: ZipCache): Promise<ZipProbe | null> {
+function probeZip(url: string, net: Net, cache?: ZipCache): Promise<ZipProbe | null> {
   cache?.seen.add(url);
   const cached = cache?.cycle.get(url);
   if (cached) {
     cache?.log.event("trace", "zip.reused", { url, reason: "cycle-cache" });
-    return cached;
+    return Promise.resolve(cached);
   }
+  const pending = cache?.pendingZips.get(url);
+  if (pending) {
+    cache?.log.event("trace", "zip.reused", { url, reason: "cycle-inflight" });
+    return pending;
+  }
+  const work = requestZip(url, net, cache).finally(() => cache?.pendingZips.delete(url));
+  cache?.pendingZips.set(url, work);
+  return work;
+}
+
+async function requestZip(url: string, net: Net, cache?: ZipCache): Promise<ZipProbe | null> {
   const previous = cache?.book.zips.get(url);
   const started = Date.now();
   cache?.log.event("trace", "zip.request", { url, conditional: previous?.zipMtime != null });
   if (cache) cache.zipRequests++;
   let zip: Awaited<ReturnType<Net["get"]>>;
   try {
-    zip = await withTimeout(
-      net.get(url, previous?.zipMtime != null ? { ifModifiedSince: previous.zipMtime } : undefined),
-      REQUEST_TIMEOUT_MS,
+    zip = await request(
+      () =>
+        net.get(
+          url,
+          previous?.zipMtime != null ? { ifModifiedSince: previous.zipMtime } : undefined,
+        ),
+      cache,
     );
   } catch (error) {
     cache?.log.event("trace", "zip.failed", {
@@ -391,6 +471,23 @@ async function probeManifest(
   log: LogContext = noLog,
   checkTypes = true,
 ): Promise<ArtifactProbe> {
+  let pending = url == null ? undefined : cache?.manifests.get(url);
+  if (!pending) {
+    pending = requestManifest(url, net, cache, log);
+    if (url != null) cache?.manifests.set(url, pending);
+  }
+  const manifest = await pending;
+  if (!checkTypes || !manifest.zipUrl) return manifest;
+  const zip = await probeZip(manifest.zipUrl, net, cache);
+  return zip ? { ...manifest, ...zip } : manifest;
+}
+
+async function requestManifest(
+  url: string | null,
+  net: Net,
+  cache: ZipCache | undefined,
+  log: LogContext,
+): Promise<ArtifactProbe> {
   const blank = emptyArtifact();
   if (!isHttpUrl(url)) {
     log.event("trace", "manifest.skipped", { reason: "invalid-url" });
@@ -401,7 +498,7 @@ async function probeManifest(
   let response: Awaited<ReturnType<Net["get"]>>;
   try {
     if (cache) cache.manifestRequests++;
-    response = await withTimeout(net.get(url), REQUEST_TIMEOUT_MS);
+    response = await request(() => net.get(url), cache);
   } catch (error) {
     const timeout =
       error instanceof Error && (error.name === "TimeoutError" || error.message === "timeout");
@@ -435,16 +532,7 @@ async function probeManifest(
     });
     return { ...blank, manifestReachable: true, buildVersion, ...modules };
   }
-  if (!checkTypes) return { ...blank, manifestReachable: true, buildVersion, zipUrl, ...modules };
-  const zip = await probeZip(zipUrl, net, cache);
-  if (!zip) return { ...blank, manifestReachable: true, buildVersion, zipUrl, ...modules };
-  return {
-    manifestReachable: true,
-    buildVersion,
-    zipUrl,
-    ...zip,
-    ...modules,
-  };
+  return { ...blank, manifestReachable: true, buildVersion, zipUrl, ...modules };
 }
 
 function publicPathOf(meta: Record<string, unknown>, manifestUrl: string): string {

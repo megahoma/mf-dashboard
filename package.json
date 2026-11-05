@@ -313,7 +313,7 @@
     "lint": "rslint --type-check .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "compile": "esbuild src/app/extension.ts --bundle --platform=node --format=cjs --main-fields=module,main --alias:tinyglobby=./node_modules/tinyglobby/dist/index.cjs --outfile=dist/extension.js --external:vscode",
+    "compile": "esbuild src/app/extension.ts src/entities/federated-types/evidence-worker.ts --bundle --platform=node --format=cjs --main-fields=module,main --alias:tinyglobby=./node_modules/tinyglobby/dist/index.cjs --outdir=dist --outbase=src --entry-names=[name] --external:vscode --define:import.meta.url=undefined",
     "package": "vsce package",
     "vscode:prepublish": "npm run compile",
     "prepare": "husky"

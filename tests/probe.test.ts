@@ -495,25 +495,25 @@ test("a probe cycle shares successful ZIP requests and retries failures in the n
   );
   const input = { apps: [app], links: [link(url)], extraManifestUrls: [url] };
   await cycle.start(input);
-  assert.equal(requests, 4);
+  assert.equal(requests, 2);
   assert.equal(book.apps.get(appProbeId(app.name))?.zipHash, OLD_ZIP_HASH);
   body = NEW_ZIP;
   await cycle.start(input);
-  assert.equal(requests, 8);
+  assert.equal(requests, 4);
   assert.equal(book.extras.get(externalManifestId(url))?.zipHash, NEW_ZIP_HASH);
   fail = true;
   await cycle.start(input);
-  assert.equal(requests, 11);
+  assert.equal(requests, 5);
   assert.equal(book.extras.get(externalManifestId(url))?.requestFailure, "network");
   fail = false;
   await cycle.start(input);
-  assert.equal(requests, 15);
+  assert.equal(requests, 7);
   assert.equal(book.apps.get(appProbeId(app.name))?.manifestReachable, true);
 });
 
 for (const target of ["manifest", "zip"]) {
   for (const failure of ["network", "http"]) {
-    test(`a transient ${failure} ${target} failure does not poison neighbouring rows`, async () => {
+    test(`concurrent rows share a transient ${failure} ${target} failure and recover next cycle`, async () => {
       const url = "http://127.0.0.1:4100/mf-manifest.json";
       const book = createProbeBook();
       let failed = false;
@@ -541,11 +541,26 @@ for (const target of ["manifest", "zip"]) {
         },
         book,
       );
-      await cycle.start({ apps: [app], links: [link(url)], extraManifestUrls: [url] });
-      assert.equal(book.apps.get(appProbeId(app.name))?.zipHash, null);
+      const input = { apps: [app], links: [link(url)], extraManifestUrls: [url] };
+      await cycle.start(input);
+      for (const result of [
+        book.apps.get(appProbeId(app.name)),
+        [...book.links.values()][0],
+        book.extras.get(externalManifestId(url)),
+      ]) {
+        assert.equal(result?.zipHash, null);
+        assert.equal(result?.manifestReachable, target === "zip");
+        assert.equal(
+          result?.requestFailure,
+          target === "manifest" ? (failure === "network" ? "network" : "HTTP 503") : undefined,
+        );
+      }
+      assert.equal(requests, target === "manifest" ? 1 : 2);
+      await cycle.start(input);
+      assert.equal(book.apps.get(appProbeId(app.name))?.zipHash, OLD_ZIP_HASH);
       assert.equal([...book.links.values()][0].zipHash, OLD_ZIP_HASH);
       assert.equal(book.extras.get(externalManifestId(url))?.zipHash, OLD_ZIP_HASH);
-      assert.equal(requests, target === "manifest" ? 4 : 5);
+      assert.equal(requests, target === "manifest" ? 3 : 4);
     });
   }
 }

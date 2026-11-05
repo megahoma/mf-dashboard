@@ -5,6 +5,10 @@ import { createProbeCycle, createProbeBook } from "../../src/entities/microfront
 const archives: WeakRef<Uint8Array>[] = [];
 let reached: () => void = () => {};
 let release: () => void = () => {};
+let downloaded: () => void = () => {};
+const ready = new Promise<void>((resolve) => {
+  downloaded = resolve;
+});
 const blocked = new Promise<void>((resolve) => {
   release = resolve;
 });
@@ -23,6 +27,7 @@ const cycle = createProbeCycle(
       if (url.endsWith(".zip")) {
         const body = new Uint8Array(1024 * 1024);
         archives.push(new WeakRef(body));
+        if (archives.length === 12) downloaded();
         return { ok: true, json: null, body, lastModified: null };
       }
       return {
@@ -43,7 +48,7 @@ const run = cycle.start({
     "https://example.com/sentinel.json",
   ],
 });
-await waiting;
+await Promise.all([waiting, ready]);
 try {
   assert.equal(archives.length, 12);
   assert.ok(global.gc, "run this fixture with --expose-gc");

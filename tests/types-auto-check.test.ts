@@ -15,6 +15,7 @@ import {
 } from "../src/entities/federated-types/index.ts";
 import { appProbeId } from "../src/entities/microfrontend/index.ts";
 import { terms } from "../src/shared/config/index.ts";
+import type { LogContext, LogFields } from "../src/shared/logging.ts";
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -108,21 +109,40 @@ function fixture(t: TestContext, automatic = false) {
         : undefined,
     });
   });
+  const evidenceEvents: { event: string; fields: LogFields | undefined }[] = [];
+  const log: LogContext = {
+    operation: () => log,
+    event: (_level, event, fields) => {
+      evidenceEvents.push({ event, fields: typeof fields === "function" ? fields() : fields });
+    },
+  };
+  const work = (kind: "sources" | "types", target: string, field: "reads" | "scans") =>
+    evidenceEvents.reduce(
+      (total, entry) =>
+        total +
+        (entry.event.startsWith(`fingerprint.${kind}.`) &&
+        (entry.fields?.folder === target || entry.fields?.path === target)
+          ? Number(entry.fields?.[field] ?? 0)
+          : 0),
+      0,
+    );
   const reads = t.mock.method(fs, "readFileSync");
   const scans = t.mock.method(fs, "readdirSync");
   const sourceReads = (name: string) =>
-    reads.mock.calls.filter((call) => String(call.arguments[0]) === sourceFile(name)).length;
+    reads.mock.calls.filter((call) => String(call.arguments[0]) === sourceFile(name)).length +
+    work("sources", path.join(root, name), "reads");
   const typeReads = (name: string, alias: string) =>
-    reads.mock.calls.filter((call) => String(call.arguments[0]) === typesFile(name, alias)).length;
+    reads.mock.calls.filter((call) => String(call.arguments[0]) === typesFile(name, alias)).length +
+    work("types", path.dirname(typesFile(name, alias)), "reads");
   const typeScans = (name: string, alias: string) =>
     scans.mock.calls.filter(
       (call) => String(call.arguments[0]) === path.dirname(typesFile(name, alias)),
-    ).length;
+    ).length + work("types", path.dirname(typesFile(name, alias)), "scans");
   const heavyScans = () =>
     scans.mock.calls.filter((call) =>
       /[/\\](?:src|@mf-types)(?:[/\\]|$)/.test(String(call.arguments[0])),
     ).length;
-  const provider = new MfDashboardProvider(() => terms, store);
+  const provider = new MfDashboardProvider(() => terms, store, undefined, log);
   t.after(() => {
     provider.dispose();
     Reflect.deleteProperty(vscode.workspace, "workspaceFolders");
@@ -139,6 +159,7 @@ function fixture(t: TestContext, automatic = false) {
     requests,
     row,
     sourceReads,
+    sourceScans: (name: string) => work("sources", path.join(root, name), "scans"),
     typeReads,
     typeScans,
     heavyScans,
@@ -168,6 +189,19 @@ test("autoCheck false keeps ports and manifests live without type scans, ZIP req
   assert.equal(f.heavyScans(), 0);
   assert.equal(f.sourceReads("palette"), 0);
   assert.equal(f.typeReads("studio", "paint"), 0);
+});
+
+test("a burst of source saves refreshes only the changed producer once", async (t) => {
+  const f = fixture(t, true);
+  await f.provider.refresh("startup");
+  const changed = f.sourceScans("palette");
+  const unrelated = f.sourceScans("timeline");
+  const unrelatedTypes = f.typeScans("studio", "track");
+  fs.writeFileSync(f.sourceFile("palette"), "export const revision = 222;");
+  await Promise.all(Array.from({ length: 3 }, () => f.provider.fileSaved(f.sourceFile("palette"))));
+  assert.equal(f.sourceScans("palette"), changed + 1);
+  assert.equal(f.sourceScans("timeline"), unrelated);
+  assert.equal(f.typeScans("studio", "track"), unrelatedTypes);
 });
 
 test("manual checks inspect only the selected link or consumer and retain the dated snapshot", async (t) => {

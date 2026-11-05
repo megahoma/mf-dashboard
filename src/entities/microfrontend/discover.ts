@@ -11,6 +11,7 @@ export interface ScanOptions {
   ignorePaths?: readonly string[];
   envMode?: string;
   log?: LogContext;
+  dependencies?: Set<string>;
 }
 
 const CONFIG_FILE =
@@ -51,6 +52,7 @@ export function scanWorkspace(root: string, options: ScanOptions = {}): Record<s
     options.envMode ?? "development",
     found,
     options.log ?? noLog,
+    options.dependencies,
   );
   return Object.fromEntries(found);
 }
@@ -62,8 +64,10 @@ function walk(
   envMode: string,
   found: Map<string, LocalApp>,
   log: LogContext,
+  dependencies?: Set<string>,
 ): void {
   let entries: fs.Dirent[];
+  dependencies?.add(dir);
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
   } catch {
@@ -85,7 +89,7 @@ function walk(
     }
     if (entry.isFile() && CONFIG_FILE.test(entry.name)) configs.push(abs);
   }
-  for (const app of discoverDirectory(dir, configs, envMode, undefined, log)) {
+  for (const app of discoverDirectory(dir, configs, envMode, dependencies, log)) {
     const previous = found.get(app.name);
     if (previous && previous.folder !== app.folder) {
       log.event("error", "discovery.duplicate", {
@@ -98,7 +102,7 @@ function walk(
     }
     found.set(app.name, app);
   }
-  for (const child of children) walk(child, root, ignorePaths, envMode, found, log);
+  for (const child of children) walk(child, root, ignorePaths, envMode, found, log, dependencies);
 }
 
 function shouldSkip(name: string, relPosix: string, extra: readonly string[]): boolean {

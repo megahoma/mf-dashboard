@@ -129,12 +129,16 @@ test("probe logging preserves requests, retries and conditional ZIP reuse", asyn
       links: [],
       extraManifestUrls: [
         "http://localhost/a.json",
+        "http://localhost/a.json",
         "http://localhost/b.json",
         "http://localhost/c.json",
       ],
       log,
     };
     await cycle.start(input);
+    assert.equal(book.zips.size, 0);
+    await cycle.start(input);
+    assert.ok(book.zips.get("http://localhost/types.zip")?.zipHash);
     await cycle.start(input);
     return { requests, messages, fact: book.zips.get("http://localhost/types.zip") };
   };
@@ -145,13 +149,18 @@ test("probe logging preserves requests, retries and conditional ZIP reuse", asyn
   assert.deepEqual(broken.requests, quiet.requests);
   assert.deepEqual(logged.fact, quiet.fact);
   assert.deepEqual(broken.fact, quiet.fact);
+  assert.equal(
+    logged.requests.length,
+    12,
+    "each cycle makes three manifest GETs and one shared ZIP GET",
+  );
   assert.equal(logged.messages.filter((message) => message.includes("zip.failed")).length, 1);
   assert.equal(
     logged.messages.filter((message) => message.includes("zip.response")).length,
     2,
     "only successful HTTP responses produce zip.response (200 and 304)",
   );
-  assert.ok(logged.messages.some((message) => message.includes("reason=cycle-cache")));
+  assert.ok(logged.messages.some((message) => message.includes("reason=cycle-inflight")));
   assert.ok(logged.messages.some((message) => message.includes("reason=not-modified")));
   assert.ok(
     logged.messages.some((message) => message.includes("manifestRequests=3 zipRequests=1")),

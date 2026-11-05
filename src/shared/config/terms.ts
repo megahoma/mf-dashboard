@@ -40,6 +40,7 @@ export const terms = {
   url: "URL",
   portInUrl: "URL port",
   link: "connection",
+  treeReference: "Reference: dependencies are shown at the first occurrence of this app.",
   externalManifest: "external manifest",
   types: "types",
   zip: "zip",
