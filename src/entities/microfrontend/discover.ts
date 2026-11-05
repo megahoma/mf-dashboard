@@ -137,6 +137,7 @@ function discoverDirectory(
   let standaloneZipName: string | undefined;
   let standaloneManifestFileName: string | undefined;
   let rsbuildBase: string | undefined;
+  let resolveRsbuildDevManifest: ((fileName: string) => string | undefined) | undefined;
   const rsbuildApps = new Set<string>();
   let loosePort: number | null = null;
   for (const file of files) {
@@ -161,11 +162,15 @@ function discoverDirectory(
       outputDir,
       bundlerZipName,
       rsbuildBase: base,
+      resolveRsbuildDevManifest: resolveDevManifest,
       manifestFileName,
     } = readConfigCandidate(parsed, text, file, env, dependencies, log);
     const federationConfig = isFederationConfig(file);
     if (!federationConfig) bundlerOutputs.push(outputDir);
-    if (base !== undefined) rsbuildBase = base;
+    if (base !== undefined) {
+      rsbuildBase = base;
+      resolveRsbuildDevManifest = resolveDevManifest;
+    }
     if (port !== null) loosePort = port;
     if (!app) {
       log.event("trace", "discovery.skipped", {
@@ -184,8 +189,11 @@ function discoverDirectory(
       }
     } else {
       if (existing.port === null && app.port !== null) existing.port = app.port;
-      if (base !== undefined && !rsbuildApps.has(app.name))
+      if (base !== undefined && !rsbuildApps.has(app.name)) {
         existing.manifestPath = app.manifestPath;
+        if (app.port === null || existing.port === app.port)
+          existing.devManifestPath = app.devManifestPath;
+      }
       if (
         app.buildConfigFile &&
         existing.buildConfigFile &&
@@ -206,8 +214,14 @@ function discoverDirectory(
       rsbuildBase !== undefined &&
       bundlerOutputs.length === 1 &&
       !rsbuildApps.has(app.name)
-    )
+    ) {
       app.manifestPath = joinManifestPath(rsbuildBase, standaloneManifestFileName);
+      if (loosePort === null || loosePort === app.port) {
+        const devManifestPath = resolveRsbuildDevManifest?.(standaloneManifestFileName);
+        if (devManifestPath && devManifestPath !== app.manifestPath)
+          app.devManifestPath = devManifestPath;
+      }
+    }
     if (
       standaloneZipName &&
       app.buildConfigFile &&

@@ -212,6 +212,55 @@ test("bulk rebuild uses the Rsbuild server route unless a manifest path is confi
   assert.equal(readAppFolder(seed.folder, "development")?.manifestPath, "/fixture-manifest.json");
 });
 
+test("bulk rebuild installs types from a local ZIP through the Rsbuild dev asset route", async (t) => {
+  const f = fixture(t);
+  const seed = f.app("fixture-asset-library", 53951);
+  fs.writeFileSync(
+    seed.configFile,
+    `
+    import { pluginModuleFederation } from "@module-federation/rsbuild-plugin";
+    export default {
+      server: { port: ${seed.port}, base: "/fixture-app/" },
+      dev: { assetPrefix: process.env.FIXTURE_DEV_ASSETS },
+      output: { assetPrefix: "/published-fixture/" },
+      plugins: [pluginModuleFederation({ name: "${seed.name}", manifest: true,
+        exposes: { "./index": "./index.ts" }, dts: { generateTypes: true, consumeTypes: false }
+      })]
+    };
+    `,
+  );
+  fs.writeFileSync(
+    path.join(seed.folder, ".env.development"),
+    "FIXTURE_DEV_ASSETS=/fixture-app/assets/\n",
+  );
+  const [producer] = loadKnownApps(
+    [{ name: "fixture-root", path: seed.folder }],
+    { [seed.name]: { path: "." } },
+    "development",
+  );
+  assert.ok(producer);
+  assert.equal(producer.manifestPath, "/fixture-app/mf-manifest.json");
+
+  const consumer = f.app("fixture-asset-client", 53952, {
+    consumeTypes: true,
+    remotes: [
+      { ...remote(seed), url: `http://localhost:${seed.port}/fixture-app/assets/mf-manifest.json` },
+    ],
+  });
+  const declaration = 'export declare const source: "offline";';
+  const report = await rebuildAllTypes(f.context([consumer, producer]), {
+    ...unused,
+    generateLocalFederatedTypes: mockGeneration((appDir) => {
+      if (appDir === consumer.folder)
+        assert.equal(fs.readFileSync(typeFile(consumer, producer.name), "utf8"), declaration);
+      return writeZip(path.join(appDir, "dist", "@mf-types.zip"), declaration);
+    }),
+  });
+  assert.deepEqual(report.failed, []);
+  assert.deepEqual(report.rebuilt, [producer.name, consumer.name]);
+  assert.deepEqual(report.installed, [{ consumer: consumer.name, alias: producer.name }]);
+});
+
 test("offline workspace rebuild installs dependencies before generation and visits a shared producer once", async (t) => {
   const f = fixture(t);
   const leaf = f.app("leaf", 4501);

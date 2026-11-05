@@ -139,12 +139,17 @@ test("discovery follows local reexports and combines a separate bundler config w
     );
     fs.writeFileSync(
       path.join(root, "rsbuild.config.ts"),
-      'export default { server: { port: 4100, base: "/fixture-base/" }, output: { distPath: { root: "build/custom" } } };',
+      `export default {
+        server: { port: 4100, base: "/fixture-base/", proxy: { "/api": "https://api.example.test/" } },
+        dev: { assetPrefix: "/fixture-base/assets/" },
+        output: { distPath: { root: "build/custom" } }
+      };`,
     );
     const found = scanWorkspace(root);
     assert.equal(found.shell?.name, "shell");
     assert.equal(found.shell?.port, 4100);
     assert.equal(found.shell?.manifestPath, "/fixture-base/fixture-manifest.json");
+    assert.equal(found.shell?.devManifestPath, "/fixture-base/assets/fixture-manifest.json");
     assert.equal(found.shell?.configFile, path.join(root, "options.ts"));
     assert.equal(found.shell?.generateTypes, true);
     assert.equal(found.shell?.generatedZipPath, path.join(root, "build/custom/@mf-types.zip"));
@@ -169,17 +174,88 @@ test("a matched Rsbuild config supplies the manifest route beside an unrelated b
     'export default { name: "fixture-paired", manifest: { fileName: "fixture.json" }, dts: true };',
   );
   const rsbuildConfig = path.join(root, "rsbuild.config.ts");
-  fs.writeFileSync(
-    rsbuildConfig,
-    `
-import options from "./module-federation.config";
-export default { server: { base: "/fixture-base/" }, plugins: [pluginModuleFederation(options)] };
-`,
-  );
   fs.writeFileSync(path.join(root, "rspack.config.ts"), 'export default { mode: "development" };');
-  const app = scanWorkspace(root)["fixture-paired"];
-  assert.equal(app?.buildConfigFile, rsbuildConfig);
-  assert.equal(app?.manifestPath, "/fixture-base/fixture.json");
+  for (const [prefix, server] of [
+    ["http://localhost:<port>/fixture-base/assets/", { port: 53950 }],
+    ["//localhost:<port>/fixture-base/assets/", { port: 53950 }],
+    ["//localhost/fixture-base/assets/", { port: 443, https: { allowHTTP1: true } }],
+  ] as const) {
+    fs.writeFileSync(
+      rsbuildConfig,
+      `
+import options from "./module-federation.config";
+export default {
+  server: ${JSON.stringify({ ...server, base: "/fixture-base/" })},
+  dev: { assetPrefix: ${JSON.stringify(prefix)} },
+  plugins: [pluginModuleFederation(options)]
+};
+`,
+    );
+    const app = scanWorkspace(root)["fixture-paired"];
+    assert.equal(app?.buildConfigFile, rsbuildConfig);
+    assert.equal(app?.manifestPath, "/fixture-base/fixture.json");
+    assert.equal(app?.devManifestPath, "/fixture-base/assets/fixture.json", prefix);
+  }
+});
+
+test("Rsbuild dev asset routes stay on the same local server and under its base", () => {
+  for (const prefix of [
+    "http://assets.example.test:53950/fixture-base/assets/",
+    "//assets.example.test:53950/fixture-base/assets/",
+    "http://localhost:53951/fixture-base/assets/",
+    "/fixture-base-proxy/",
+    "http://localhost:<port>/fixture-base-proxy/",
+    "/fixture-base/%2e%2e/fixture-base-proxy/",
+  ]) {
+    const source = `export default {
+      server: { port: 53950, base: "/fixture-base/",
+        proxy: { "/fixture-base-proxy/": "https://assets.example.test/" }
+      },
+      dev: { assetPrefix: ${JSON.stringify(prefix)} },
+      plugins: [pluginModuleFederation({ name: "fixture-remote-assets", manifest: true })]
+    };`;
+    const app = discoverSource(source, "/fixture/rsbuild.config.ts", {});
+    assert.equal(app?.manifestPath, "/fixture-base/mf-manifest.json");
+    assert.equal(app?.devManifestPath, undefined, prefix);
+  }
+});
+
+test("Rsbuild proxy rules that may handle the manifest keep its asset route remote", () => {
+  const target = "https://assets.example.test/";
+  for (const proxy of [
+    { "/fixture-base/assets/": target },
+    { "/fixture-base/assets/mf-manifest.json": target },
+    { "/api": { target, pathFilter: "/fixture-base/assets/" } },
+    [{ context: "/fixture-base/assets/", target }],
+  ]) {
+    const source = `export default {
+      server: { port: 53950, base: "/fixture-base/", proxy: ${JSON.stringify(proxy)} },
+      dev: { assetPrefix: "/fixture-base/assets/" },
+      plugins: [pluginModuleFederation({ name: "fixture-proxied-assets", manifest: true })]
+    };`;
+    const app = discoverSource(source, "/fixture/rsbuild.config.ts", {});
+    assert.equal(app?.manifestPath, "/fixture-base/mf-manifest.json");
+    assert.equal(app?.devManifestPath, undefined, JSON.stringify(proxy));
+  }
+});
+
+test("Rsbuild dev asset routes require a resolved base and scheme", () => {
+  for (const [server, prefix] of [
+    ['{ port: 53950, base: "/FIXTURE-BASE/".toLowerCase() }', "/fixture-other/assets/"],
+    ['{ port: 53950, base: "/fixture-base/../fixture-other/" }', "/fixture-other/assets/"],
+    [
+      '{ port: 80, base: "/fixture-base/", https: readHttpsOptions() }',
+      "//localhost/fixture-base/assets/",
+    ],
+  ]) {
+    const source = `export default {
+      server: ${server}, dev: { assetPrefix: ${JSON.stringify(prefix)} },
+      plugins: [pluginModuleFederation({ name: "fixture-unknown-route", manifest: true })]
+    };`;
+    const app = discoverSource(source, "/fixture/rsbuild.config.ts", {});
+    assert.ok(app);
+    assert.equal(app.devManifestPath, undefined, server);
+  }
 });
 
 test("discovery terminates cyclic local reexports", () => {

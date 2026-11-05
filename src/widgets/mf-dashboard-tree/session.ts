@@ -224,21 +224,19 @@ export function loadKnownApps(
       if (!cached) cache.store(key, abs, envMode, match, [...dependencies]);
       fallback ??= match;
       if (match.name !== name) continue;
-      loaded.push({
-        ...match,
-        manifestPath: resolveManifestPath(setting.manifestPath, match.manifestPath),
-      });
+      loaded.push(withManifestPathOverride(match, setting.manifestPath));
       matched = true;
       break;
     }
-    if (!matched && fallback && candidates.length === 1) {
-      loaded.push({
-        ...fallback,
-        manifestPath: resolveManifestPath(setting.manifestPath, fallback.manifestPath),
-      });
-    }
+    if (!matched && fallback && candidates.length === 1)
+      loaded.push(withManifestPathOverride(fallback, setting.manifestPath));
   }
   return loaded;
+}
+
+function withManifestPathOverride(app: LocalApp, configuredPath: string | undefined): LocalApp {
+  const override = resolveManifestPath(configuredPath, "");
+  return override ? { ...app, manifestPath: override, devManifestPath: undefined } : { ...app };
 }
 
 function pathInsideRoot(root: string, target: string): boolean {
