@@ -2,6 +2,8 @@ import { noLog, type LogContext } from "../../shared/logging.ts";
 import { appProbeId, type LocalApp, type ProbeBook } from "../../entities/microfrontend/index.ts";
 import {
   sourceIdentity,
+  sourceIdentityAsync,
+  type SourceIdentity,
   sourceFreshness,
   type ConfirmationStore,
 } from "../../entities/federated-types/index.ts";
@@ -36,8 +38,29 @@ export function collectProducerEvidence(
   confirmations: ConfirmationStore,
   log: LogContext = noLog,
 ): ProducerSnapshot {
-  const probe = book.apps.get(appProbeId(app.name));
   const sources = sourceIdentity(app.folder, app.tsconfig, app.typesFolder, log);
+  return producerSnapshot(app, apps, book, confirmations, sources);
+}
+
+export async function collectProducerEvidenceAsync(
+  app: LocalApp,
+  apps: readonly LocalApp[],
+  book: ProbeBook,
+  confirmations: ConfirmationStore,
+  log: LogContext = noLog,
+): Promise<ProducerSnapshot> {
+  const sources = await sourceIdentityAsync(app.folder, app.tsconfig, app.typesFolder, log);
+  return producerSnapshot(app, apps, book, confirmations, sources);
+}
+
+function producerSnapshot(
+  app: LocalApp,
+  apps: readonly LocalApp[],
+  book: ProbeBook,
+  confirmations: ConfirmationStore,
+  sources: SourceIdentity,
+): ProducerSnapshot {
+  const probe = book.apps.get(appProbeId(app.name));
   const sourceFingerprint = sources.fingerprint;
   const { dependencies, dependencyZipHashes } = dependencyEvidence(app, apps, book);
   const generationConfirmed =

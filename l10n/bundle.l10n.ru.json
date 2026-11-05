@@ -43,5 +43,6 @@
   "external manifest": "внешний манифест",
   "types": "типы",
   "zip": "zip",
-  "not in workspace": "нет в воркспейсе"
+  "not in workspace": "нет в воркспейсе",
+  "Reference: dependencies are shown at the first occurrence of this app.": "Ссылка: зависимости показаны при первом появлении этого приложения."
 }

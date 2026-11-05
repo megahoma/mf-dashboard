@@ -71,7 +71,8 @@ function hostLabel(url: string): string {
 
 export function dashboardNodes(view: DashboardView): DashboardNode[] {
   const byName = new Map(view.loaded.map((item) => [item.name, item]));
-  const roots = rootApps(view, byName).map((item) => appNode(view, item, byName, new Set()));
+  const expanded = new Set<string>();
+  const roots = rootApps(view, byName).map((item) => appNode(view, item, byName, expanded));
   for (const url of view.extraUrls) roots.push(extraNode(view, url));
   return roots;
 }
@@ -146,8 +147,9 @@ function appNode(
   view: DashboardView,
   app: LocalApp,
   byName: Map<string, LocalApp>,
-  stack: ReadonlySet<string>,
+  expanded: Set<string>,
 ): DashboardNode {
+  expanded.add(app.name);
   const probe = view.book.apps.get(appProbeId(app.name));
   const row = model(
     view,
@@ -183,7 +185,7 @@ function appNode(
       view.structure === "flat"
         ? []
         : app.remotes.map((remote) =>
-            linkNode(view, app, remote, byName, new Set(stack).add(app.name), [`app:${app.name}`]),
+            linkNode(view, app, remote, byName, expanded, [`app:${app.name}`]),
           ),
   };
 }
@@ -245,7 +247,7 @@ function linkNode(
   parent: LocalApp,
   remote: LocalApp["remotes"][number],
   byName: Map<string, LocalApp>,
-  stack: ReadonlySet<string>,
+  expanded: Set<string>,
   parentPath: readonly string[],
 ): DashboardNode {
   const link: RemoteLink = {
@@ -271,12 +273,16 @@ function linkNode(
     row.tooltip = `${row.tooltip}\n${view.terms.typesCheckedAt}: ${new Date(checkedAt).toLocaleString()}`;
   const nodePath = [...parentPath, linkId];
   const id = JSON.stringify(nodePath);
-  const nested =
-    producer !== undefined && producer.port !== null && !stack.has(producer.name)
-      ? producer.remotes.map((child) =>
-          linkNode(view, producer, child, byName, new Set(stack).add(producer.name), nodePath),
-        )
-      : [];
+  const nested: DashboardNode[] = [];
+  if (producer !== undefined && producer.port !== null) {
+    if (expanded.has(producer.name)) {
+      row.tooltip += `\n${view.terms.treeReference}`;
+    } else {
+      expanded.add(producer.name);
+      for (const child of producer.remotes)
+        nested.push(linkNode(view, producer, child, byName, expanded, nodePath));
+    }
+  }
   return {
     id,
     name: remote.name,

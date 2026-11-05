@@ -1,4 +1,5 @@
 import { noLog, safeError, type LogContext } from "../../shared/logging.ts";
+import path from "node:path";
 import {
   linkProbeId,
   type LocalApp,
@@ -6,8 +7,9 @@ import {
   type RemoteLink,
 } from "../../entities/microfrontend/index.ts";
 import {
-  compareInstalledArchive,
-  readInstalledEvidence,
+  createArchiveComparisonBatch,
+  readInstalledEvidenceAsync,
+  type InstalledEvidence,
   type ConfirmationStore,
 } from "../../entities/federated-types/index.ts";
 import { refetchTarget } from "../refetch-types/refetch.ts";
@@ -26,19 +28,26 @@ export async function verifyTypeInstalls(
   confirmations: ConfirmationStore,
   checks: Map<string, InstallCheck>,
   log: LogContext = noLog,
-  compare = compareInstalledArchive,
+  compare = createArchiveComparisonBatch(),
+  installedEvidence = new Map<string, InstalledEvidence>(),
+  readInstalled = readInstalledEvidenceAsync,
+  selectedLinks?: ReadonlySet<string>,
 ): Promise<boolean> {
   const active = new Set(links.map(linkProbeId));
   for (const key of checks.keys()) if (!active.has(key)) checks.delete(key);
   const byName = new Map(apps.map((app) => [app.name, app]));
   let changed = false;
   for (const link of links) {
+    if (selectedLinks && !selectedLinks.has(linkProbeId(link))) continue;
     const consumer = byName.get(link.consumer);
     const probe = book.links.get(linkProbeId(link));
-    if (!consumer?.consumeTypes || !link.url || !probe?.zipHash || !probe.zipUrl) continue;
+    if (!consumer?.consumeTypes) continue;
     try {
       const destination = refetchTarget(consumer.folder, link.alias, consumer.typesFolder);
-      const installed = readInstalledEvidence(destination, log);
+      const key = path.resolve(destination);
+      const installed = installedEvidence.get(key) ?? (await readInstalled(destination, log));
+      installedEvidence.set(key, installed);
+      if (!link.url || !probe?.zipHash || !probe.zipUrl) continue;
       if (!installed.folderExists || !installed.filesFingerprint) continue;
       const saved = confirmations.install(link);
       if (
@@ -61,12 +70,15 @@ export async function verifyTypeInstalls(
         destination,
         appDir: consumer.folder,
         timeoutMs: 10_000,
+        expectedZipHash: probe.zipHash,
       });
+      const current = await readInstalled(destination, log, true);
+      installedEvidence.set(key, current);
       // The archive or watch output may change while the comparison is running.
       if (
         result.zipHash !== probe.zipHash ||
         result.filesFingerprint !== installed.filesFingerprint ||
-        readInstalledEvidence(destination, log).filesFingerprint !== result.filesFingerprint
+        current.filesFingerprint !== result.filesFingerprint
       )
         continue;
       checks.set(linkProbeId(link), { ...result, url: link.url });

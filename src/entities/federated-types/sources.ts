@@ -318,10 +318,31 @@ function sourceEntries(
     );
     // tinyglobby suppresses traversal errors; retain failures so incomplete scans cannot be saved.
     let scanError: unknown;
-    // ponytail: isolate include roots; group overlapping roots if repeated scans become costly.
-    const candidates = patterns
-      .flatMap((pattern) =>
-        glob.globSync(pattern, {
+    // Merge overlapping roots without widening unrelated include roots to their common ancestor.
+    const groups: { root: string; patterns: string[] }[] = [];
+    for (const pattern of patterns) {
+      const base = path.resolve(picomatch.scan(pattern, { unescape: true }).base);
+      const contains = (parent: string, child: string) => {
+        const relative = path.relative(parent, child);
+        return (
+          relative === "" ||
+          (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative))
+        );
+      };
+      const parent = groups.find((group) => contains(group.root, base));
+      if (parent) parent.patterns.push(pattern);
+      else {
+        const nested = groups.filter((group) => contains(base, group.root));
+        for (const group of nested) groups.splice(groups.indexOf(group), 1);
+        groups.push({
+          root: base,
+          patterns: [pattern, ...nested.flatMap((group) => group.patterns)],
+        });
+      }
+    }
+    const candidates = groups
+      .flatMap((group) =>
+        glob.globSync(group.patterns, {
           cwd: root,
           absolute: true,
           dot: true,

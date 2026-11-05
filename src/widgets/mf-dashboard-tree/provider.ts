@@ -1,6 +1,7 @@
 import { noLog, safeError, type LogContext } from "../../shared/logging.ts";
 import {
   collectProducerEvidence,
+  collectProducerEvidenceAsync,
   type ProducerSnapshot,
 } from "../../features/rebuild-types/evidence.ts";
 import fs, { existsSync } from "node:fs";
@@ -26,8 +27,10 @@ import {
   type ConfirmationStore,
   describeLink,
   readInstalledEvidence,
+  readInstalledEvidenceAsync,
+  disposeEvidenceWorker,
   type InstalledEvidence,
-  sourceContains,
+  sourceContainsAsync,
 } from "../../entities/federated-types/index.ts";
 import { resolveStartScript } from "../../features/init-settings/index.ts";
 import { refetchTarget, typesRootTarget } from "../../features/refetch-types/refetch.ts";
@@ -134,6 +137,19 @@ export class MfDashboardProvider
   private readonly confirmations: ConfirmationStore;
   private readonly persistConfirmations: () => void | PromiseLike<void>;
   private readonly producerCache = new Map<string, ProducerSnapshot>();
+  private readonly installedCache = new Map<string, InstalledEvidence>();
+  private readonly sourceErrors = new Map<string, unknown>();
+  private readonly saveChecks = new Map<string, Promise<void>>();
+  private readonly dirtySaves = new Set<string>();
+  private readonly membershipChecks = new Map<string, Promise<boolean>>();
+  private typesPreparing = false;
+  private pendingEvidence:
+    | {
+        producers: Map<string, ProducerSnapshot>;
+        installed: Map<string, InstalledEvidence>;
+        errors: Map<string, unknown>;
+      }
+    | undefined;
   private readonly publishedZipHashes = new Map<string, string>();
   private readonly typeCache = new Map<
     string,
@@ -186,6 +202,7 @@ export class MfDashboardProvider
             checkTypes,
             typeLinks: this.requestedTypeLinks,
           });
+          const installed = new Map<string, InstalledEvidence>();
           if (
             checkTypes &&
             (await verifyTypeInstalls(
@@ -195,6 +212,10 @@ export class MfDashboardProvider
               this.confirmations,
               this.installChecks,
               input.log,
+              undefined,
+              installed,
+              undefined,
+              this.requestedTypeLinks,
             ))
           ) {
             try {
@@ -203,6 +224,13 @@ export class MfDashboardProvider
               (input.log ?? log).event("error", "confirmations.save.failed", safeError(error));
             }
           }
+          if (checkTypes && this.canCheckTypes())
+            this.pendingEvidence = await this.prepareEvidence(
+              input.apps,
+              input.links,
+              target,
+              installed,
+            );
         },
         roots: workspaceRoots,
       },
@@ -219,11 +247,21 @@ export class MfDashboardProvider
     this.session.beforeRefreshChange = (log) => {
       this.observationLog = log ?? this.log;
       this.session.typesAutoCheck = readWorkspaceSettings().typesAutoCheck;
+      this.typesPreparing = false;
       this.clearTypeCache();
+      if (this.pendingEvidence) {
+        for (const [key, value] of this.pendingEvidence.producers)
+          this.producerCache.set(key, value);
+        for (const [key, value] of this.pendingEvidence.installed)
+          this.installedCache.set(key, value);
+        for (const [key, value] of this.pendingEvidence.errors) this.sourceErrors.set(key, value);
+        this.pendingEvidence = undefined;
+      }
       const active = new Set(linksOf(this.session.loaded).map(linkProbeId));
       for (const key of this.typeCache.keys()) if (!active.has(key)) this.typeCache.delete(key);
     };
     this.session.onRefreshFailed = () => {
+      this.pendingEvidence = undefined;
       this.clearTypeCache(readWorkspaceSettings().typesAutoCheck);
     };
     this.manifestRegistration = vscode.workspace.registerTextDocumentContentProvider(
@@ -234,6 +272,7 @@ export class MfDashboardProvider
 
   dispose(): void {
     this.disposed = true;
+    disposeEvidenceWorker();
     if (this.timer) clearTimeout(this.timer);
     for (const timer of this.saveTimers.values()) clearTimeout(timer);
     this.saveTimers.clear();
@@ -340,11 +379,12 @@ export class MfDashboardProvider
   typesSettingsChanged(): void {
     const automatic = readWorkspaceSettings().typesAutoCheck;
     this.session.typesAutoCheck = automatic;
+    this.typesPreparing = automatic;
     if (!automatic) {
       for (const timer of this.saveTimers.values()) clearTimeout(timer);
       this.saveTimers.clear();
     }
-    this.clearTypeCache();
+    this.view = null;
     this.change.fire();
   }
 
@@ -401,26 +441,37 @@ export class MfDashboardProvider
       if (kind !== "source" || !settings.typesAutoCheck) continue;
       let included: boolean;
       try {
-        included = sourceContains(app.folder, app.tsconfig, app.typesFolder, file);
+        const key = JSON.stringify([app.folder, app.tsconfig, app.typesFolder, file]);
+        let membership = this.membershipChecks.get(key);
+        if (!membership) {
+          membership = sourceContainsAsync(app.folder, app.tsconfig, app.typesFolder, file);
+          this.membershipChecks.set(key, membership);
+          void membership
+            .finally(() => {
+              if (this.membershipChecks.get(key) === membership) this.membershipChecks.delete(key);
+            })
+            .catch(() => {});
+        }
+        included = await membership;
       } catch (error) {
         this.warnOnce(`${app.name}\0source`, "types.sources.unreadable", {
           producer: app.name,
           ...safeError(error),
         });
-        this.clearTypeCache();
-        this.notify();
+        await this.refreshLocalEvidence(app.name);
         continue;
       }
-      if (!included) continue;
-      this.clearTypeCache();
-      this.notify();
+      if (!included || this.disposed || !readWorkspaceSettings().typesAutoCheck) continue;
+      await this.refreshLocalEvidence(app.name);
+      if (this.disposed || !readWorkspaceSettings().typesAutoCheck) continue;
       const previous = this.saveTimers.get(app.name);
       if (previous) clearTimeout(previous);
       const timer = setTimeout(() => {
         this.saveTimers.delete(app.name);
         if (this.disposed || !readWorkspaceSettings().typesAutoCheck) return;
-        this.clearTypeCache();
-        this.notify();
+        void this.refreshLocalEvidence(app.name).catch((error: unknown) =>
+          this.log.event("error", "types.save.check-failed", safeError(error)),
+        );
       }, settings.typesSettleMs);
       this.saveTimers.set(app.name, timer);
     }
@@ -702,7 +753,7 @@ export class MfDashboardProvider
     if (consumer?.consumeTypes === false) return "none";
     const cached = this.typeSnapshot(link);
     if (cached) return cached.status;
-    if (!this.canCheckTypes(link)) return "unchecked";
+    if (!this.canCheckTypes(link) || this.typesPreparing) return "unchecked";
     const status = this.observe(link);
     this.typeCache.set(linkProbeId(link), {
       status,
@@ -747,7 +798,87 @@ export class MfDashboardProvider
       else this.typeCache.clear();
     }
     this.producerCache.clear();
+    this.installedCache.clear();
+    this.sourceErrors.clear();
     this.view = null;
+  }
+
+  private async prepareEvidence(
+    apps: readonly LocalApp[],
+    links: readonly RemoteLink[],
+    book: import("../../entities/microfrontend/index.ts").ProbeBook,
+    installed = new Map<string, InstalledEvidence>(),
+  ) {
+    const producers = new Map<string, ProducerSnapshot>();
+    const errors = new Map<string, unknown>();
+    const byName = new Map(apps.map((app) => [app.name, app]));
+    for (const link of links) {
+      if (!this.canCheckTypes(link)) continue;
+      const consumer = byName.get(link.consumer);
+      if (!consumer?.consumeTypes) continue;
+      const producer = byName.get(link.remoteName);
+      if (!producer || producer.port == null) continue;
+      if (producer.generateTypes && !producers.has(producer.name) && !errors.has(producer.name)) {
+        try {
+          producers.set(
+            producer.name,
+            await collectProducerEvidenceAsync(
+              producer,
+              apps,
+              book,
+              this.confirmations,
+              this.observationLog,
+            ),
+          );
+        } catch (error) {
+          errors.set(producer.name, error);
+        }
+      }
+      let destination: string;
+      try {
+        destination = path.resolve(
+          refetchTarget(consumer.folder, link.alias, consumer.typesFolder),
+        );
+      } catch {
+        continue;
+      }
+      if (!installed.has(destination)) {
+        try {
+          installed.set(
+            destination,
+            await readInstalledEvidenceAsync(destination, this.observationLog),
+          );
+        } catch {
+          installed.set(destination, { folderExists: true, filesFingerprint: "" });
+        }
+      }
+    }
+    return { producers, installed, errors };
+  }
+
+  private refreshLocalEvidence(name: string): Promise<void> {
+    this.dirtySaves.add(name);
+    const existing = this.saveChecks.get(name);
+    if (existing) return existing;
+    const check = this.run(async () => {
+      while (this.dirtySaves.delete(name)) {
+        if (this.disposed || !readWorkspaceSettings().typesAutoCheck) return;
+        const links = linksOf(this.session.loaded).filter((link) => link.remoteName === name);
+        const evidence = await this.prepareEvidence(this.session.loaded, links, this.session.book);
+        if (this.disposed || !readWorkspaceSettings().typesAutoCheck) return;
+        for (const link of links) this.typeCache.delete(linkProbeId(link));
+        this.producerCache.delete(name);
+        this.sourceErrors.delete(name);
+        for (const [key, value] of evidence.producers) this.producerCache.set(key, value);
+        for (const [key, value] of evidence.installed) this.installedCache.set(key, value);
+        for (const [key, value] of evidence.errors) this.sourceErrors.set(key, value);
+        this.notify();
+      }
+    }).finally(() => {
+      if (this.saveChecks.get(name) === check) this.saveChecks.delete(name);
+    });
+    this.saveChecks.set(name, check);
+    return check;
   }
 
   private warnOnce(
@@ -769,6 +900,13 @@ export class MfDashboardProvider
     const probe = this.session.book.links.get(linkProbeId(link));
     let evidence: ProducerSnapshot | undefined;
     if (producer && producer.generateTypes && consumer.consumeTypes) {
+      if (this.sourceErrors.has(producer.name)) {
+        this.warnOnce(`${producer.name}\0source`, "types.sources.unreadable", {
+          producer: producer.name,
+          ...safeError(this.sourceErrors.get(producer.name)),
+        });
+        return "unknown";
+      }
       evidence = this.producerCache.get(producer.name);
       if (!evidence) {
         try {
@@ -805,7 +943,9 @@ export class MfDashboardProvider
     }
     let installed: InstalledEvidence;
     try {
-      installed = readInstalledEvidence(destination, this.observationLog);
+      installed =
+        (destination && this.installedCache.get(path.resolve(destination))) ||
+        readInstalledEvidence(destination, this.observationLog);
       if (installed.filesFingerprint === "")
         this.warnOnce(`${consumer.name}\0${link.alias}\0read`, "types.installed.unreadable", {
           consumer: consumer.name,

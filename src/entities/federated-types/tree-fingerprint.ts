@@ -6,11 +6,11 @@ import { readTree } from "./install.ts";
 
 const cache = new Map<string, { stamp: string; fingerprint: string }>();
 
-export function treeFingerprint(dir: string, log: LogContext = noLog): string {
+export function treeFingerprint(dir: string, log: LogContext = noLog, fresh = false): string {
   const root = path.resolve(dir);
   const stamp = treeStamp(root);
   const hit = cache.get(root);
-  if (hit?.stamp === stamp) {
+  if (!fresh && hit?.stamp === stamp) {
     log.event("debug", "fingerprint.types.hit", { path: root, scans: 1, reads: 0 });
     return hit.fingerprint;
   }
@@ -33,7 +33,8 @@ function treeStamp(dir: string): string {
       const stat = fs.lstatSync(full);
       if (stat.isSymbolicLink()) throw new Error(`unzip: symlink ${relative}`);
       if (stat.isDirectory()) walk(full, relative);
-      else if (stat.isFile()) rows.push(`${relative}\0${stat.size}\0${stat.mtimeMs}`);
+      else if (stat.isFile())
+        rows.push(`${relative}\0${stat.size}\0${stat.mtimeMs}\0${stat.ctimeMs}\0${stat.ino}`);
     }
   };
   walk(dir, "");

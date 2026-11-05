@@ -124,12 +124,19 @@ export function appConfigStamp(
     ...dependencies,
   ];
   if (configFile) files.push(configFile);
+  return configFilesStamp(files);
+}
+
+function configFilesStamp(files: readonly string[]): string {
   return [...new Set(files)]
     .sort()
     .map((file) => {
       try {
         const stat = fs.statSync(file);
-        return `${file}\0${fs.realpathSync(file)}\0${stat.size}\0${stat.mtimeMs}`;
+        const directory = stat.isDirectory()
+          ? `\0directory\0${stat.ctimeMs}\0${stat.ino}\0${stat.mode}`
+          : "";
+        return `${file}\0${fs.realpathSync(file)}\0${stat.size}\0${stat.mtimeMs}${directory}`;
       } catch {
         return `${file}\0missing`;
       }
@@ -272,6 +279,17 @@ export function linksOf(apps: readonly LocalApp[]): RemoteLink[] {
   return links;
 }
 
+interface DiscoverySnapshot {
+  key: string;
+  scans: {
+    root: WorkspaceRoot;
+    apps: Record<string, LocalApp>;
+    dependencies: readonly string[];
+    stamp: string;
+  }[];
+  parsed: Map<string, { app: LocalApp; stamp: string }>;
+}
+
 export class DashboardSession {
   loaded: LocalApp[] = [];
   extraUrls: string[] = [];
@@ -292,6 +310,7 @@ export class DashboardSession {
   private readonly log: LogContext;
   private activeLog: LogContext = noLog;
   private pathWarnings = new Set<string>();
+  private preparedDiscovery: DiscoverySnapshot | undefined;
   readonly book: ProbeBook;
   private readonly onChange: () => void;
 
@@ -311,7 +330,11 @@ export class DashboardSession {
     this.onChange = onChange;
   }
 
-  async refresh(source = "manual", log = this.log.operation(source)): Promise<void> {
+  async refresh(
+    source = "manual",
+    log = this.log.operation(source),
+    cache = this.appCache,
+  ): Promise<void> {
     this.activeLog = log;
     const seenWarnings = new Set<string>();
     const loadLog: LogContext = {
@@ -347,7 +370,7 @@ export class DashboardSession {
               current.apps,
               current.envMode,
               current.ignorePaths,
-              this.appCache,
+              cache,
               loadLog,
             );
       log.event("debug", "config.loaded", {
@@ -411,6 +434,43 @@ export class DashboardSession {
     this.onChange();
   }
 
+  prepareDiscovery(log = this.log.operation("startup")): string[] {
+    this.preparedDiscovery = undefined;
+    const current = this.ports.readSettings();
+    const roots = this.ports.roots();
+    const scans = roots.map((root) => {
+      const dependencies = new Set<string>();
+      const apps = this.ports.scan(root.path, {
+        envMode: current.envMode,
+        ignorePaths: current.ignorePaths,
+        dependencies,
+        log,
+      });
+      return {
+        root,
+        apps,
+        dependencies: [...dependencies],
+        stamp: configFilesStamp([...dependencies]),
+      };
+    });
+    const parsed: DiscoverySnapshot["parsed"] = new Map();
+    for (const { root, apps } of scans) {
+      for (const [name, app] of Object.entries(apps)) {
+        const key = `${root.path}\0${app.folder}\0${current.envMode}\0${name}`;
+        parsed.set(key, {
+          app,
+          stamp: appConfigStamp(app.folder, current.envMode, app.configFile),
+        });
+      }
+    }
+    this.preparedDiscovery = {
+      key: JSON.stringify([roots, current.envMode, current.ignorePaths]),
+      scans,
+      parsed,
+    };
+    return scans.flatMap(({ apps }) => Object.keys(apps));
+  }
+
   async discover(): Promise<void> {
     const log = this.log.operation("discovery");
     const started = Date.now();
@@ -419,18 +479,26 @@ export class DashboardSession {
     try {
       const current = this.ports.readSettings();
       const roots = this.ports.roots();
+      if (new Set(roots.map((root) => root.name)).size !== roots.length) {
+        failureFields = { reason: "duplicate-workspace-folder-name" };
+        throw new Error("workspace folder names must be unique");
+      }
+      const key = JSON.stringify([roots, current.envMode, current.ignorePaths]);
+      if (
+        this.preparedDiscovery?.key !== key ||
+        this.preparedDiscovery.scans.some(
+          ({ dependencies, stamp }) => stamp !== configFilesStamp(dependencies),
+        ) ||
+        [...this.preparedDiscovery.parsed.values()].some(
+          ({ app, stamp }) => stamp !== appConfigStamp(app.folder, current.envMode, app.configFile),
+        )
+      )
+        this.prepareDiscovery(log);
+      const discovered = this.preparedDiscovery!;
+      this.preparedDiscovery = undefined;
       if (roots.length > 0) {
-        if (new Set(roots.map((root) => root.name)).size !== roots.length) {
-          failureFields = { reason: "duplicate-workspace-folder-name" };
-          throw new Error("workspace folder names must be unique");
-        }
         const foundApps: Record<string, AppSetting> = Object.create(null);
-        for (const root of roots) {
-          const found = this.ports.scan(root.path, {
-            envMode: current.envMode,
-            ignorePaths: current.ignorePaths,
-            log,
-          });
+        for (const { root, apps: found } of discovered.scans) {
           for (const [name, foundApp] of Object.entries(found)) {
             if (Object.hasOwn(foundApps, name)) {
               failureFields = { reason: "duplicate-federation-name", app: name };
@@ -450,7 +518,23 @@ export class DashboardSession {
         );
         if (changed) await this.ports.writeApps(apps);
       }
-      await this.refresh("discovery", log);
+      const importsUnchanged = discovered.scans.every(
+        ({ dependencies, stamp }) => stamp === configFilesStamp(dependencies),
+      );
+      // Scan results are reused once; later refreshes track imported dependencies normally.
+      await this.refresh("discovery", log, {
+        lookup: (key, folder, envMode) => {
+          const hit = discovered.parsed.get(key);
+          if (
+            importsUnchanged &&
+            hit &&
+            hit.stamp === appConfigStamp(folder, envMode, hit.app.configFile)
+          )
+            return hit.app;
+          return this.appCache.lookup(key, folder, envMode);
+        },
+        store: (...args) => this.appCache.store(...args),
+      });
       log.event("info", "discovery.completed", {
         apps: this.loaded.length,
         durationMs: Date.now() - started,

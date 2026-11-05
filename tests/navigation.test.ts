@@ -169,15 +169,30 @@ test("shared producers are scanned once and invalidated with the link status cac
   const producer = localApp("producer", root);
   const source = path.join(root, "app.ts");
   fs.writeFileSync(source, "export const app = 1;");
-  const provider = new MfDashboardProvider(() => terms);
+  const evidenceEvents: string[] = [];
+  const provider = new MfDashboardProvider(
+    () => terms,
+    undefined,
+    undefined,
+    createLogger({
+      enabled: () => true,
+      write: (_level, text) => evidenceEvents.push(text),
+    }),
+  );
   t.after(() => {
     provider.dispose();
     fs.rmSync(root, { recursive: true, force: true });
   });
   provider.session.loaded = [
     producer,
-    localApp("a", "/a", { consumeTypes: true }),
-    localApp("b", "/b", { consumeTypes: true }),
+    ...["a", "b"].map((name) =>
+      localApp(name, `/${name}`, {
+        consumeTypes: true,
+        remotes: [
+          { alias: "producer", name: "producer", url: "http://localhost:4100/mf-manifest.json" },
+        ],
+      }),
+    ),
   ];
   const linkA = {
     consumer: "a",
@@ -187,9 +202,7 @@ test("shared producers are scanned once and invalidated with the link status cac
   };
   const linkB = { ...linkA, consumer: "b" };
   const read = t.mock.method(fs, "readFileSync");
-  const stat = t.mock.method(fs, "statSync");
   const count = () => read.mock.calls.filter((call) => String(call.arguments[0]) === source).length;
-  const scans = () => stat.mock.calls.filter((call) => String(call.arguments[0]) === source).length;
   provider.session.typesForLink(linkA);
   provider.session.typesForLink(linkB);
   assert.equal(count(), 1);
@@ -208,13 +221,27 @@ test("shared producers are scanned once and invalidated with the link status cac
   // fileSaved's notification observes both links; they share the new producer snapshot.
   provider.session.typesForLink(linkA);
   provider.session.typesForLink(linkB);
-  assert.equal(count(), 3);
-  const beforeSettle = scans();
+  assert.equal(count(), 2, "source saves keep byte reads off the extension host");
+  const sourceScans = () =>
+    evidenceEvents.filter((text) => text.includes("fingerprint.sources.") && text.includes(root))
+      .length;
+  const beforeSettle = sourceScans();
+  const settled = new Promise<void>((resolve) => {
+    const listener = provider.onDidChangeTreeData(() => {
+      listener.dispose();
+      resolve();
+    });
+  });
   t.mock.timers.tick(15_000);
+  await settled;
   provider.session.typesForLink(linkA);
   provider.session.typesForLink(linkB);
-  assert.ok(scans() > beforeSettle, "the settle timer invalidates both provider caches again");
-  assert.equal(count(), 3, "unchanged source bytes remain cached after the settle timer");
+  assert.equal(
+    sourceScans(),
+    beforeSettle + 1,
+    "the settle timer refreshes the shared producer once",
+  );
+  assert.equal(count(), 2, "the settle check keeps source reads in the worker");
 });
 
 test("manifest documents update in place and keep credentials out of their URI", () => {

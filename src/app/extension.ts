@@ -5,7 +5,6 @@ import {
 } from "../entities/federated-types/index.ts";
 import { readFileSync } from "node:fs";
 import * as vscode from "vscode";
-import { scanWorkspace } from "../entities/microfrontend/index.ts";
 import {
   defaultWorkspaceSettings,
   settingsSeed,
@@ -147,7 +146,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
 async function openPanel(provider: MfDashboardProvider, log: LogContext): Promise<void> {
   try {
-    await ensureWorkspaceSettings(log.operation("startup"));
+    await ensureWorkspaceSettings(provider.session, log.operation("startup"));
     const inspected = vscode.workspace.getConfiguration("mf-dashboard").inspect("apps");
     const appsDefined =
       inspected != null &&
@@ -169,23 +168,24 @@ function setStructure(structure: "flat" | "tree"): Thenable<void> {
     .update("structure", structure, vscode.ConfigurationTarget.Workspace);
 }
 
-async function ensureWorkspaceSettings(log: LogContext): Promise<void> {
+async function ensureWorkspaceSettings(
+  session: MfDashboardProvider["session"],
+  log: LogContext,
+): Promise<void> {
   const folders = vscode.workspace.workspaceFolders ?? [];
   if (folders.length === 0) return;
   const mf = vscode.workspace.getConfiguration("mf-dashboard");
-  const ignoreValue = mf.get("ignorePaths");
-  const ignorePaths = Array.isArray(ignoreValue)
-    ? ignoreValue.filter((item): item is string => typeof item === "string")
-    : [];
-  const foundNames = folders.flatMap((folder) =>
-    Object.keys(
-      scanWorkspace(folder.uri.fsPath, {
-        envMode: mf.get<string>("envMode") ?? "development",
-        ignorePaths,
-        log,
-      }),
-    ),
-  );
+  const inspectedApps = mf.inspect<Record<string, unknown>>("apps");
+  const rawApps =
+    inspectedApps?.workspaceFolderValue ??
+    inspectedApps?.workspaceValue ??
+    inspectedApps?.globalValue;
+  const apps =
+    rawApps === undefined
+      ? undefined
+      : rawApps !== null && typeof rawApps === "object" && !Array.isArray(rawApps)
+        ? rawApps
+        : {};
   const config = vscode.workspace.getConfiguration();
   const defined: string[] = [];
   for (const key of Object.keys(defaultWorkspaceSettings())) {
@@ -198,6 +198,9 @@ async function ensureWorkspaceSettings(log: LogContext): Promise<void> {
     )
       defined.push(key);
   }
+  if (defined.length === Object.keys(defaultWorkspaceSettings()).length && apps !== undefined)
+    return;
+  const foundNames = apps === undefined ? session.prepareDiscovery(log) : Object.keys(apps);
   const seed = settingsSeed(foundNames, defined);
   for (const [key, value] of Object.entries(seed)) {
     await config.update(key, value, vscode.ConfigurationTarget.Workspace);

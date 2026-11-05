@@ -22,12 +22,24 @@ test("unchanged file stamps skip byte reads, including directory mtime changes",
   const first = treeFingerprint(root);
   assert.equal(first, filesFingerprint(readTree(root)));
   const stat = fs.statSync(file);
-  fs.writeFileSync(file, "export declare const value = 2;\n");
-  fs.utimesSync(file, stat.atime, stat.mtime);
   fs.utimesSync(root, stat.atime, new Date(stat.mtimeMs + 5000));
   const read = t.mock.method(fs, "readFileSync");
   assert.equal(treeFingerprint(root), first);
   assert.equal(read.mock.callCount(), 0);
+});
+
+test("same-size edits preserving mtime invalidate through ctime or inode", (t) => {
+  const { root, file } = typesDir(t);
+  const first = treeFingerprint(root);
+  const stat = fs.statSync(file);
+  fs.writeFileSync(file, "export declare const value = 2;\n");
+  fs.utimesSync(file, stat.atime, stat.mtime);
+  const read = t.mock.method(fs, "readFileSync");
+  const second = treeFingerprint(root);
+  assert.notEqual(second, first);
+  assert.equal(read.mock.callCount(), 1);
+  assert.equal(treeFingerprint(root), second);
+  assert.equal(read.mock.callCount(), 1, "unchanged content reuses the updated cache");
 });
 
 test("size, mtime, added and removed nested files invalidate the fingerprint", (t) => {
