@@ -2,7 +2,7 @@ import { noLog, safeError, type LogContext } from "../../shared/logging.ts";
 import fs from "node:fs";
 import { parse as parseEnv } from "dotenv";
 import path from "node:path";
-import { readConfigCandidate, type LocalApp } from "./config.ts";
+import { joinManifestPath, readConfigCandidate, type LocalApp } from "./config.ts";
 import { parseProgram } from "./syntax.ts";
 export { discoverSource } from "./config.ts";
 export type { LocalApp } from "./config.ts";
@@ -135,6 +135,10 @@ function discoverDirectory(
   const apps: LocalApp[] = [];
   const bundlerOutputs: (string | null)[] = [];
   let standaloneZipName: string | undefined;
+  let standaloneRsbuildManifestFile: string | undefined;
+  let rsbuildBase: string | undefined;
+  let resolveRsbuildDevManifest: ((file: string) => string | undefined) | undefined;
+  const rsbuildApps = new Set<string>();
   let loosePort: number | null = null;
   for (const file of files) {
     log.event("trace", "discovery.candidate", { file });
@@ -152,16 +156,21 @@ function discoverDirectory(
     }
     const parsed = parseProgram(text, file, log);
     if (!parsed) continue;
-    const { app, port, outputDir, bundlerZipName } = readConfigCandidate(
-      parsed,
-      text,
-      file,
-      env,
-      dependencies,
-      log,
-    );
+    const {
+      app,
+      port,
+      outputDir,
+      bundlerZipName,
+      rsbuildBase: base,
+      resolveRsbuildDevManifest: resolveDevManifest,
+      rsbuildManifestFile,
+    } = readConfigCandidate(parsed, text, file, env, dependencies, log);
     const federationConfig = isFederationConfig(file);
     if (!federationConfig) bundlerOutputs.push(outputDir);
+    if (base !== undefined) {
+      rsbuildBase = base;
+      resolveRsbuildDevManifest = resolveDevManifest;
+    }
     if (port !== null) loosePort = port;
     if (!app) {
       log.event("trace", "discovery.skipped", {
@@ -174,9 +183,17 @@ function discoverDirectory(
     const existing = apps.find((item) => item.name === app.name);
     if (!existing) {
       apps.push(app);
-      if (federationConfig) standaloneZipName = bundlerZipName;
+      if (federationConfig) {
+        standaloneZipName = bundlerZipName;
+        standaloneRsbuildManifestFile = rsbuildManifestFile;
+      }
     } else {
       if (existing.port === null && app.port !== null) existing.port = app.port;
+      if (base !== undefined && !rsbuildApps.has(app.name)) {
+        existing.manifestPath = app.manifestPath;
+        if (app.port === null || existing.port === app.port)
+          existing.devManifestPath = app.devManifestPath;
+      }
       if (
         app.buildConfigFile &&
         existing.buildConfigFile &&
@@ -187,10 +204,24 @@ function discoverDirectory(
         existing.generatedZipPath = app.generatedZipPath;
       }
     }
+    if (base !== undefined) rsbuildApps.add(app.name);
   }
   if (apps.length === 1) {
     const [app] = apps;
     if (app.port === null) app.port = loosePort;
+    if (
+      standaloneRsbuildManifestFile !== undefined &&
+      rsbuildBase !== undefined &&
+      bundlerOutputs.length === 1 &&
+      !rsbuildApps.has(app.name)
+    ) {
+      app.manifestPath = joinManifestPath(rsbuildBase, standaloneRsbuildManifestFile);
+      if (loosePort === null || loosePort === app.port) {
+        const devManifestPath = resolveRsbuildDevManifest?.(standaloneRsbuildManifestFile);
+        if (devManifestPath && devManifestPath !== app.manifestPath)
+          app.devManifestPath = devManifestPath;
+      }
+    }
     if (
       standaloneZipName &&
       app.buildConfigFile &&

@@ -41,22 +41,23 @@ interface GeneratedDts {
   outputDir?: string;
   tsConfigPath?: string;
   compilerInstance?: string;
+  abortOnError?: boolean;
   compileInChildProcess?: boolean;
   afterGenerate?: (info: unknown) => void;
+}
+
+interface DtsOptions {
+  cwd?: string;
+  tsConfigPath?: string;
+  generateTypes?: boolean | GeneratedDts;
+  consumeTypes?: boolean | { typesFolder?: string };
 }
 
 interface MfOptions {
   name?: string;
   exposes?: Record<string, string>;
   remotes?: Record<string, string>;
-  dts?:
-    | false
-    | {
-        cwd?: string;
-        tsConfigPath?: string;
-        generateTypes?: false | GeneratedDts;
-        consumeTypes?: false | { typesFolder?: string };
-      };
+  dts?: boolean | DtsOptions;
 }
 
 interface RsbuildConfig {
@@ -80,11 +81,11 @@ interface DtsApi {
     options: MfOptions,
     context: string,
     defaults: typeof cliDefaults,
-  ) => MfOptions["dts"] | false;
+  ) => DtsOptions | false;
   normalizeGenerateTypesOptions: (input: {
     context: string;
     outputDir: string;
-    dtsOptions: MfOptions["dts"];
+    dtsOptions: DtsOptions;
     pluginOptions: MfOptions;
   }) => { remote?: CompilerRemoteOptions } | undefined;
   generateTypesAPI: (input: { dtsManagerOptions: unknown }) => Promise<void>;
@@ -117,8 +118,15 @@ interface LocalGenerationResult extends LocalGeneratedZip {
   current: boolean;
 }
 
+export type GenerationRequest = GenerationInput | LocalGenerationInput;
+
+interface GenerationResult {
+  archive: LocalGenerationResult;
+  port: number | null;
+}
+
 export type GenerationReply =
-  { result: LocalGenerationResult } | { error: string; details?: DiagnosticDetails };
+  { result: GenerationResult } | { error: string; details?: DiagnosticDetails };
 
 const oneGeneration = createSerialQueue();
 
@@ -126,81 +134,84 @@ export function generateLocalFederatedTypes(
   input: LocalGenerationInput,
   timeoutMs = REBUILD_TIMEOUT_MS,
 ): Promise<LocalGenerationResult> {
-  return oneGeneration(
-    () =>
-      new Promise((resolve, reject) => {
-        const bundled = typeof __dirname === "string";
-        const entry = bundled
-          ? path.join(__dirname, "generate-process.js")
-          : fileURLToPath(new URL("./generate-process.ts", import.meta.url));
-        // The SDK and project config use process.cwd() and process.env during generation.
-        const child = fork(entry, [], {
-          cwd: input.appDir,
-          env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
-          execArgv: bundled ? [] : undefined,
-          stdio: ["ignore", "ignore", "ignore", "ipc"],
-          detached: process.platform !== "win32",
-        });
-        let reply: GenerationReply | undefined;
-        let timedOut = false;
-        const timer = setTimeout(() => {
-          timedOut = true;
-          void stopProcessTree(child.pid).then(
-            () =>
-              reject(
-                new DiagnosticError(`Type generation timed out after ${timeoutMs} ms`, {
-                  stage: "generation",
-                  reason: "timeout",
-                  timeoutMs,
-                }),
-              ),
-            (cause: unknown) =>
-              reject(new Error("Could not stop timed-out type generator process tree", { cause })),
-          );
-        }, timeoutMs);
-        child.once("message", (message) => {
-          reply = message as GenerationReply;
-        });
-        child.once("error", (error) => {
-          clearTimeout(timer);
-          if (!timedOut) reject(error);
-        });
-        child.once("close", (code, signal) => {
-          clearTimeout(timer);
-          if (timedOut) return;
-          if (reply && "error" in reply) {
-            reject(
-              reply.details
-                ? new DiagnosticError(reply.error, reply.details)
-                : new Error(reply.error),
-            );
-          } else if (code === 0 && reply) resolve(reply.result);
-          else reject(new Error(`Type generator exited (${signal ?? code})`));
-        });
-        child.send(input, (error) => {
-          if (error && !timedOut) {
-            clearTimeout(timer);
-            child.kill();
-            reject(error);
-          }
-        });
-      }),
-  );
+  return oneGeneration(async () => (await runGenerationProcess(input, timeoutMs)).archive);
+}
+
+function runGenerationProcess(
+  input: GenerationRequest,
+  timeoutMs: number,
+): Promise<GenerationResult> {
+  return new Promise((resolve, reject) => {
+    const bundled = typeof __dirname === "string";
+    const entry = bundled
+      ? path.join(__dirname, "generate-process.js")
+      : fileURLToPath(new URL("./generate-process.ts", import.meta.url));
+    // The SDK and project config use process.cwd() and process.env during generation.
+    const child = fork(entry, [], {
+      cwd: input.appDir,
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+      execArgv: bundled ? [] : undefined,
+      stdio: ["ignore", "ignore", "ignore", "ipc"],
+      detached: process.platform !== "win32",
+    });
+    let reply: GenerationReply | undefined;
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      void stopProcessTree(child.pid).then(
+        () =>
+          reject(
+            new DiagnosticError(`Type generation timed out after ${timeoutMs} ms`, {
+              stage: "generation",
+              reason: "timeout",
+              timeoutMs,
+            }),
+          ),
+        (cause: unknown) =>
+          reject(new Error("Could not stop timed-out type generator process tree", { cause })),
+      );
+    }, timeoutMs);
+    child.once("message", (message) => {
+      reply = message as GenerationReply;
+    });
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      if (!timedOut) reject(error);
+    });
+    child.once("close", (code, signal) => {
+      clearTimeout(timer);
+      if (timedOut) return;
+      if (reply && "error" in reply) {
+        reject(
+          reply.details ? new DiagnosticError(reply.error, reply.details) : new Error(reply.error),
+        );
+      } else if (code === 0 && reply) resolve(reply.result);
+      else reject(new Error(`Type generator exited (${signal ?? code})`));
+    });
+    child.send(input, (error) => {
+      if (error && !timedOut) {
+        clearTimeout(timer);
+        child.kill();
+        reject(error);
+      }
+    });
+  });
 }
 
 export function generateFederatedTypes(
   input: GenerationInput & { port: number | null; manifestPath: string },
 ): Promise<GeneratedZip> {
   return oneGeneration(async () => {
-    const { zipPath, zipHash, name, port: configuredPort } = await generateTypesOnDisk(input);
+    const { archive, port: configuredPort } = await runGenerationProcess(input, REBUILD_TIMEOUT_MS);
+    const { zipPath, zipHash } = archive;
     const port = input.port ?? configuredPort;
     if (port == null)
       throw new Error(`generated zip is not published by a manifest. ${REBUILD_HINT}`);
     const zipUrl = await assertPublished({
       appDir: input.appDir,
-      hostName: name,
-      remoteName: name,
-      alias: name,
+      hostName: input.name,
+      remoteName: input.name,
+      alias: input.name,
       port,
       manifestPath: input.manifestPath,
       zipHash,
@@ -223,27 +234,41 @@ async function prepareGeneration(input: GenerationInput) {
       `Module Federation 2.9.1 cannot generate federated types for this config. ${REBUILD_HINT}`,
     );
   }
+  const configuredDts = typeof loaded.mf.dts === "object" ? loaded.mf.dts : undefined;
+  const configured = configuredDts?.generateTypes;
+  const overrides = typeof configured === "object" ? configured : undefined;
+  const { abortOnError, compileInChildProcess } = cliDefaults.defaultGenerateOptions;
+  const { generateTypes } = normalized;
+  // The SDK merges the outer DTS options shallowly and applies its own defaults to generateTypes.
+  const generate =
+    generateTypes === undefined ||
+    generateTypes === true ||
+    (typeof generateTypes === "object" && generateTypes !== null)
+      ? {
+          ...(typeof generateTypes === "object" ? generateTypes : undefined),
+          abortOnError: overrides?.abortOnError ?? abortOnError,
+          compileInChildProcess: overrides?.compileInChildProcess ?? compileInChildProcess,
+        }
+      : generateTypes;
   const outputDir = loaded.outputDir;
   const dtsManagerOptions = dts.normalizeGenerateTypesOptions({
     context: input.appDir,
     outputDir,
-    dtsOptions: normalized,
+    dtsOptions: { ...normalized, generateTypes: generate },
     pluginOptions: loaded.mf,
   });
   assertCanGenerate(dtsManagerOptions);
-  const generate = normalized.generateTypes;
   const zipPath = path.resolve(
     input.appDir,
     (generate && generate.outputDir) || outputDir,
     `${typesFolderOf(loaded.mf)}.zip`,
   );
   return {
-    name: input.name,
     port: loaded.port,
     zipPath,
     mfRequire,
     remote: dtsManagerOptions?.remote,
-    compilerCwd: loaded.mf.dts ? loaded.mf.dts.cwd : undefined,
+    compilerCwd: configuredDts?.cwd,
     async generate() {
       const before = zipRevision(zipPath);
       // Same API as `mf dts` in @module-federation/cli@2.9.1, including afterGenerate.
@@ -253,17 +278,15 @@ async function prepareGeneration(input: GenerationInput) {
   };
 }
 
-async function generateTypesOnDisk(input: GenerationInput) {
-  const { generate, name, port } = await prepareGeneration(input);
-  return { ...(await generate()), name, port };
-}
-
-export async function generateLocalTypesOnDisk(
-  input: LocalGenerationInput,
-): Promise<LocalGenerationResult> {
-  const { mfRequire, remote, compilerCwd, zipPath, generate } = await prepareGeneration(input);
+export async function generateTypesOnDisk(input: GenerationRequest): Promise<GenerationResult> {
+  const { mfRequire, remote, compilerCwd, zipPath, port, generate } =
+    await prepareGeneration(input);
+  if (!("workspaceFingerprint" in input)) {
+    return { archive: { ...(await generate()), inputsFingerprint: null, current: false }, port };
+  }
   const inputs = await listCompilerInputs(mfRequire, remote, input.appDir, compilerCwd);
-  return rebuildLocalArchive(input, zipPath, inputs, generate);
+  const archive = await rebuildLocalArchive(input, zipPath, inputs, generate);
+  return { archive, port };
 }
 
 export async function rebuildLocalArchive(
@@ -419,9 +442,7 @@ function loadDts(appDir: string) {
 }
 
 function typesFolderOf(mf: MfOptions): string {
-  const dts = mf.dts;
-  if (!dts) return "@mf-types";
-  const generate = dts.generateTypes;
+  const generate = typeof mf.dts === "object" ? mf.dts?.generateTypes : undefined;
   if (
     generate &&
     typeof generate === "object" &&

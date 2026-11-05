@@ -116,7 +116,7 @@ Example app entry:
 }
 ```
 
-`path` is relative to the workspace folder; paths outside it are ignored. Multi-root entries can specify `workspaceFolder` by name. `manifestPath` defaults to `/mf-manifest.json`. An app's `scripts.start` overrides the global setting; discovery sets `dev` for new entries.
+`path` is relative to the workspace folder. Discovery accepts paths inside that folder. Multi-root entries can specify `workspaceFolder` by name. Set `manifestPath` to override the route detected from the build config. If an older release filled in `manifestPath` automatically, remove the field to use the detected route. An app's `scripts.start` overrides the global setting. Discovery sets `dev` for new entries.
 
 With `packageManager: auto`, Start reads the root `packageManager` field, then checks `pnpm-lock.yaml`, `yarn.lock`, `bun.lock` / `bun.lockb`, and `package-lock.json`, falling back to npm. The command is `<manager> run <script>`; a missing script or invalid script key starts no process.
 

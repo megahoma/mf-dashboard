@@ -109,7 +109,7 @@ function byName(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 import type { LocalApp } from "../../entities/microfrontend/index.ts";
-import { localManifestUrl, parseHttpUrl } from "../../shared/urls.ts";
+import { isLoopbackAtPort, localManifestUrl, parseHttpUrl } from "../../shared/urls.ts";
 
 interface WorkspaceTypesNode {
   app: LocalApp;
@@ -118,23 +118,18 @@ interface WorkspaceTypesNode {
   dependencies: string[];
 }
 
-const loopbackHosts = new Set(["localhost", "127.0.0.1", "[::1]"]);
-
 function isProducer(app: LocalApp): boolean {
   return app.generateTypes && app.hasExposes !== false;
 }
 
 function localProducer(url: URL | null, app: LocalApp | undefined): string | undefined {
-  if (!url || !app || !isProducer(app) || app.port == null || !loopbackHosts.has(url.hostname))
+  if (!url || !app || !isProducer(app) || app.port == null || !isLoopbackAtPort(url, app.port))
     return undefined;
-  const manifest = parseHttpUrl(localManifestUrl(app.port, app.manifestPath));
-  const port = url.port || (url.protocol === "https:" ? "443" : "80");
-  if (
-    port === String(app.port) &&
-    url.pathname === manifest?.pathname &&
-    url.search === manifest.search
-  )
-    return app.name;
+  for (const route of [app.manifestPath, app.devManifestPath]) {
+    if (route === undefined) continue;
+    const manifest = parseHttpUrl(localManifestUrl(app.port, route));
+    if (url.pathname === manifest?.pathname && url.search === manifest.search) return app.name;
+  }
 }
 
 export function workspaceTypesPlan(apps: readonly LocalApp[]) {

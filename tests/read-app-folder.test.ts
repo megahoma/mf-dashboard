@@ -100,7 +100,14 @@ test("the imported federation helper recorded as configFile participates in the 
 });
 
 test("manifest overrides are applied independently of the cached parse", (t) => {
-  const { roots, settings, cache } = fixture(t);
+  const { roots, settings, cache, app } = fixture(t);
+  fs.writeFileSync(
+    path.join(app, "rsbuild.config.ts"),
+    `export default {
+      dev: { assetPrefix: "/fixture-assets/" },
+      plugins: [pluginModuleFederation({ name: "widget", manifest: true })]
+    };`,
+  );
   const load = (manifestPath?: string) =>
     loadKnownApps(
       roots,
@@ -111,7 +118,9 @@ test("manifest overrides are applied independently of the cached parse", (t) => 
     )[0];
   assert.equal(load("/first.json")?.manifestPath, "/first.json");
   assert.equal(load("/second.json")?.manifestPath, "/second.json");
+  assert.equal(load("/mf-manifest.json")?.devManifestPath, undefined);
   assert.equal(load()?.manifestPath, "/mf-manifest.json");
+  assert.equal(load()?.devManifestPath, "/fixture-assets/mf-manifest.json");
 });
 
 test("changing or removing an intermediate re-export invalidates the parsed config", (t) => {
