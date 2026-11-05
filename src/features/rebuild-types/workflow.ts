@@ -1,16 +1,15 @@
 import { noLog, safeError, type LogContext } from "../../shared/logging.ts";
 import type { LocalApp, ProbeBook } from "../../entities/microfrontend/index.ts";
 import { sourceIdentity, type ConfirmationStore } from "../../entities/federated-types/index.ts";
-import { fillTemplate, runShell } from "../../shared/shell.ts";
+import { runShell } from "../../shared/shell.ts";
 import { localManifestUrl } from "../../shared/urls.ts";
 import { resolveManifestPath, type ScriptSettings } from "../init-settings/index.ts";
 import { installRemoteTypes } from "../refetch-types/remote.ts";
+import { runRebuildCommand } from "./command.ts";
 import { collectProducerEvidence, dependencyEvidence } from "./evidence.ts";
-import { generateFederatedTypes } from "./generate.ts";
+import { generateFederatedTypes } from "./generate.mts";
 import { rebuildPlan } from "./plan.ts";
 import { hashManifestZip } from "./zip-url.ts";
-
-const REBUILD_TIMEOUT_MS = 5 * 60_000;
 
 export interface RebuildContext {
   log?: LogContext;
@@ -18,7 +17,7 @@ export interface RebuildContext {
   book: ProbeBook;
   confirmations: ConfirmationStore;
   published: Map<string, string>;
-  settings: ScriptSettings & { rebuildCommand: string };
+  settings: ScriptSettings & { rebuildCommand: string; envMode: string };
   refetchCommand(): string;
   persist(): void | PromiseLike<void>;
   rebuilt(name: string): void;
@@ -83,15 +82,17 @@ export async function rebuildTypes(
           undefined,
           log,
         );
+        const url = remote.url ?? manifestUrl;
         confirmations.saveInstall(
           {
             consumer: app.name,
             alias: remote.alias,
             remoteName: remote.name,
-            url: remote.url ?? manifestUrl,
+            url,
           },
           installed.filesFingerprint,
           installed.zipHash,
+          manifestUrl === url,
         );
       }
       await persist();
@@ -99,34 +100,7 @@ export async function rebuildTypes(
     const manifestPath = resolveManifestPath(context.settings, app.name);
     let zipHash: string;
     if (context.settings.rebuildCommand.trim() !== "") {
-      const started = Date.now();
-      log.event("debug", "shell.started", { app: app.name, kind: "rebuild" });
-      const code = await operations.runShell(
-        fillTemplate(context.settings.rebuildCommand, {
-          folder: app.folder,
-          name: app.name,
-          port: app.port == null ? "" : String(app.port),
-          tsconfig: app.tsconfig ?? "",
-        }),
-        app.folder,
-        REBUILD_TIMEOUT_MS,
-      );
-      log.event("debug", "shell.completed", {
-        app: app.name,
-        kind: "rebuild",
-        code,
-        durationMs: Date.now() - started,
-      });
-      if (code !== 0) {
-        log.event("error", "shell.failed", {
-          app: app.name,
-          kind: "rebuild",
-          reason: "shell-exit",
-          exitCode: code,
-          durationMs: Date.now() - started,
-        });
-        throw new Error(`rebuild command exited ${code}`);
-      }
+      await runRebuildCommand(app, context.settings.rebuildCommand, log, operations.runShell);
       if (app.port == null) throw new Error("generated zip is not published by a manifest");
       zipHash = (
         await operations.hashManifestZip({
@@ -141,7 +115,9 @@ export async function rebuildTypes(
       zipHash = (
         await operations.generateFederatedTypes({
           appDir: app.folder,
-          configFile: app.configFile,
+          name: app.name,
+          configFile: app.buildConfigFile ?? app.configFile,
+          envMode: context.settings.envMode,
           port: app.port,
           manifestPath,
         })

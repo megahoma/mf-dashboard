@@ -95,18 +95,20 @@ function resolveSpecifier(
   if (!spec.startsWith(".")) return null;
   const base = path.resolve(path.dirname(fromFile), spec);
   const ext = path.extname(spec);
-  const candidates = !ext
-    ? [
-        ...SOURCE_EXTS.map((suffix) => base + suffix),
-        ...SOURCE_EXTS.map((suffix) => path.join(base, `index${suffix}`)),
-      ]
-    : /\.[cm]?jsx?$/.test(ext)
+  const candidates =
+    !ext || ext === ".config"
       ? [
-          base.replace(/\.[cm]?jsx?$/, ext === ".cjs" ? ".cts" : ext === ".mjs" ? ".mts" : ".ts"),
-          ...(ext === ".js" || ext === ".jsx" ? [base.replace(/\.jsx?$/, ".tsx")] : []),
-          base,
+          ...(ext ? [base] : []),
+          ...SOURCE_EXTS.map((suffix) => base + suffix),
+          ...SOURCE_EXTS.map((suffix) => path.join(base, `index${suffix}`)),
         ]
-      : [base];
+      : /\.[cm]?jsx?$/.test(ext)
+        ? [
+            base.replace(/\.[cm]?jsx?$/, ext === ".cjs" ? ".cts" : ext === ".mjs" ? ".mts" : ".ts"),
+            ...(ext === ".js" || ext === ".jsx" ? [base.replace(/\.jsx?$/, ".tsx")] : []),
+            base,
+          ]
+        : [base];
   const root = fs.realpathSync(packageRoot(fromFile, dependencies));
   for (const candidate of candidates) {
     dependencies?.add(candidate); // Missing higher-priority files affect resolution too.

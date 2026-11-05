@@ -85,8 +85,17 @@ test("external watch installs are verified, cached and rechecked when files or a
   fs.writeFileSync(f.file, "export type Swatch = 'violet';");
   assert.equal(await verify(), true);
   assert.equal(f.confirmations.install(f.link)?.filesFingerprint, f.fingerprint());
+  assert.equal(f.confirmations.install(f.link)?.fromManifest, true);
   await verify();
   assert.equal(comparisons, 2, "a confirmed install does not download again");
+  f.confirmations.saveInstall(f.link, f.fingerprint(), "release-one");
+  assert.equal(
+    await verify(),
+    true,
+    "a matching probe upgrades a confirmation from an older install",
+  );
+  assert.equal(f.confirmations.install(f.link)?.fromManifest, true);
+  assert.equal(comparisons, 2, "upgrading a matching confirmation does not download again");
   f.publish("release-two");
   matches = false;
   assert.equal(await verify(), false);

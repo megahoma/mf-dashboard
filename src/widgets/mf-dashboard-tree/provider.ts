@@ -11,6 +11,7 @@ import type { DashboardTerms } from "../../shared/config/index.ts";
 import { icons } from "../../shared/config/index.ts";
 import { createSerialQueue } from "../../shared/queue.ts";
 import { installRemoteTypes } from "../../features/refetch-types/remote.ts";
+import { rebuildAllTypes, type RebuildAllReport } from "../../features/rebuild-types/all.ts";
 import { rebuildTypes } from "../../features/rebuild-types/workflow.ts";
 import { verifyTypeInstalls, type InstallCheck } from "../../features/observe-types/verify.ts";
 import {
@@ -535,7 +536,7 @@ export class MfDashboardProvider
         undefined,
         log,
       );
-      this.confirmations.saveInstall(link, installed.filesFingerprint, installed.zipHash);
+      this.confirmations.saveInstall(link, installed.filesFingerprint, installed.zipHash, true);
       await this.persistConfirmations();
       this.clearTypeCache();
       log.event("info", "types.fetch.completed", {
@@ -667,6 +668,84 @@ export class MfDashboardProvider
     return this.run(() => this.rebuildNow(node));
   }
 
+  rebuildAll(
+    progress: (name: string, index: number, total: number) => void,
+  ): Promise<RebuildAllReport> {
+    return this.run(async () => {
+      const settings = readWorkspaceSettings();
+      const log = this.log.operation("rebuild-all");
+      const roots = workspaceRoots();
+      const apps: LocalApp[] = [];
+      const skipped: RebuildAllReport["skipped"] = [];
+      const zipPaths = new Map<string, string>();
+      for (const [name, setting] of Object.entries(settings.apps ?? {})) {
+        try {
+          const [app] = loadKnownApps(
+            roots,
+            { [name]: setting },
+            settings.envMode,
+            settings.ignorePaths,
+            undefined,
+            log,
+          );
+          if (!app) {
+            skipped.push({ app: name, reason: "Could not read the microfrontend config" });
+            continue;
+          }
+          apps.push(app);
+          if (typeof setting.typesZipPath === "string")
+            zipPaths.set(app.name, setting.typesZipPath);
+        } catch (error) {
+          skipped.push({ app: name, reason: errorText(error) });
+          log.event("warn", "types.rebuild.all.config-failed", { app: name, ...safeError(error) });
+        }
+      }
+      log.event("info", "types.rebuild.all.started", { apps: apps.length });
+      const report = await rebuildAllTypes({
+        apps,
+        confirmations: this.confirmations,
+        envMode: settings.envMode,
+        rebuildCommand: settings.rebuildCommand,
+        refetchCommand: settings.refetchCommand,
+        zipPathOverride: (app) => zipPaths.get(app.name),
+        persist: this.persistConfirmations,
+        progress,
+        log,
+      });
+      report.skipped.push(...skipped);
+      const changedProducers = new Set([...report.rebuilt, ...report.failed.map(({ app }) => app)]);
+      for (const name of changedProducers) this.publishedZipHashes.delete(name);
+      if (changedProducers.size || report.installed.length) {
+        const links = linksOf(this.session.loaded);
+        const changedInstalls = new Set(
+          report.installed.map(({ consumer, alias }) => `${consumer}\0${alias}`),
+        );
+        for (const link of links)
+          if (
+            changedProducers.has(link.remoteName) ||
+            changedInstalls.has(`${link.consumer}\0${link.alias}`)
+          )
+            this.typeCache.delete(linkProbeId(link));
+        this.clearTypeCache();
+        const evidence = await this.prepareEvidence(this.session.loaded, links, this.session.book);
+        for (const [name, value] of evidence.producers) this.producerCache.set(name, value);
+        for (const [destination, value] of evidence.installed)
+          this.installedCache.set(destination, value);
+        for (const [name, value] of evidence.errors) this.sourceErrors.set(name, value);
+        for (const name of report.rebuilt) this.session.rebuildErrors.delete(name);
+        this.notify();
+      }
+      log.event("info", "types.rebuild.all.completed", {
+        rebuilt: report.rebuilt.length,
+        installed: report.installed.length,
+        current: report.current.length,
+        skipped: report.skipped.length,
+        failed: report.failed.length,
+      });
+      return report;
+    });
+  }
+
   private async rebuildNow(node?: DashboardNode): Promise<void> {
     if (!node) return;
     const rootName = node.name;
@@ -685,6 +764,7 @@ export class MfDashboardProvider
           "mf-dashboard.scripts.start": settings.startScript,
           "mf-dashboard.apps": settings.apps,
           rebuildCommand: settings.rebuildCommand,
+          envMode: settings.envMode,
         },
         refetchCommand: () => readWorkspaceSettings().refetchCommand,
         persist: this.persistConfirmations,

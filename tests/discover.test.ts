@@ -115,7 +115,7 @@ test("discovery preserves comments, regex, types, env templates and missing valu
   ]);
 });
 
-test("discovery follows local reexports without executing configs and combines a separate server", () => {
+test("discovery follows local reexports and combines a separate bundler config without executing it", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-import-scan-"));
   try {
     fs.writeFileSync(path.join(root, "package.json"), "{}");
@@ -137,13 +137,22 @@ test("discovery follows local reexports without executing configs and combines a
     );
     fs.writeFileSync(
       path.join(root, "rsbuild.config.ts"),
-      "export default { server: { port: 4100 } };",
+      'export default { server: { port: 4100 }, output: { distPath: { root: "build/custom" } } };',
     );
     const found = scanWorkspace(root);
     assert.equal(found.shell?.name, "shell");
     assert.equal(found.shell?.port, 4100);
     assert.equal(found.shell?.configFile, path.join(root, "options.ts"));
     assert.equal(found.shell?.generateTypes, true);
+    assert.equal(found.shell?.generatedZipPath, path.join(root, "build/custom/@mf-types.zip"));
+    fs.writeFileSync(
+      path.join(root, "options.ts"),
+      'export function federation() { return { name: "shell", dts: { generateTypes: { outputDir: "custom-types", typesFolder: "shell-types" } } }; }',
+    );
+    assert.equal(
+      scanWorkspace(root).shell?.generatedZipPath,
+      path.join(root, "custom-types/shell-types.zip"),
+    );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

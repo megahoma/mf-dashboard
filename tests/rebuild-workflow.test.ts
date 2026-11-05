@@ -74,7 +74,7 @@ test("rebuild installs dependencies before generation and saves the newly built 
     book,
     confirmations,
     published: new Map(),
-    settings: { "mf-dashboard.scripts.start": "dev", rebuildCommand: "" },
+    settings: { "mf-dashboard.scripts.start": "dev", rebuildCommand: "", envMode: "development" },
     refetchCommand: () => "",
     persist: () => {
       events.push("persist");
@@ -92,6 +92,8 @@ test("rebuild installs dependencies before generation and saves the newly built 
     },
     async generateFederatedTypes(input) {
       const name = path.basename(input.appDir);
+      assert.equal(input.name, name);
+      assert.equal(input.envMode, "development");
       events.push(`generate:${name}`);
       return { zipPath: "unused", zipUrl: "unused", zipHash: `new-${name}` };
     },
@@ -116,10 +118,14 @@ test("rebuild installs dependencies before generation and saves the newly built 
   assert.deepEqual(confirmations.generation("parent")?.builtDependencyHashes, {
     child: "new-child",
   });
-  assert.equal(
-    confirmations.install({ consumer: "parent", alias: "child", remoteName: "child" })?.url,
-    parent.remotes[0].url,
-  );
+  const installed = confirmations.install({
+    consumer: "parent",
+    alias: "child",
+    remoteName: "child",
+  });
+  assert.ok(installed);
+  assert.equal(installed.url, parent.remotes[0].url);
+  assert.equal(installed.fromManifest, false);
 
   // The probe still has the old hash, but Last-Modified lets the child skip the next rebuild.
   const childProbe = book.apps.get(appProbeId("child"));
@@ -206,6 +212,7 @@ test("custom rebuild checks the published archive and never confirms a failed co
       "mf-dashboard.scripts.start": "dev",
       "mf-dashboard.apps": { app: { manifestPath: "custom.json" } },
       rebuildCommand: "build {name}",
+      envMode: "development",
     },
     refetchCommand: () => "",
     persist() {},
@@ -353,7 +360,11 @@ test("a dependency without a URL or producer port fails before installation or g
             book: createProbeBook(),
             confirmations,
             published: new Map(),
-            settings: { "mf-dashboard.scripts.start": "dev", rebuildCommand: "" },
+            settings: {
+              "mf-dashboard.scripts.start": "dev",
+              rebuildCommand: "",
+              envMode: "development",
+            },
             refetchCommand: unexpected,
             persist: unexpected,
             rebuilt: unexpected,

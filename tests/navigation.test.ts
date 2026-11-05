@@ -23,7 +23,7 @@ registerHooks({
 const { ManifestDocuments } = await import("../src/features/open-manifest/documents.ts");
 const { MfDashboardProvider } = await import("../src/widgets/mf-dashboard-tree/provider.ts");
 
-test("refresh recognizes external watch output and keeps offline type changes visible", async (t) => {
+test("refresh and Fetch confirm published types and keep offline type changes visible", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-watch-refresh-"));
   const consumer = path.join(root, "workshop");
   const producer = path.join(root, "palette");
@@ -89,31 +89,31 @@ test("refresh recognizes external watch output and keeps offline type changes vi
     });
   });
   const store = createConfirmationStore();
-  let persisted = 0;
+  const link = { consumer: "workshop", alias: "paint", remoteName: "palette" };
+  const persisted: (boolean | undefined)[] = [];
   const provider = new MfDashboardProvider(
     () => terms,
     store,
     () => {
-      persisted++;
+      persisted.push(store.install(link)?.fromManifest);
     },
   );
   t.after(() => provider.dispose());
   await provider.refresh();
   const row = () => provider.getChildren().find((node) => node.name === "workshop")!.children[0];
-  const link = { consumer: "workshop", alias: "paint", remoteName: "palette" };
   const initial = store.install(link);
   assert.ok(initial);
   assert.equal(
     provider.session.typesForLink({ ...link, url: "http://localhost:4401/mf-manifest.json" }),
     "ok",
   );
-  assert.equal(persisted, 1);
+  assert.equal(persisted.length, 1);
   await provider.refresh();
   assert.equal(downloads, 3, "one initial probe, one comparison, then only the next probe");
   text = "export type Pigment = 'violet';";
   fs.writeFileSync(path.join(destination, "index.d.ts"), text);
   await provider.refresh();
-  assert.equal(persisted, 2);
+  assert.equal(persisted.length, 2);
   assert.notEqual(store.install(link)?.zipHash, initial.zipHash);
   assert.equal(row().kind, "listen");
   online = false;
@@ -124,7 +124,17 @@ test("refresh recognizes external watch output and keeps offline type changes vi
   await provider.refresh();
   assert.equal(row().kind, "silent");
   assert.ok(row().description.includes(`@mf-types: ${terms.typesChanged}`));
-  assert.equal(persisted, 2);
+  assert.equal(persisted.length, 2);
+
+  online = true;
+  await provider.refresh("timer");
+  const linkId = row().linkId;
+  assert.ok(linkId);
+  assert.equal(provider.refetch(linkId), true);
+  const beforeFetch = persisted.length;
+  await provider.finishRefetch(linkId).finally(() => provider.releaseRefetch(linkId));
+  assert.equal(fs.readFileSync(path.join(destination, "index.d.ts"), "utf8"), text);
+  assert.equal(persisted[beforeFetch], true, "Fetch saves the proof before refreshing the tree");
 });
 
 test("stat failures in installed types do not prevent rendering the dashboard", (t) => {

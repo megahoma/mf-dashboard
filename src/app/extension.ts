@@ -10,6 +10,7 @@ import {
   settingsSeed,
   startupLoad,
 } from "../features/init-settings/index.ts";
+import type { RebuildAllReport } from "../features/rebuild-types/all.ts";
 import { selectTerms, type DashboardTerms } from "../shared/config/index.ts";
 import {
   DashboardDetails,
@@ -65,6 +66,7 @@ export function activate(context: vscode.ExtensionContext): void {
   );
   const tree = vscode.window.createTreeView("mf-dashboard", { treeDataProvider: provider });
   const details = new DashboardDetails(tree, provider);
+  let updatingTypes = false;
   context.subscriptions.push(
     provider,
     tree,
@@ -127,6 +129,32 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("mf-dashboard.rebuildTypes", (node?: DashboardNode) =>
       provider.rebuild(node),
     ),
+    vscode.commands.registerCommand("mf-dashboard.rebuildAllTypes", async () => {
+      if (updatingTypes || !vscode.workspace.isTrusted) return;
+      updatingTypes = true;
+      try {
+        const report = await vscode.window.withProgress(
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: vscode.l10n.t("Updating @mf-types"),
+          },
+          (progress) =>
+            provider.rebuildAll((name, index, total) => {
+              progress.report({ message: vscode.l10n.t("{0} ({1}/{2})", name, index + 1, total) });
+            }),
+        );
+        void showRebuildReport(report).catch((error: unknown) => {
+          log.event("error", "types.rebuild.all.report-failed", safeError(error));
+        });
+      } catch (error) {
+        log.event("error", "types.rebuild.all.command-failed", safeError(error));
+        void vscode.window.showErrorMessage(
+          vscode.l10n.t("Could not update @mf-types: {0}", String(error)),
+        );
+      } finally {
+        updatingTypes = false;
+      }
+    }),
     vscode.commands.registerCommand("mf-dashboard.refetchTypes", (node?: DashboardNode) => {
       if (!node?.linkId) return false;
       if (!provider.refetch(node.linkId)) return false;
@@ -150,6 +178,42 @@ export function activate(context: vscode.ExtensionContext): void {
     log.event("error", "startup.failed", safeError(error));
     void vscode.window.showErrorMessage(`MF dashboard: ${String(error)}`);
   });
+}
+
+async function showRebuildReport(report: RebuildAllReport): Promise<void> {
+  const { rebuilt, installed, current, skipped, failed } = report;
+  if (!(rebuilt.length || installed.length || current.length || skipped.length || failed.length)) {
+    await vscode.window.showInformationMessage(vscode.l10n.t("No federated types to update."));
+    return;
+  }
+  const summary = vscode.l10n.t(
+    "@mf-types: {0} rebuilt, {1} installed, {2} current, {3} skipped, {4} failed.",
+    rebuilt.length,
+    installed.length,
+    current.length,
+    skipped.length,
+    failed.length,
+  );
+  const show = vscode.l10n.t("Show Report");
+  const choice =
+    skipped.length || failed.length
+      ? await vscode.window.showWarningMessage(summary, show)
+      : await vscode.window.showInformationMessage(summary, show);
+  if (choice !== show) return;
+  const document = await vscode.workspace.openTextDocument({
+    language: "plaintext",
+    content: [
+      summary,
+      ...rebuilt.map((name) => vscode.l10n.t("Rebuilt: {0}", name)),
+      ...installed.map(({ consumer, alias }) =>
+        vscode.l10n.t("Installed: {0} → {1}", consumer, alias),
+      ),
+      ...current.map((name) => vscode.l10n.t("Current: {0}", name)),
+      ...skipped.map(({ app, reason }) => vscode.l10n.t("Skipped {0}: {1}", app, reason)),
+      ...failed.map(({ app, reason }) => vscode.l10n.t("Failed {0}: {1}", app, reason)),
+    ].join("\n"),
+  });
+  await vscode.window.showTextDocument(document, { preview: true });
 }
 
 async function openPanel(provider: MfDashboardProvider, log: LogContext): Promise<void> {
