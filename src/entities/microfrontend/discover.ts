@@ -135,9 +135,9 @@ function discoverDirectory(
   const apps: LocalApp[] = [];
   const bundlerOutputs: (string | null)[] = [];
   let standaloneZipName: string | undefined;
-  let standaloneManifestFileName: string | undefined;
+  let standaloneRsbuildManifestFile: string | undefined;
   let rsbuildBase: string | undefined;
-  let resolveRsbuildDevManifest: ((fileName: string) => string | undefined) | undefined;
+  let resolveRsbuildDevManifest: ((file: string) => string | undefined) | undefined;
   const rsbuildApps = new Set<string>();
   let loosePort: number | null = null;
   for (const file of files) {
@@ -163,7 +163,7 @@ function discoverDirectory(
       bundlerZipName,
       rsbuildBase: base,
       resolveRsbuildDevManifest: resolveDevManifest,
-      manifestFileName,
+      rsbuildManifestFile,
     } = readConfigCandidate(parsed, text, file, env, dependencies, log);
     const federationConfig = isFederationConfig(file);
     if (!federationConfig) bundlerOutputs.push(outputDir);
@@ -185,7 +185,7 @@ function discoverDirectory(
       apps.push(app);
       if (federationConfig) {
         standaloneZipName = bundlerZipName;
-        standaloneManifestFileName = manifestFileName;
+        standaloneRsbuildManifestFile = rsbuildManifestFile;
       }
     } else {
       if (existing.port === null && app.port !== null) existing.port = app.port;
@@ -210,14 +210,14 @@ function discoverDirectory(
     const [app] = apps;
     if (app.port === null) app.port = loosePort;
     if (
-      standaloneManifestFileName !== undefined &&
+      standaloneRsbuildManifestFile !== undefined &&
       rsbuildBase !== undefined &&
       bundlerOutputs.length === 1 &&
       !rsbuildApps.has(app.name)
     ) {
-      app.manifestPath = joinManifestPath(rsbuildBase, standaloneManifestFileName);
+      app.manifestPath = joinManifestPath(rsbuildBase, standaloneRsbuildManifestFile);
       if (loosePort === null || loosePort === app.port) {
-        const devManifestPath = resolveRsbuildDevManifest?.(standaloneManifestFileName);
+        const devManifestPath = resolveRsbuildDevManifest?.(standaloneRsbuildManifestFile);
         if (devManifestPath && devManifestPath !== app.manifestPath)
           app.devManifestPath = devManifestPath;
       }

@@ -223,7 +223,8 @@ test("bulk rebuild installs types from a local ZIP through the Rsbuild dev asset
       server: { port: ${seed.port}, base: "/fixture-app/" },
       dev: { assetPrefix: process.env.FIXTURE_DEV_ASSETS },
       output: { assetPrefix: "/published-fixture/" },
-      plugins: [pluginModuleFederation({ name: "${seed.name}", manifest: true,
+      plugins: [pluginModuleFederation({ name: "${seed.name}",
+        manifest: { filePath: "metadata", fileName: "entry" },
         exposes: { "./index": "./index.ts" }, dts: { generateTypes: true, consumeTypes: false }
       })]
     };
@@ -239,12 +240,15 @@ test("bulk rebuild installs types from a local ZIP through the Rsbuild dev asset
     "development",
   );
   assert.ok(producer);
-  assert.equal(producer.manifestPath, "/fixture-app/mf-manifest.json");
+  assert.equal(producer.manifestPath, "/fixture-app/metadata/entry.json");
 
   const consumer = f.app("fixture-asset-client", 53952, {
     consumeTypes: true,
     remotes: [
-      { ...remote(seed), url: `http://localhost:${seed.port}/fixture-app/assets/mf-manifest.json` },
+      {
+        ...remote(seed),
+        url: `http://localhost:${seed.port}/fixture-app/assets/metadata/entry.json`,
+      },
     ],
   });
   const declaration = 'export declare const source: "offline";';

@@ -96,19 +96,22 @@ class StaticConfig {
   // A snapshot belongs to one helper invocation and one source position.
   private readonly objectSnapshots = new WeakMap<Map<Binding, Value>, Map<t.Node, ObjectValue>>();
   private configResult: { value: Value } | undefined;
+  private readUnresolvedEnv = false;
+  private readonly missingEnv: typeof UNKNOWN | undefined;
   readonly parsed: Program;
   readonly env: Record<string, string>;
   readonly log: LogContext;
   constructor(
-    parsed: Program,
+    imports: ConfigImports,
     env: Record<string, string>,
-    dependencies?: Set<string>,
-    log: LogContext = noLog,
+    log: LogContext,
+    missingEnv?: typeof UNKNOWN,
   ) {
-    this.parsed = parsed;
+    this.parsed = imports.entry;
     this.env = env;
     this.log = log;
-    this.imports = new ConfigImports(parsed, dependencies, log);
+    this.imports = imports;
+    this.missingEnv = missingEnv;
   }
   private unknown(p: AstPath, reason = "unsupported-expression"): typeof UNKNOWN {
     this.log.event("trace", "config.helper.unresolved", {
@@ -460,8 +463,12 @@ class StaticConfig {
       if (
         (owner.matchesPattern("process.env") && !p.scope.getBinding("process")) ||
         owner.matchesPattern("import.meta.env")
-      )
-        return Object.hasOwn(this.env, String(key)) ? this.env[String(key)] : undefined;
+      ) {
+        const name = String(key);
+        if (Object.hasOwn(this.env, name)) return this.env[name];
+        this.readUnresolvedEnv = true;
+        return this.missingEnv;
+      }
       if (owner.isIdentifier()) {
         const binding = owner.scope.getBinding(owner.node.name);
         if (binding?.path.isImportNamespaceSpecifier()) {
@@ -653,6 +660,12 @@ class StaticConfig {
     this.configResult = { value: result };
     return result;
   }
+  configForDevRoutes(): Value {
+    const config = this.config();
+    if (!this.readUnresolvedEnv) return config;
+    // Rsbuild or the shell may supply variables absent from discovery's env files.
+    return new StaticConfig(this.imports, this.env, noLog, UNKNOWN).config();
+  }
   options(): ObjectValue | null {
     const config = this.config(); // Only values retained in the exported config participate.
     if (object(config) && this.plugins.has(config)) return config;
@@ -702,8 +715,8 @@ interface ConfigCandidate {
   outputDir: string | null;
   bundlerZipName?: string;
   rsbuildBase?: string;
-  resolveRsbuildDevManifest?: (fileName: string) => string | undefined;
-  manifestFileName?: string;
+  resolveRsbuildDevManifest?: (file: string) => string | undefined;
+  rsbuildManifestFile?: string;
 }
 
 export function readConfigCandidate(
@@ -714,7 +727,7 @@ export function readConfigCandidate(
   dependencies?: Set<string>,
   log: LogContext = noLog,
 ): ConfigCandidate {
-  const evaluator = new StaticConfig(parsed, env, dependencies, log);
+  const evaluator = new StaticConfig(new ConfigImports(parsed, dependencies, log), env, log);
   const options = evaluator.options();
   const config = evaluator.config();
   const server = object(config) && object(config.server) ? config.server : null;
@@ -725,7 +738,12 @@ export function readConfigCandidate(
     ? serverBase
     : undefined;
   const resolveRsbuildDevManifest =
-    rsbuildBase === undefined ? undefined : rsbuildDevManifestResolver(config, server, port);
+    rsbuildBase !== undefined &&
+    object(config) &&
+    object(config.dev) &&
+    typeof config.dev.assetPrefix === "string"
+      ? rsbuildDevManifestResolver(evaluator.configForDevRoutes(), port)
+      : undefined;
   const outputDir = buildOutputDir(config);
   const name = options && string(options.name);
   if (!options || !name)
@@ -743,11 +761,18 @@ export function readConfigCandidate(
   const exposes = options.exposes;
   const manifest = object(options.manifest) ? options.manifest : null;
   const fileName = string(manifest?.fileName) ?? "mf-manifest.json";
+  const rsbuildManifestFile = path.posix.join(
+    string(manifest?.filePath) ?? "",
+    fileName.endsWith(".json") ? fileName : `${fileName}.json`,
+  );
   const assetPrefix = source.includes("import.meta.env.ASSET_PREFIX")
     ? env.ASSET_PREFIX?.trim()
     : undefined;
-  const manifestPath = joinManifestPath(rsbuildBase ?? (assetPrefix || serverBase), fileName);
-  const devManifestPath = resolveRsbuildDevManifest?.(fileName);
+  const manifestPath =
+    rsbuildBase === undefined
+      ? joinManifestPath(assetPrefix || serverBase, fileName)
+      : joinManifestPath(rsbuildBase, rsbuildManifestFile);
+  const devManifestPath = resolveRsbuildDevManifest?.(rsbuildManifestFile);
   const app: LocalApp = {
     name,
     folder: path.dirname(filePath),
@@ -783,22 +808,23 @@ export function readConfigCandidate(
     outputDir,
     rsbuildBase,
     resolveRsbuildDevManifest,
-    manifestFileName: fileName,
+    rsbuildManifestFile,
     bundlerZipName: generateTypes && dtsOutput === undefined && zipName ? zipName : undefined,
   };
 }
 
-export function joinManifestPath(prefix: string, fileName: string): string {
-  return `/${prefix}/${fileName}`.replace(/\/{2,}/g, "/");
+export function joinManifestPath(prefix: string, file: string): string {
+  return `/${prefix}/${file}`.replace(/\/{2,}/g, "/");
 }
 
 function rsbuildDevManifestResolver(
   config: Value,
-  server: ObjectValue | null,
   port: number | null,
 ): ConfigCandidate["resolveRsbuildDevManifest"] {
-  if (!object(config) || !object(config.dev) || (config.server !== undefined && !server))
-    return undefined;
+  if (!object(config) || !object(config.dev)) return undefined;
+  const server = config.server;
+  if (server !== undefined && !object(server)) return undefined;
+  if (server?.port !== undefined && portValue(server.port) === null) return undefined;
   const serverBase = server?.base;
   if (serverBase !== undefined && typeof serverBase !== "string") return undefined;
   const configured = string(config.dev.assetPrefix)?.trim();
@@ -817,8 +843,8 @@ function rsbuildDevManifestResolver(
   if (!rootRelative && (port === null || !isLoopbackAtPort(url, port))) return undefined;
 
   const base = serverBase?.endsWith("/") ? serverBase : `${serverBase ?? ""}/`;
-  return (fileName) => {
-    const route = joinManifestPath(url.pathname, fileName);
+  return (file) => {
+    const route = joinManifestPath(url.pathname, file);
     const pathname = parseHttpUrl(origin + route)?.pathname;
     if (pathname?.startsWith(base) && !mayProxyManifest(server?.proxy, pathname)) return route;
   };
