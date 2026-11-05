@@ -129,7 +129,7 @@ test("a package and a launch compile the extension before the host starts", () =
   );
 });
 
-test("start, rebuild, and refetch are inline on silent, stale, and unfetched", () => {
+test("Start stays inline while Rebuild and Fetch use the types context menu", () => {
   const commands = new Map(
     (pkg.contributes.commands ?? []).map((command) => [command.command, command.title]),
   );
@@ -143,8 +143,8 @@ test("start, rebuild, and refetch are inline on silent, stale, and unfetched", (
   assert.equal(en["command.refetchTypes"], "Fetch @mf-types");
   assert.equal(ru["command.refetchTypes"], "Загрузить @mf-types");
 
-  const inline = pkg.contributes.menus?.["view/item/context"] ?? [];
-  const byCommand = new Map(inline.map((item) => [item.command, item]));
+  const items = pkg.contributes.menus?.["view/item/context"] ?? [];
+  const byCommand = new Map(items.map((item) => [item.command, item]));
   assert.deepEqual(byCommand.get("mf-dashboard.start"), {
     command: "mf-dashboard.start",
     when: "view == mf-dashboard && viewItem =~ /^silent($| )/",
@@ -153,12 +153,12 @@ test("start, rebuild, and refetch are inline on silent, stale, and unfetched", (
   assert.deepEqual(byCommand.get("mf-dashboard.rebuildTypes"), {
     command: "mf-dashboard.rebuildTypes",
     when: "view == mf-dashboard && viewItem =~ /^stale($| )/",
-    group: "inline",
+    group: "1_types@2",
   });
   assert.deepEqual(byCommand.get("mf-dashboard.refetchTypes"), {
     command: "mf-dashboard.refetchTypes",
     when: "view == mf-dashboard && viewItem =~ /^unfetched($| )/",
-    group: "inline",
+    group: "1_types@3",
   });
 });
 

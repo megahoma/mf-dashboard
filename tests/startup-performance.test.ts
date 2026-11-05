@@ -79,10 +79,15 @@ async function start(
     },
   })) as unknown as typeof stub.workspace.getConfiguration);
   let session: DashboardSession | undefined;
-  t.mock.method(stub.window, "registerTreeDataProvider", (...args: unknown[]) => {
-    session = (args[1] as { session: DashboardSession }).session;
-    return { dispose() {} };
-  });
+  const createTreeView = stub.window.createTreeView;
+  t.mock.method(
+    stub.window,
+    "createTreeView",
+    (id: string, options: { treeDataProvider: unknown }) => {
+      session = (options.treeDataProvider as { session: DashboardSession }).session;
+      return createTreeView(id, options);
+    },
+  );
   const firstChannel = stub.outputChannels.length;
   activate({
     subscriptions,

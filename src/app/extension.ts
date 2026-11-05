@@ -11,7 +11,11 @@ import {
   startupLoad,
 } from "../features/init-settings/index.ts";
 import { selectTerms, type DashboardTerms } from "../shared/config/index.ts";
-import { MfDashboardProvider, type DashboardNode } from "../widgets/mf-dashboard-tree/index.ts";
+import {
+  DashboardDetails,
+  MfDashboardProvider,
+  type DashboardNode,
+} from "../widgets/mf-dashboard-tree/index.ts";
 
 const termsChanged = new vscode.EventEmitter<DashboardTerms>();
 const CONFIRMATIONS = "mf-dashboard.confirmations";
@@ -59,8 +63,14 @@ export function activate(context: vscode.ExtensionContext): void {
     },
     log,
   );
+  const tree = vscode.window.createTreeView("mf-dashboard", { treeDataProvider: provider });
   context.subscriptions.push(
     provider,
+    tree,
+    vscode.window.registerWebviewViewProvider(
+      "mf-dashboard.details",
+      new DashboardDetails(tree, provider),
+    ),
     onDidChangeTerms((next) => provider.relabel(next)),
     vscode.workspace.onDidSaveTextDocument((document) => {
       if (document.uri.scheme !== "file") return;
@@ -101,7 +111,6 @@ export function activate(context: vscode.ExtensionContext): void {
           );
       }
     }),
-    vscode.window.registerTreeDataProvider("mf-dashboard", provider),
     vscode.commands.registerCommand("mf-dashboard.refresh", () => provider.refresh()),
     vscode.commands.registerCommand("mf-dashboard.checkTypes", (node?: DashboardNode) =>
       provider.checkTypes(node),

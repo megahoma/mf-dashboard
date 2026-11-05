@@ -89,7 +89,7 @@ All settings use the `mf-dashboard.*` namespace.
 | ------------------------------------ | ------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | `mf-dashboard.envMode`               | `development` | Mode for `.env.<mode>` and `.env.<mode>.local`.                                                                            |
 | `mf-dashboard.structure`             | `tree`        | `tree` or `flat`; also controlled by the view-title button.                                                                |
-| `mf-dashboard.language`              | `auto`        | Tree labels and tooltips: `auto`, `en`, or `ru`. Command titles follow VS Code.                                            |
+| `mf-dashboard.language`              | `auto`        | Tree labels and details: `auto`, `en`, or `ru`. Command titles follow VS Code.                                             |
 | `mf-dashboard.ignorePaths`           | `[]`          | Additional scan exclusions. A name matches at any depth; a relative path excludes that subtree. Saved apps are still read. |
 | `mf-dashboard.extraManifestUrls`     | `[]`          | External manifest URLs shown as root rows. Only valid HTTP(S) URLs are requested.                                          |
 | `mf-dashboard.packageManager`        | `auto`        | Start command manager: `auto`, `npm`, `pnpm`, `yarn`, or `bun`.                                                            |

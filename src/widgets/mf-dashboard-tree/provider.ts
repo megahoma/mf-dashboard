@@ -713,7 +713,6 @@ export class MfDashboardProvider
     );
     item.id = row.id;
     item.description = row.description;
-    item.tooltip = row.tooltip;
     item.contextValue = row.contextValue;
     if (!readWorkspaceSettings().typesAutoCheck && this.typeLinksForNode(row))
       item.contextValue += " check-types";
@@ -724,6 +723,15 @@ export class MfDashboardProvider
   getChildren(element?: DashboardNode): DashboardNode[] {
     if (!element) return this.viewNodes();
     return element.children;
+  }
+
+  findRow(id: string): DashboardNode | undefined {
+    const pending = [...(this.view?.nodes ?? this.viewNodes())];
+    while (pending.length > 0) {
+      const row = pending.pop()!;
+      if (row.id === id) return row;
+      for (const child of row.children) pending.push(child);
+    }
   }
 
   private viewNodes(): DashboardNode[] {

@@ -508,7 +508,7 @@ test("the provider registers the tree without a view message", () => {
   assert.match(extension, /selectedTerms/);
   assert.match(extension, /onDidChangeTerms/);
   assert.match(extension, /widgets\/mf-dashboard-tree\/index\.ts/);
-  assert.match(extension, /registerTreeDataProvider\("mf-dashboard"/);
+  assert.match(extension, /createTreeView\("mf-dashboard"/);
   assert.match(extension, /mf-dashboard\.refresh/);
   assert.match(extension, /mf-dashboard\.discover/);
   assert.match(extension, /mf-dashboard\.refetchTypes/);

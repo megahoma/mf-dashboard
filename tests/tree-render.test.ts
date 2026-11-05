@@ -9,6 +9,9 @@ import { localApp } from "./support/app.ts";
 import { putAppResult } from "../src/entities/microfrontend/index.ts";
 import * as vscode from "./support/vscode.ts";
 import { terms, type DashboardTerms } from "../src/shared/config/index.ts";
+import { DashboardDetails } from "../src/widgets/mf-dashboard-tree/details.ts";
+import type { DashboardNode } from "../src/widgets/mf-dashboard-tree/presentation.ts";
+import type { TreeView, WebviewView } from "vscode";
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -38,6 +41,67 @@ function providerFor(events?: { level: string; text: string }[]): Provider {
   const provider = new MfDashboardProvider(() => terms, undefined, undefined, log);
   return provider;
 }
+
+test("details follow the selected row through refreshes and escape manifest text", (t) => {
+  const provider = providerFor();
+  t.after(() => provider.dispose());
+  const app: DashboardNode = {
+    id: "app:gallery",
+    name: "gallery",
+    kind: "listen",
+    description: "listening",
+    tooltip: "local port: 4200",
+    contextValue: "listen",
+    linkId: null,
+    children: [],
+  };
+  const link: DashboardNode = {
+    ...app,
+    id: "gallery-link",
+    linkId: "portal\0gallery\0gallery",
+    tooltip: "connection: portal → gallery\nexposes: <img src=x>&",
+  };
+  let rows = [{ ...app, children: [link] }];
+  t.mock.method(provider.session, "nodes", () => rows);
+  const selection = new vscode.EventEmitter<void>();
+  const visibility = new vscode.EventEmitter<void>();
+  const disposal = new vscode.EventEmitter<void>();
+  const tree = { selection: [] as DashboardNode[], onDidChangeSelection: selection.event };
+  const view = {
+    webview: { html: "" },
+    visible: true,
+    onDidChangeVisibility: visibility.event,
+    onDidDispose: disposal.event,
+  };
+  new DashboardDetails(tree as unknown as TreeView<DashboardNode>, provider).resolveWebviewView(
+    view as unknown as WebviewView,
+  );
+  assert.match(view.webview.html, /Select a microfrontend/);
+  assert.equal(provider.getTreeItem(link).tooltip, undefined);
+
+  tree.selection = [link];
+  selection.fire();
+  assert.match(view.webview.html, /connection: portal → gallery\nexposes: &lt;img src=x&gt;&amp;/);
+  assert.doesNotMatch(view.webview.html, /local port: 4200|<img/);
+
+  rows = [{ ...app, children: [{ ...link, tooltip: "types up to date" }] }];
+  provider.relabel();
+  assert.match(view.webview.html, /types up to date/);
+  assert.doesNotMatch(view.webview.html, /exposes:/);
+
+  view.visible = false;
+  rows = [app];
+  provider.relabel();
+  assert.match(view.webview.html, /types up to date/);
+  view.visible = true;
+  visibility.fire();
+  assert.match(view.webview.html, /Select a microfrontend/);
+
+  disposal.fire();
+  tree.selection = [app];
+  selection.fire();
+  assert.match(view.webview.html, /Select a microfrontend/);
+});
 
 function countBuilds(provider: Provider): { count: number } {
   const state = { count: 0 };

@@ -26,6 +26,7 @@
   "types download failed": "загрузка типов не удалась",
   "Refresh": "Обновить",
   "Find microfrontends": "Найти микрофронты",
+  "Select a microfrontend to see its details.": "Выберите микрофронт, чтобы увидеть подробности.",
   "URL is missing": "URL отсутствует",
   "URL is invalid": "URL некорректен",
   "No Module Federation configs found": "Конфиги Module Federation не найдены",
