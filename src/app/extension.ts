@@ -64,13 +64,12 @@ export function activate(context: vscode.ExtensionContext): void {
     log,
   );
   const tree = vscode.window.createTreeView("mf-dashboard", { treeDataProvider: provider });
+  const details = new DashboardDetails(tree, provider);
   context.subscriptions.push(
     provider,
     tree,
-    vscode.window.registerWebviewViewProvider(
-      "mf-dashboard.details",
-      new DashboardDetails(tree, provider),
-    ),
+    details,
+    vscode.window.registerWebviewViewProvider("mf-dashboard.details", details),
     onDidChangeTerms((next) => provider.relabel(next)),
     vscode.workspace.onDidSaveTextDocument((document) => {
       if (document.uri.scheme !== "file") return;

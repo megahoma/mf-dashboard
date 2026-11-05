@@ -1,23 +1,31 @@
-import type { TreeView, WebviewView, WebviewViewProvider } from "vscode";
+import type { Disposable, TreeView, WebviewView, WebviewViewProvider } from "vscode";
 import type { MfDashboardProvider } from "./provider.ts";
 import type { DashboardNode } from "./presentation.ts";
 
 export class DashboardDetails implements WebviewViewProvider {
-  private readonly tree: TreeView<DashboardNode>;
   private readonly provider: MfDashboardProvider;
+  private readonly selectionSubscription: Disposable;
+  private selectedId: string | undefined;
+  private activeView: { render(): void; dispose(): void } | undefined;
 
   constructor(tree: TreeView<DashboardNode>, provider: MfDashboardProvider) {
-    this.tree = tree;
     this.provider = provider;
+    this.selectedId = tree.selection[0]?.id;
+    // Refreshing a collapsed tree can empty tree.selection without a selection event.
+    this.selectionSubscription = tree.onDidChangeSelection(({ selection }) => {
+      this.selectedId = selection[0]?.id;
+      this.activeView?.render();
+    });
   }
 
   resolveWebviewView(view: WebviewView): void {
+    this.activeView?.dispose();
     view.webview.options = { localResourceRoots: [] };
     let previousHtml: string | undefined;
     const render = () => {
       if (!view.visible) return;
-      const [selected] = this.tree.selection;
-      const row = selected ? this.provider.findRow(selected.id) : undefined;
+      const row =
+        this.selectedId === undefined ? undefined : this.provider.findRow(this.selectedId);
       const html = detailsHtml(row, this.provider.session.terms.selectForDetails);
       if (html !== previousHtml) {
         view.webview.html = html;
@@ -25,14 +33,23 @@ export class DashboardDetails implements WebviewViewProvider {
       }
     };
     const subscriptions = [
-      this.tree.onDidChangeSelection(render),
       this.provider.onDidChangeTreeData(render),
       view.onDidChangeVisibility(render),
+      view.onDidDispose(() => this.activeView?.dispose()),
     ];
-    view.onDidDispose(() => {
-      for (const subscription of subscriptions) subscription.dispose();
-    });
+    this.activeView = {
+      render,
+      dispose: () => {
+        this.activeView = undefined;
+        for (const subscription of subscriptions) subscription.dispose();
+      },
+    };
     render();
+  }
+
+  dispose(): void {
+    this.selectionSubscription.dispose();
+    this.activeView?.dispose();
   }
 }
 
