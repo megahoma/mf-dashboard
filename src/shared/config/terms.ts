@@ -26,6 +26,7 @@ export const terms = {
   refetchFailed: "types download failed",
   refresh: "Refresh",
   discover: "Find microfrontends",
+  selectForDetails: "Select a microfrontend to see its details.",
   urlMissing: "URL is missing",
   urlMalformed: "URL is invalid",
   empty: "No Module Federation configs found",

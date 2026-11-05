@@ -382,16 +382,17 @@ test("a failed manual refresh retains the previous type result and check time", 
   );
 });
 
-test("the setting and manual command are localized and the button is conditional on false", () => {
+test("the manual check is localized and appears in the context menu only when autoCheck is false", () => {
   const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   const setting = pkg.contributes.configuration.properties["mf-dashboard.types.autoCheck"];
   assert.equal(setting.default, true);
   assert.equal(setting.type, "boolean");
-  const button = pkg.contributes.menus["view/item/context"].find(
+  const item = pkg.contributes.menus["view/item/context"].find(
     (item: { command: string }) => item.command === "mf-dashboard.checkTypes",
   );
-  assert.match(button.when, /config\.mf-dashboard\.types\.autoCheck == false/);
-  assert.match(button.when, /check-types/);
+  assert.match(item.when, /config\.mf-dashboard\.types\.autoCheck == false/);
+  assert.match(item.when, /check-types/);
+  assert.equal(item.group, "1_types@1");
   for (const file of ["package.nls.json", "package.nls.ru.json"]) {
     const strings = JSON.parse(fs.readFileSync(new URL(`../${file}`, import.meta.url), "utf8"));
     assert.ok(strings["configuration.types.autoCheck"]);

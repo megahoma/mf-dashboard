@@ -117,7 +117,15 @@ export const window = {
       },
     });
   },
-  registerTreeDataProvider: () => ({ dispose() {} }),
+  createTreeView(_id: string, _options: { treeDataProvider: unknown }) {
+    const selection = new EventEmitter<unknown>();
+    return {
+      selection: [],
+      onDidChangeSelection: selection.event,
+      dispose: () => selection.dispose(),
+    };
+  },
+  registerWebviewViewProvider: () => ({ dispose() {} }),
   showErrorMessage(_message: string) {},
   async showTextDocument(_document: unknown, _options: unknown) {},
 };

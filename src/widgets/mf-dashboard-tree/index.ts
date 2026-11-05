@@ -1,4 +1,5 @@
 export { MfDashboardProvider } from "./provider.ts";
+export { DashboardDetails } from "./details.ts";
 export {
   beginRefetch,
   endRefetch,
