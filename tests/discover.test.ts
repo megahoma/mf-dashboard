@@ -123,7 +123,9 @@ test("discovery follows local reexports and combines a separate bundler config w
       path.join(root, "options.ts"),
       `
       throw new Error("configuration must not execute");
-      export function federation() { return { name: "shell", manifest: true, dts: true }; }
+      export function federation() {
+        return { name: "shell", manifest: { fileName: "fixture-manifest.json" }, dts: true };
+      }
     `,
     );
     fs.writeFileSync(
@@ -137,11 +139,12 @@ test("discovery follows local reexports and combines a separate bundler config w
     );
     fs.writeFileSync(
       path.join(root, "rsbuild.config.ts"),
-      'export default { server: { port: 4100 }, output: { distPath: { root: "build/custom" } } };',
+      'export default { server: { port: 4100, base: "/fixture-base/" }, output: { distPath: { root: "build/custom" } } };',
     );
     const found = scanWorkspace(root);
     assert.equal(found.shell?.name, "shell");
     assert.equal(found.shell?.port, 4100);
+    assert.equal(found.shell?.manifestPath, "/fixture-base/fixture-manifest.json");
     assert.equal(found.shell?.configFile, path.join(root, "options.ts"));
     assert.equal(found.shell?.generateTypes, true);
     assert.equal(found.shell?.generatedZipPath, path.join(root, "build/custom/@mf-types.zip"));
@@ -156,6 +159,27 @@ test("discovery follows local reexports and combines a separate bundler config w
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("a matched Rsbuild config supplies the manifest route beside an unrelated bundler config", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-split-config-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(
+    path.join(root, "module-federation.config.ts"),
+    'export default { name: "fixture-paired", manifest: { fileName: "fixture.json" }, dts: true };',
+  );
+  const rsbuildConfig = path.join(root, "rsbuild.config.ts");
+  fs.writeFileSync(
+    rsbuildConfig,
+    `
+import options from "./module-federation.config";
+export default { server: { base: "/fixture-base/" }, plugins: [pluginModuleFederation(options)] };
+`,
+  );
+  fs.writeFileSync(path.join(root, "rspack.config.ts"), 'export default { mode: "development" };');
+  const app = scanWorkspace(root)["fixture-paired"];
+  assert.equal(app?.buildConfigFile, rsbuildConfig);
+  assert.equal(app?.manifestPath, "/fixture-base/fixture.json");
 });
 
 test("discovery terminates cyclic local reexports", () => {

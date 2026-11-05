@@ -159,7 +159,6 @@ test("first startup shares one workspace scan and config parse across seeding, d
   assert.deepEqual(values.get("mf-dashboard.apps"), {
     discovered: {
       path: "discovered",
-      manifestPath: "/mf-manifest.json",
       scripts: { start: "dev" },
     },
   });

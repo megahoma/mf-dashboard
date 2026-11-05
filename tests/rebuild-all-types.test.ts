@@ -20,12 +20,14 @@ import {
 import { verifyTypeInstalls } from "../src/features/observe-types/verify.ts";
 import { rebuildAllTypes, type RebuildAllContext } from "../src/features/rebuild-types/all.ts";
 import {
+  generateFederatedTypes,
   generateLocalFederatedTypes,
   rebuildLocalArchive,
   type LocalGeneratedZip,
   type LocalGenerationInput,
 } from "../src/features/rebuild-types/generate.mts";
 import { installRemoteTypes } from "../src/features/refetch-types/remote.ts";
+import { loadKnownApps } from "../src/widgets/mf-dashboard-tree/session.ts";
 import { localApp } from "./support/app.ts";
 
 function fixture(t: TestContext) {
@@ -138,10 +140,20 @@ exports.retrieveRemoteConfig = ({ context, moduleFederationConfig }) => {
     "@module-federation/dts-plugin/index.js": `
 const fs = require("node:fs");
 exports.isTSProject = () => true;
-exports.normalizeDtsOptions = options => options.dts.generateTypes ? options.dts : false;
-exports.normalizeGenerateTypesOptions = ({ context, pluginOptions }) => ({
-  remote: { context, moduleFederationConfig: pluginOptions, ...pluginOptions.dts.generateTypes }
-});
+exports.normalizeDtsOptions = ({ dts }, _context, defaults) =>
+  dts === false ? false : { generateTypes: defaults.defaultGenerateOptions, ...dts };
+exports.normalizeGenerateTypesOptions = ({ context, dtsOptions, pluginOptions }) => {
+  const { generateTypes } = dtsOptions;
+  if (generateTypes === false) return undefined;
+  if (generateTypes !== undefined && generateTypes !== true &&
+      (generateTypes === null || typeof generateTypes !== "object")) {
+    throw new TypeError("Unexpected type for mfOptions.dts.generateTypes");
+  }
+  return { remote: {
+    context, moduleFederationConfig: pluginOptions, abortOnError: false, compileInChildProcess: true,
+    ...generateTypes
+  } };
+};
 exports.generateTypesAPI = async ({ dtsManagerOptions }) => {
   ${generate}
   await dtsManagerOptions.remote.afterGenerate?.();
@@ -154,6 +166,51 @@ exports.generateTypesAPI = async ({ dtsManagerOptions }) => {
     fs.writeFileSync(file, contents);
   }
 }
+
+test("bulk rebuild uses the Rsbuild server route unless a manifest path is configured", async (t) => {
+  const f = fixture(t);
+  const seed = f.app("fixture-library", 53941);
+  const source = `
+    import { pluginModuleFederation } from "@module-federation/rsbuild-plugin";
+    export default {
+      server: { port: ${seed.port}, base: "/dev-fixture/" },
+      output: { assetPrefix: import.meta.env.ASSET_PREFIX },
+      plugins: [pluginModuleFederation({ name: "${seed.name}",
+        manifest: { fileName: "fixture-manifest.json" },
+        exposes: { "./index": "./index.ts" }, dts: { generateTypes: true, consumeTypes: false }
+      })]
+    };
+  `;
+  fs.writeFileSync(seed.configFile, source);
+  fs.writeFileSync(path.join(seed.folder, ".env.development"), "ASSET_PREFIX=/public-fixture/\n");
+  const load = (manifestPath?: string) =>
+    loadKnownApps(
+      [{ name: "fixture-root", path: seed.folder }],
+      { [seed.name]: { path: ".", manifestPath } },
+      "development",
+    )[0];
+  const producer = load();
+  const expectedPath = "/dev-fixture/fixture-manifest.json";
+  assert.equal(producer?.manifestPath, expectedPath);
+  const explicitPath = "/public-fixture/fixture-manifest.json";
+  assert.equal(load(explicitPath)?.manifestPath, explicitPath);
+  const consumer = f.app("fixture-client", 53942, {
+    generateTypes: false,
+    consumeTypes: true,
+    remotes: [{ ...remote(seed), url: `http://localhost:${seed.port}${expectedPath}` }],
+  });
+  const report = await rebuildAllTypes(f.context([consumer, producer]), {
+    ...unused,
+    generateLocalFederatedTypes: mockGeneration((appDir) =>
+      writeZip(path.join(appDir, "dist", "@mf-types.zip"), "fixture declarations"),
+    ),
+  });
+  assert.deepEqual(report.failed, []);
+  assert.deepEqual(report.installed, [{ consumer: consumer.name, alias: producer.name }]);
+
+  fs.writeFileSync(seed.configFile, source.replace(', base: "/dev-fixture/"', ""));
+  assert.equal(readAppFolder(seed.folder, "development")?.manifestPath, "/fixture-manifest.json");
+});
 
 test("offline workspace rebuild installs dependencies before generation and visits a shared producer once", async (t) => {
   const f = fixture(t);
@@ -699,6 +756,133 @@ fs.writeFileSync("dist/@mf-types.zip", Buffer.from([0x50, 0x4b, 3, 4, 1]));
   assert.deepEqual(report.installed, []);
   assert.deepEqual(report.rebuilt, ["reports"]);
   assert.equal(f.confirmations.generation(stalled.name), null);
+});
+
+test("partial DTS options propagate SDK generation errors and keep explicit overrides", async (t) => {
+  const f = fixture(t);
+  const { name, folder } = f.app("fixture-generator", 53943);
+  const configFile = path.join(folder, "rsbuild.config.cjs");
+  const zipPath = path.join(folder, "dist", "@mf-types.zip");
+  writeZip(zipPath, "previous declarations");
+  const previousArchive = fs.readFileSync(zipPath);
+  const error =
+    'Declaration emit failed #TYPE-001\nargs: {"cmd":"fixture-compiler --project types.json"}';
+  installGeneratorFixture(
+    folder,
+    `
+const { abortOnError, compileInChildProcess, compilerInstance, tsConfigPath } = dtsManagerOptions.remote;
+if (compilerInstance !== "fixture-compiler" || tsConfigPath !== "types.json") {
+  throw new Error("configured compiler options were lost");
+}
+if (abortOnError && !compileInChildProcess) throw new Error(${JSON.stringify(error)});
+`,
+  );
+
+  const rebuild = (flags: string) => {
+    fs.writeFileSync(
+      configFile,
+      `
+const { pluginModuleFederation } = require("@module-federation/rsbuild-plugin");
+module.exports = { plugins: [pluginModuleFederation({
+  name: "${name}", exposes: { "./index": "./index.ts" },
+  dts: { generateTypes: { compilerInstance: "fixture-compiler", tsConfigPath: "types.json" ${flags} } }
+})] };
+`,
+    );
+    const app = readAppFolder(folder, "development");
+    assert.ok(app);
+    return rebuildAllTypes(f.context([app]));
+  };
+
+  const report = await rebuild("");
+  assert.deepEqual(report.failed, [{ app: name, reason: error }]);
+  for (const flags of [", abortOnError: false", ", compileInChildProcess: true"]) {
+    const overridden = await rebuild(flags);
+    assert.deepEqual(overridden.failed, [
+      { app: name, reason: `generation did not write the types ZIP: ${zipPath}` },
+    ]);
+  }
+  assert.deepEqual(fs.readFileSync(zipPath), previousArchive);
+  assert.equal(f.confirmations.generation(name), null);
+});
+
+test("invalid DTS generation options reach SDK validation", async (t) => {
+  const { name, folder } = fixture(t).app("fixture-invalid-dts", 53944);
+  const configFile = path.join(folder, "rsbuild.config.cjs");
+  installGeneratorFixture(folder, 'throw new Error("unexpected generation");');
+  for (const value of ['"false"', "null", "0"]) {
+    fs.writeFileSync(
+      configFile,
+      `
+const { pluginModuleFederation } = require("@module-federation/rsbuild-plugin");
+module.exports = { plugins: [pluginModuleFederation({
+  name: "${name}", exposes: { "./index": "./index.ts" }, dts: { generateTypes: ${value} }
+})] };
+`,
+    );
+    await assert.rejects(
+      generateLocalFederatedTypes({
+        appDir: folder,
+        name,
+        configFile,
+        envMode: "development",
+        env: {},
+        workspaceFingerprint: "fixture",
+      }),
+      /Unexpected type for mfOptions\.dts\.generateTypes/,
+    );
+  }
+});
+
+test("single rebuild generates in a child and checks the published ZIP using the config port", async (t) => {
+  const port = 53945;
+  const { name, folder } = fixture(t).app("fixture-published-dts", port);
+  const configFile = path.join(folder, "rsbuild.config.cjs");
+  const zipPath = path.join(folder, "dist", "@mf-types.zip");
+  const bytes = [0x50, 0x4b, 3, 4, 1];
+  fs.writeFileSync(
+    configFile,
+    `
+const { pluginModuleFederation } = require("@module-federation/rsbuild-plugin");
+module.exports = { server: { port: ${port} }, plugins: [pluginModuleFederation({
+  name: "${name}", exposes: { "./index": "./index.ts" }, dts: { generateTypes: {} }
+})] };
+`,
+  );
+  installGeneratorFixture(
+    folder,
+    `
+if (process.pid === ${process.pid}) throw new Error("generation ran in the host process");
+fs.mkdirSync(${JSON.stringify(path.dirname(zipPath))}, { recursive: true });
+fs.writeFileSync(${JSON.stringify(zipPath)}, Buffer.from(${JSON.stringify(bytes)}));
+`,
+  );
+  const manifestPath = "/fixture/manifest.json";
+  const origin = `http://127.0.0.1:${port}`;
+  const zipUrl = `${origin}/fixture/@mf-types.zip`;
+  const fetch = t.mock.method(
+    globalThis,
+    "fetch",
+    async (input: Parameters<typeof globalThis.fetch>[0]) => {
+      if (String(input) === origin + manifestPath) {
+        return Response.json({ metaData: { publicPath: "auto", types: { zip: "@mf-types.zip" } } });
+      }
+      assert.equal(String(input), zipUrl);
+      return new Response(Uint8Array.from(bytes));
+    },
+  );
+  assert.deepEqual(
+    await generateFederatedTypes({
+      appDir: folder,
+      name,
+      configFile,
+      envMode: "development",
+      port: null,
+      manifestPath,
+    }),
+    { zipPath, zipHash: createHash("sha256").update(Uint8Array.from(bytes)).digest("hex"), zipUrl },
+  );
+  assert.equal(fetch.mock.callCount(), 2);
 });
 
 test("the built-in generator installs the archive from the active Rsbuild plugin", async (t) => {

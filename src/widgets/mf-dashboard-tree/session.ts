@@ -14,7 +14,7 @@ import {
   type ScanOptions,
 } from "../../entities/microfrontend/index.ts";
 import { type ProblemDraft, type StatusInput } from "../../entities/status/index.ts";
-import { mergeMissingApps } from "../../features/init-settings/index.ts";
+import { mergeMissingApps, resolveManifestPath } from "../../features/init-settings/index.ts";
 import { terms, type DashboardTerms } from "../../shared/config/index.ts";
 import { resolveRowAction } from "./targets.ts";
 import {
@@ -224,18 +224,17 @@ export function loadKnownApps(
       if (!cached) cache.store(key, abs, envMode, match, [...dependencies]);
       fallback ??= match;
       if (match.name !== name) continue;
-      const manifestPath =
-        typeof setting.manifestPath === "string" && setting.manifestPath !== ""
-          ? setting.manifestPath
-          : match.manifestPath;
-      loaded.push({ ...match, manifestPath });
+      loaded.push({
+        ...match,
+        manifestPath: resolveManifestPath(setting.manifestPath, match.manifestPath),
+      });
       matched = true;
       break;
     }
     if (!matched && fallback && candidates.length === 1) {
       loaded.push({
         ...fallback,
-        manifestPath: setting.manifestPath || fallback.manifestPath,
+        manifestPath: resolveManifestPath(setting.manifestPath, fallback.manifestPath),
       });
     }
   }
@@ -509,7 +508,6 @@ export class DashboardSession {
             foundApps[name] = {
               path: workspaceRelative(root.path, foundApp.folder),
               ...(roots.length > 1 ? { workspaceFolder: root.name } : {}),
-              manifestPath: foundApp.manifestPath,
               scripts: { start: "dev" },
             };
           }

@@ -54,10 +54,8 @@ export function resolveStartScript(settings: ScriptSettings, name: string): stri
   return settings["mf-dashboard.scripts.start"];
 }
 
-export function resolveManifestPath(settings: ScriptSettings, name: string): string {
-  const manifestPath = settings["mf-dashboard.apps"]?.[name]?.manifestPath;
-  if (typeof manifestPath === "string" && manifestPath !== "") return manifestPath;
-  return "/mf-manifest.json";
+export function resolveManifestPath(override: string | undefined, detectedPath: string): string {
+  return typeof override === "string" && override !== "" ? override : detectedPath;
 }
 
 export function mergeMissingApps<T extends AppConfig>(

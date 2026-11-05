@@ -699,6 +699,8 @@ interface ConfigCandidate {
   port: number | null;
   outputDir: string | null;
   bundlerZipName?: string;
+  rsbuildBase?: string;
+  manifestFileName?: string;
 }
 
 export function readConfigCandidate(
@@ -715,9 +717,13 @@ export function readConfigCandidate(
   const server = object(config) && object(config.server) ? config.server : null;
   const devServer = object(config) && object(config.devServer) ? config.devServer : null;
   const port = portValue(server?.port) ?? portValue(devServer?.port);
+  const serverBase = string(server?.base) ?? "";
+  const rsbuildBase = path.basename(filePath).startsWith("rsbuild.config.")
+    ? serverBase
+    : undefined;
   const outputDir = buildOutputDir(config);
   const name = options && string(options.name);
-  if (!options || !name) return { app: null, port, outputDir };
+  if (!options || !name) return { app: null, port, outputDir, rsbuildBase };
   const dts = object(options.dts) ? options.dts : null;
   const generateTypes = dts ? flag(dts.generateTypes, true) : options.dts === true;
   const consumeTypes = dts ? flag(dts.consumeTypes, true) : options.dts === true;
@@ -730,11 +736,11 @@ export function readConfigCandidate(
   const zipOutput = dtsOutput === undefined ? outputDir : string(dtsOutput);
   const exposes = options.exposes;
   const manifest = object(options.manifest) ? options.manifest : null;
-  let prefix = "";
-  if (source.includes("import.meta.env.ASSET_PREFIX") && env.ASSET_PREFIX?.trim())
-    prefix = env.ASSET_PREFIX.trim();
-  else if (server) prefix = string(server.base) ?? "";
   const fileName = string(manifest?.fileName) ?? "mf-manifest.json";
+  const assetPrefix = source.includes("import.meta.env.ASSET_PREFIX")
+    ? env.ASSET_PREFIX?.trim()
+    : undefined;
+  const manifestPath = joinManifestPath(rsbuildBase ?? (assetPrefix || serverBase), fileName);
   const app: LocalApp = {
     name,
     folder: path.dirname(filePath),
@@ -749,10 +755,7 @@ export function readConfigCandidate(
       "@mf-types",
     tsconfig: (generateTypes && string(generate?.tsConfigPath)) || string(dts?.tsConfigPath),
     compilerInstance: generateTypes ? string(generate?.compilerInstance) : null,
-    manifestPath: `/${prefix.replace(/^\/+|\/+$/g, "")}/${fileName.replace(/^\/+/, "")}`.replace(
-      /\/{2,}/g,
-      "/",
-    ),
+    manifestPath,
     remotes: object(options.remotes)
       ? Object.entries(options.remotes).map(([alias, value]) => readRemote(alias, value))
       : [],
@@ -770,8 +773,14 @@ export function readConfigCandidate(
     app,
     port,
     outputDir,
+    rsbuildBase,
+    manifestFileName: fileName,
     bundlerZipName: generateTypes && dtsOutput === undefined && zipName ? zipName : undefined,
   };
+}
+
+export function joinManifestPath(prefix: string, fileName: string): string {
+  return `/${prefix}/${fileName}`.replace(/\/{2,}/g, "/");
 }
 
 function buildOutputDir(config: Value): string | null {
