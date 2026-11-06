@@ -348,20 +348,26 @@ test("a config with type consumption disabled does not reserve dependency paths"
   );
 });
 
-test("shared scoped targets require both configs to refer to the same remote", () => {
-  const folder = path.resolve("consumer-fixture");
+test("shared scoped targets require both configs to refer to the same remote", (t) => {
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), "mf-shared-scoped-types-"));
+  t.after(() => fs.rmSync(folder, { recursive: true, force: true }));
   const scoped = { ...remote, alias: "@fixture/widget" };
   const first = localApp("fixture-first", folder, { consumeTypes: true, remotes: [scoped] });
   const second = localApp("fixture-second", folder, {
     consumeTypes: true,
+    typesFolder: "linked-types",
     remotes: [{ ...scoped }],
   });
+  const types = path.join(folder, first.typesFolder);
+  const target = path.join(types, scoped.alias);
+  const backing = path.join(types, "backing");
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.mkdirSync(backing);
+  fs.symlinkSync(backing, target, "junction");
+  fs.symlinkSync(types, path.join(folder, second.typesFolder), "junction");
   const different = { ...scoped, url: "https://assets.example.test/mf-manifest.json" };
   const third = localApp("fixture-third", folder, { consumeTypes: true, remotes: [different] });
-  assert.equal(
-    dependencyTypesTarget(first, scoped, [first, second]),
-    path.join(folder, first.typesFolder, scoped.alias),
-  );
+  assert.equal(dependencyTypesTarget(first, scoped, [first, second]), target);
   assert.throws(
     () => dependencyTypesTarget(first, scoped, [first, third]),
     /remote aliases share a types directory/,

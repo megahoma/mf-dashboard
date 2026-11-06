@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { createRequire, syncBuiltinESMExports } from "node:module";
@@ -763,6 +764,202 @@ test("archive installation normalizes a destination ending in a dot component", 
   assert.equal(fs.readFileSync(target, "utf8"), "new");
   assert.equal(fs.readFileSync(sibling, "utf8"), "keep");
 });
+
+const composedName = "caf\u00e9";
+const decomposedName = composedName.normalize("NFD");
+const overlapFixtures = [
+  {
+    name: "a linked alias's backing directory",
+    alias: "@fixture/widget",
+    protectedAlias: "other",
+    protectedFolder: "@mf-types",
+    physicalFolder: "@mf-types/@fixture/widget/nested",
+    link: "@mf-types/other",
+    linkTarget: "@mf-types/@fixture/widget/nested",
+  },
+  {
+    name: "a directory traversed before ..",
+    alias: "@fixture",
+    protectedAlias: "@library/widget",
+    protectedFolder: "linked-types",
+    physicalFolder: "@mf-types/other/@library/widget",
+    link: "linked-types",
+    relativeTarget: "@mf-types/@fixture/nested/../../other",
+  },
+  {
+    name: "an existing directory with an equivalent Unicode name",
+    alias: decomposedName,
+    protectedAlias: "@library/widget",
+    protectedFolder: `@mf-types/${composedName}`,
+    physicalFolder: `@mf-types/${composedName}/@library/widget`,
+    equivalentName: composedName,
+  },
+  {
+    name: "a symlink entry with an equivalent Unicode name",
+    alias: decomposedName,
+    protectedAlias: "@library/widget",
+    protectedFolder: `@mf-types/${composedName}`,
+    physicalFolder: "actual/@library/widget",
+    link: `@mf-types/${composedName}`,
+    linkTarget: "actual",
+    equivalentName: composedName,
+  },
+  {
+    name: "a hard-linked symlink with a filesystem-equivalent name",
+    alias: "\u03c3",
+    protectedAlias: "@library/widget",
+    protectedFolder: "linked-types",
+    physicalFolder: "actual/@library/widget",
+    link: "@mf-types/\u03c2",
+    linkTarget: "actual",
+    equivalentName: "\u03c2",
+    hardLink: true,
+  },
+  {
+    name: "a hard-linked symlink when directory listing is denied",
+    alias: "linked-target",
+    protectedAlias: "@library/widget",
+    protectedFolder: "linked-types",
+    physicalFolder: "actual/@library/widget",
+    link: "@mf-types/linked-target",
+    linkTarget: "actual",
+    hardLink: true,
+    denyList: true,
+  },
+] as const;
+
+for (const scenario of overlapFixtures) {
+  test(`Fetch and local rebuild protect ${scenario.name}`, async (t) => {
+    if ("relativeTarget" in scenario && process.platform === "win32") {
+      t.skip("requires POSIX relative symlink traversal");
+      return;
+    }
+    if ("hardLink" in scenario && process.platform === "win32") {
+      t.skip("requires POSIX hard links to symlinks");
+      return;
+    }
+    const f = fixture(t);
+    const producer = f.app("fixture-library", 4501);
+    const dependency = remote(producer, scenario.alias);
+    const consumer = f.app("fixture-consumer", 4502, {
+      consumeTypes: true,
+      generateTypes: false,
+      remotes: [dependency],
+    });
+    const other = localApp("fixture-other", consumer.folder, {
+      consumeTypes: true,
+      generateTypes: false,
+      typesFolder: scenario.protectedFolder,
+      remotes: [
+        {
+          alias: scenario.protectedAlias,
+          name: "other",
+          url: "https://fixture.example/mf-manifest.json",
+        },
+      ],
+    });
+    const physical = path.join(consumer.folder, scenario.physicalFolder);
+    const installed = typeFile(other, scenario.protectedAlias);
+    fs.mkdirSync(physical, { recursive: true });
+    fs.writeFileSync(path.join(physical, "index.d.ts"), "previous");
+    if ("link" in scenario) {
+      const link = path.join(consumer.folder, scenario.link);
+      fs.mkdirSync(path.dirname(link), { recursive: true });
+      if ("relativeTarget" in scenario) {
+        fs.mkdirSync(path.join(consumer.folder, "@mf-types", scenario.alias, "nested"), {
+          recursive: true,
+        });
+        fs.symlinkSync(scenario.relativeTarget, link, "dir");
+      } else {
+        fs.symlinkSync(path.join(consumer.folder, scenario.linkTarget), link, "junction");
+      }
+      if ("hardLink" in scenario) {
+        execFileSync("ln", ["-P", link, path.join(path.dirname(link), "other-entry")]);
+        fs.symlinkSync(link, path.join(consumer.folder, scenario.protectedFolder), "junction");
+      }
+    }
+    const typeRoot = path.join(consumer.folder, consumer.typesFolder);
+    if ("equivalentName" in scenario) {
+      const existing = fs.lstatSync(path.join(typeRoot, scenario.equivalentName), { bigint: true });
+      const alternate = fs.lstatSync(path.join(typeRoot, scenario.alias), {
+        bigint: true,
+        throwIfNoEntry: false,
+      });
+      if (alternate?.ino !== existing.ino || alternate.dev !== existing.dev) {
+        t.skip("requires a filesystem with equivalent Unicode names");
+        return;
+      }
+    }
+    let deniedReads = 0;
+    if ("denyList" in scenario) {
+      const denied = fs.realpathSync.native(typeRoot);
+      const readdir = fs.readdirSync;
+      t.mock.method(fs, "readdirSync", (...args: Parameters<typeof readdir>) => {
+        if (args[0] === denied) {
+          deniedReads++;
+          throw Object.assign(new Error("cannot list fixture types folder"), { code: "EACCES" });
+        }
+        return readdir(...args);
+      });
+    }
+    assert.equal(fs.readFileSync(installed, "utf8"), "previous");
+    const archive = writeZip(path.join(producer.folder, "fixture.zip"), "new");
+    const apps = [producer, consumer, other];
+    serveZip(t, dependency.url, archive.zipPath);
+
+    await assert.rejects(
+      () =>
+        installRemoteTypes(consumer, dependency, dependency.url, "", undefined, undefined, apps),
+      /remote aliases share a types directory/,
+    );
+    assert.equal(fs.readFileSync(installed, "utf8"), "previous");
+
+    const report = await rebuildAllTypes(f.context(apps), {
+      ...unused,
+      async generateLocalFederatedTypes() {
+        return { ...archive, current: false, inputsFingerprint: null };
+      },
+    });
+    assert.deepEqual(report.installed, []);
+    assert.deepEqual(report.failed, [
+      { app: consumer.name, reason: `remote aliases share a types directory: ${scenario.alias}` },
+    ]);
+    assert.equal(fs.readFileSync(installed, "utf8"), "previous");
+    if ("denyList" in scenario) assert.ok(deniedReads > 0);
+  });
+}
+
+test(
+  "Fetch can replace one hard-linked alias entry without changing the others",
+  { skip: process.platform === "win32" },
+  async (t) => {
+    const f = fixture(t);
+    const producer = f.app("fixture-library", 4501);
+    const dependency = remote(producer, "@fixture/widget");
+    const related = [remote(producer, "@fixture/other"), remote(producer, "@library/widget")];
+    const app = f.app("fixture-consumer", 4502, {
+      consumeTypes: true,
+      remotes: [dependency, ...related],
+    });
+    const types = path.join(app.folder, app.typesFolder);
+    for (const scope of ["@fixture", "@library"]) {
+      const backing = path.join(types, scope, "backing");
+      fs.mkdirSync(backing, { recursive: true });
+      fs.writeFileSync(path.join(backing, "index.d.ts"), scope);
+    }
+    const destination = path.join(types, dependency.alias);
+    fs.symlinkSync("backing", destination, "dir");
+    for (const { alias } of related)
+      execFileSync("ln", ["-P", destination, path.join(types, alias)]);
+    const archive = writeZip(path.join(producer.folder, "fixture.zip"), "new");
+    serveZip(t, dependency.url, archive.zipPath);
+
+    await installRemoteTypes(app, dependency, dependency.url, "");
+    assert.equal(fs.readFileSync(typeFile(app, dependency.alias), "utf8"), "new");
+    assert.equal(fs.readFileSync(typeFile(app, related[0].alias), "utf8"), "@fixture");
+    assert.equal(fs.readFileSync(typeFile(app, related[1].alias), "utf8"), "@library");
+  },
+);
 
 test("bulk rebuild preserves installed scoped types when another config owns their parent", async (t) => {
   const f = fixture(t);

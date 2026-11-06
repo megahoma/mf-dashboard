@@ -14,31 +14,32 @@ function relativeInside(root: string, target: string): string {
 }
 
 // Resolve existing links while keeping the suffix of a path that has not been created yet.
-export function resolveTypesPath(root: string, target: string, links?: Set<string>): string {
+export function resolveTypesPath(root: string, target: string, route?: Set<string>): string {
   const absoluteRoot = path.resolve(root);
   const absoluteTarget = path.resolve(target);
   const relative = relativeInside(absoluteRoot, absoluteTarget);
   if (!fs.lstatSync(absoluteRoot, { throwIfNoEntry: false })) return absoluteTarget;
   const realRoot = fs.realpathSync.native(absoluteRoot);
-  if (links && realRoot !== absoluteRoot) rememberLinks(absoluteRoot, absoluteRoot, links);
-  return walkTypesPath(realRoot, relative, links, realRoot);
+  if (route && realRoot !== absoluteRoot) rememberRoute(absoluteRoot, absoluteRoot, route);
+  return walkTypesPath(realRoot, relative, route, realRoot);
 }
 
-function rememberLinks(file: string, from: string, links: Set<string>): void {
+function rememberRoute(file: string, from: string, route: Set<string>): void {
   const root = path.parse(file).root;
-  walkTypesPath(root ? path.resolve(from, root) : from, file.slice(root.length), links);
+  walkTypesPath(root ? path.resolve(from, root) : from, file.slice(root.length), route);
 }
 
 function walkTypesPath(
   start: string,
   relative: string,
-  links?: Set<string>,
+  route?: Set<string>,
   boundary?: string,
 ): string {
   let current = start;
   const parts = relative.split(process.platform === "win32" ? /[\\/]/ : "/");
   for (const [index, part] of parts.entries()) {
     if (!part) continue;
+    if (part === "..") route?.add(current);
     const next = path.join(current, part);
     const stat = fs.lstatSync(next, { throwIfNoEntry: false });
     if (!stat) return path.join(fs.realpathSync.native(current), ...parts.slice(index));
@@ -48,13 +49,13 @@ function walkTypesPath(
     }
     try {
       const resolved = fs.realpathSync.native(next);
-      if (links) {
+      if (route) {
         const parent = fs.realpathSync.native(current);
         const link = path.join(parent, part);
-        if (!links.has(link)) {
-          links.add(link);
+        if (!route.has(link)) {
+          route.add(link);
           // Follow the link before applying any subsequent parent segments.
-          rememberLinks(fs.readlinkSync(link), parent, links);
+          rememberRoute(fs.readlinkSync(link), parent, route);
         }
       }
       current = resolved;
