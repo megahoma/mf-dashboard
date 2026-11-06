@@ -162,13 +162,38 @@ function writeApp(folder: string, name: string, remotes: string): void {
   );
 }
 
+test("the dashboard and Rebuild All accept the same unambiguous renamed app", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-renamed-app-"));
+  writeApp(path.join(root, "gallery"), "gallery", "");
+  const restore = useWorkspace(root, {
+    archive: { path: "gallery" },
+    gallery: { path: "missing" },
+  });
+  const provider = providerFor();
+  t.after(() => {
+    restore();
+    provider.dispose();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  await provider.refresh();
+  assert.deepEqual(
+    provider.getChildren().map((row) => row.name),
+    ["gallery"],
+  );
+  const report = await provider.rebuildAll(() => {});
+  assert.deepEqual(report.skipped, [
+    { app: "gallery", reason: "Could not read the microfrontend config" },
+  ]);
+});
+
 test("a successful refresh builds the tree once for logs and later row requests", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-tree-render-"));
   const shell = path.join(root, "shell");
   writeApp(shell, "shell", 'widget: "widget"');
   const events: { level: string; text: string }[] = [];
   const provider = providerFor(events);
-  const restore = useWorkspace(root, { shell: { path: "shell" } });
+  const restore = useWorkspace(root, { retired: { path: "shell" }, shell: { path: "shell" } });
   const builds = countBuilds(provider);
   t.after(() => {
     restore();
@@ -184,8 +209,9 @@ test("a successful refresh builds the tree once for logs and later row requests"
   assert.equal(builds.count, 1);
   assert.deepEqual(
     roots.map((row) => [row.name, row.kind, row.description]),
-    [["shell", "silent", "stopped"]],
+    [["shell", "unknownPort", "port unknown"]],
   );
+  assert.deepEqual(provider.getTreeItem(roots[0]).iconPath, new vscode.ThemeIcon("question"));
   assert.deepEqual(
     [child.name, child.kind, child.description],
     ["widget", "invalidUrl", "URL error"],
@@ -259,10 +285,10 @@ test("language, structure, pending, and script gaps rebuild the visible rows", (
   ];
   const first = provider.getChildren();
   assert.equal(first[0]?.children.length, 1);
-  const quiet: DashboardTerms = { ...terms, silent: "QUIET", invalidUrl: "BAD" };
+  const quiet: DashboardTerms = { ...terms, unknownPort: "UNKNOWN PORT", invalidUrl: "BAD" };
   provider.relabel(quiet);
-  assert.equal(provider.getChildren()[0]?.description, "QUIET");
-  assert.equal(provider.getChildren()[0]?.children[0]?.description, "BAD");
+  assert.equal(provider.getChildren()[0]?.description, "UNKNOWN PORT");
+  assert.equal(provider.getChildren()[0]?.children[0]?.description, "BAD · UNKNOWN PORT");
   provider.setStructure("flat");
   assert.equal(provider.getChildren()[0]?.children.length, 0);
   provider.setStructure("tree");
@@ -351,7 +377,7 @@ test("a failed refresh keeps the previous rows", async (t) => {
   const shell = path.join(root, "shell");
   const other = path.join(root, "other");
   writeApp(shell, "shell", "");
-  writeApp(other, "shell", "");
+  writeApp(other, "other", "");
   const provider = providerFor();
   const restore = useWorkspace(root, { shell: { path: "shell" } });
   t.after(() => {
@@ -362,12 +388,11 @@ test("a failed refresh keeps the previous rows", async (t) => {
   await provider.refresh();
   assert.equal(provider.getChildren()[0]?.name, "shell");
   restore();
-  const restoreDuplicate = useWorkspace(root, {
-    shell: { path: "shell" },
-    other: { path: "other" },
+  t.after(useWorkspace(root, { other: { path: "other" } }));
+  t.mock.method(provider.session["ports"], "probe", async () => {
+    throw new Error("probe failed");
   });
-  t.after(restoreDuplicate);
-  await assert.rejects(() => provider.refresh(), /duplicate federation name/);
+  await assert.rejects(() => provider.refresh(), /probe failed/);
   assert.equal(provider.getChildren()[0]?.name, "shell");
   assert.equal(provider.session.loaded.length, 1);
 });

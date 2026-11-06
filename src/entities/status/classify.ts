@@ -4,6 +4,7 @@ import { terms, type DashboardTerms } from "../../shared/config/index.ts";
 export type StatusKind =
   | "listen"
   | "silent"
+  | "unknownPort"
   | "stale"
   | "unfetched"
   | "invalidUrl"
@@ -36,7 +37,10 @@ function urlPort(url: URL): number {
 }
 
 export function classify(input: StatusInput): StatusKind {
-  if (input.role === "app") return input.portOpen ? "listen" : "silent";
+  if (input.role === "app") {
+    if (input.port === null) return "unknownPort";
+    return input.portOpen ? "listen" : "silent";
+  }
   if (input.role === "external") {
     if (!httpUrl(input.url)) return "invalidUrl";
     return input.portOpen ? "answers" : "noAnswer";
@@ -48,7 +52,8 @@ export function classify(input: StatusInput): StatusKind {
   const url = httpUrl(input.url);
   if (!url) return "invalidUrl";
   if (!localHosts.has(url.hostname)) return "otherHost";
-  if (input.port === null || urlPort(url) !== input.port) return "otherPort";
+  if (input.port === null) return "unknownPort";
+  if (urlPort(url) !== input.port) return "otherPort";
   return "listen";
 }
 

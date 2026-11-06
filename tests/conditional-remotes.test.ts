@@ -103,6 +103,24 @@ test("a false outer branch does not need to resolve a nested condition", () => {
   );
 });
 
+test("a return keeps the remotes computed before later writes", () => {
+  const source = `function buildOptions() {
+    const remotes = { panel: 'canvas@http://localhost:4201/mf-manifest.json' };
+    if (process.env.PREVIEW === 'yes') return { name: 'portal', remotes };
+    remotes.panel = 'fallback@http://localhost:4202/mf-manifest.json';
+    return { name: 'portal', remotes };
+    remotes.panel = 'unreachable';
+  }
+  export default pluginModuleFederation(buildOptions());`;
+  for (const [preview, expected] of [
+    ["yes", "canvas"],
+    ["no", "fallback"],
+  ]) {
+    const app = discoverSource(source, path.resolve("rsbuild.config.ts"), { PREVIEW: preview });
+    assert.equal(app?.remotes[0]?.name, expected);
+  }
+});
+
 test("optional and wrapped member calls never publish obsolete remote links", () => {
   for (const call of [
     "links.refresh?.();",

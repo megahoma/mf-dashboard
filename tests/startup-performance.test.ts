@@ -159,7 +159,6 @@ test("first startup shares one workspace scan and config parse across seeding, d
   assert.deepEqual(values.get("mf-dashboard.apps"), {
     discovered: {
       path: "discovered",
-      scripts: { start: "dev" },
     },
   });
   writeApp("new-config");
@@ -225,6 +224,48 @@ test("prepared discovery invalidates changed settings and config before reuse", 
   current.ignorePaths = ["unrelated"];
   await session.discover();
   assert.equal(scans, 4);
+});
+
+test("initial discovery uses the configured start script and new entries inherit it", async (t) => {
+  const { root } = fixture(t);
+  const folder = path.join(root, "fixture-app");
+  fs.mkdirSync(path.join(folder, "config"), { recursive: true });
+  fs.writeFileSync(
+    path.join(folder, "package.json"),
+    '{"scripts":{"serve":"rsbuild dev --config config/local.ts"}}',
+  );
+  fs.writeFileSync(
+    path.join(folder, "config", "local.ts"),
+    'export default { server: { port: 4651 }, plugins: [pluginModuleFederation({ name: "fixture-app" })] };',
+  );
+  const current: DashboardSettings = {
+    apps: undefined,
+    envMode: "development",
+    startScript: "dev",
+    ignorePaths: [],
+    extraManifestUrls: [],
+    structure: "tree",
+  };
+  const session = new DashboardSession(
+    {
+      readSettings: () => current,
+      writeApps(apps) {
+        current.apps = apps;
+      },
+      scan: scanWorkspace,
+      loadKnown: loadKnownApps,
+      roots: () => [{ name: "workspace", path: root }],
+      async probe() {},
+    },
+    createProbeBook(),
+  );
+  assert.deepEqual(session.prepareDiscovery(), []);
+  current.startScript = "serve";
+  await session.discover();
+  assert.deepEqual(current.apps, { "fixture-app": { path: "fixture-app" } });
+  assert.equal(session.loaded[0]?.port, 4651);
+  await session.refresh();
+  assert.equal(session.loaded[0]?.port, 4651);
 });
 
 test("an imported intermediate changed while default settings are written invalidates startup discovery", async (t) => {

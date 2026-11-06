@@ -98,7 +98,7 @@ export async function rebuildTypes(
       await persist();
     }
     const manifestPath = resolveManifestPath(
-      context.settings["mf-dashboard.apps"]?.[app.name]?.manifestPath,
+      context.settings["mf-dashboard.apps"]?.[app.settingsKey ?? app.name]?.manifestPath,
       app.manifestPath,
     );
     let zipHash: string;
@@ -120,7 +120,8 @@ export async function rebuildTypes(
           appDir: app.folder,
           name: app.name,
           configFile: app.buildConfigFile ?? app.configFile,
-          envMode: context.settings.envMode,
+          envMode: app.launchEnvironment?.envMode ?? context.settings.envMode,
+          env: app.launchEnvironment?.env,
           port: app.port,
           manifestPath,
         })

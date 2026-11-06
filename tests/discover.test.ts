@@ -5,11 +5,110 @@ import path from "node:path";
 import test from "node:test";
 import { discoverSource, scanWorkspace } from "../src/entities/microfrontend/index.ts";
 
+test("discovery ignores a symlink or directory in place of a mode env file", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-env-input-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const alpha = path.join(root, "alpha");
+  const beta = path.join(root, "beta");
+  for (const folder of [alpha, beta]) {
+    fs.mkdirSync(folder);
+    fs.writeFileSync(
+      path.join(folder, "rsbuild.config.ts"),
+      `export default {
+      name: '${path.basename(folder)}', server: { port: process.env.LISTENER ?? 4620 },
+    };`,
+    );
+  }
+  const outside = path.join(root, "unrelated.env");
+  fs.writeFileSync(outside, "LISTENER=4699\n");
+  fs.symlinkSync(outside, path.join(alpha, ".env.development.local"), "file");
+  fs.mkdirSync(path.join(beta, ".env.development.local"));
+  const apps = scanWorkspace(root);
+  assert.deepEqual(
+    Object.values(apps).map(({ port }) => port),
+    [4620, 4620],
+  );
+});
+
+test("an unknown or mutated port cannot come from an unrelated bundler config", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-port-origin-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(
+    path.join(root, "rsbuild.config.ts"),
+    `
+    const listener = {port: 4621}; Object.assign?.(listener, {port: 4622});
+    export default { name: 'palette', server: listener };
+  `,
+  );
+  fs.writeFileSync(path.join(root, "vite.config.ts"), "export default { server: { port: 4699 } };");
+  assert.equal(scanWorkspace(root).palette.port, null);
+});
+
+test("two packages can select the same config with separate launch contexts", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-config-context-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const nested = path.join(root, "nested");
+  fs.mkdirSync(nested);
+  fs.writeFileSync(
+    path.join(root, "package.json"),
+    '{"scripts":{"dev":"cross-env FEDERATION_ID=grove rsbuild dev --config nested/vite.config.ts"}}',
+  );
+  fs.writeFileSync(
+    path.join(nested, "package.json"),
+    '{"scripts":{"dev":"cross-env FEDERATION_ID=seed vite"}}',
+  );
+  fs.writeFileSync(
+    path.join(nested, "vite.config.ts"),
+    `export default defineConfig(({ command }) => ({
+    server: {port: command === 'dev' ? 4617 : 4618},
+    plugins: [pluginModuleFederation({name:process.env.FEDERATION_ID})],
+  }));`,
+  );
+  const apps = scanWorkspace(root);
+  assert.deepEqual(
+    Object.values(apps).map(({ name, folder, port }) => [name, folder, port]),
+    [
+      ["grove", root, 4617],
+      ["seed", nested, 4618],
+    ],
+  );
+});
+
+test("repeated scalar references stop at the evaluation budget", () => {
+  const aliases = Array.from(
+    { length: 24 },
+    (_, index) => `const item${index + 1} = item${index} + item${index};`,
+  ).join("\n");
+  const source = `const item0 = 1; ${aliases}
+    export default { name: 'loom', server: { port: item24 === 16777216 ? 4620 : 4621 } };`;
+  const app = discoverSource(source, "/example/module-federation.config.ts", {});
+  assert.equal(app?.name, "loom");
+  assert.equal(app.port, null);
+});
+
 test("invalid server ports are ignored", () => {
   for (const port of [0, 65536, 1.5]) {
     const source = `export default { server: { port: ${port} }, plugins: [pluginModuleFederation({ name: "app" })] };`;
     assert.equal(discoverSource(source, "/widget-1/rsbuild.config.ts", {})?.port, null);
   }
+});
+
+test("static ports handle guarded fallback, tuple bindings, spreads and shadowed conversions", () => {
+  const source = `
+    const [missing, primary = 4617] = [null];
+    const endpoints = {};
+    function choose(value: number) { if (value === 4617) return value; return 4618; }
+    const inputs = [primary];
+    export default defineConfig(({ command }) => ({
+      server: { port: command === 'serve' ? (missing?.target.port ?? endpoints.port?.() ?? choose(...inputs)) : 4619 },
+      plugins: [pluginModuleFederation({ name: 'paper' })],
+    }));
+  `;
+  assert.equal(discoverSource(source, "/example/vite.config.ts", {})?.port, 4617);
+  const shadowed = `const Number = () => 4621; export default { name: 'paper', server: {port: Number('4617')} };`;
+  assert.equal(discoverSource(shadowed, "/example/module-federation.config.ts", {})?.port, 4621);
+  const invalid = `export default { name: 'paper', server: {port: Number('4617x')} };`;
+  assert.equal(discoverSource(invalid, "/example/module-federation.config.ts", {})?.port, null);
 });
 
 test("devServer.port is read and explicit false dts stays off", () => {
@@ -112,6 +211,25 @@ test("discovery preserves comments, regex, types, env templates and missing valu
   assert.deepEqual(found?.remotes, [
     { alias: "widget", name: "widget", url: "http://localhost:4200/mf-manifest.json" },
     { alias: "unknown", name: "unknown", url: null },
+  ]);
+});
+
+test("direct remote URLs keep at signs in the path and query", () => {
+  const url = "http://localhost:4620/artifacts/@preview/mf-manifest.json?rev=a@b";
+  const source = `export default {
+    name: "sketchbook",
+    remotes: {
+      icons: " ${url} ",
+      shapes: { entry: "vector@${url}" },
+      brushes: { external: "${url}" },
+      palettes: \`http://localhost:4620/artifacts/@preview/\${process.env.RELEASE_SEGMENT}.json\`,
+    },
+  };`;
+  assert.deepEqual(discoverSource(source, "/example/module-federation.config.ts", {})?.remotes, [
+    { alias: "icons", name: "icons", url },
+    { alias: "shapes", name: "vector", url },
+    { alias: "brushes", name: "brushes", url },
+    { alias: "palettes", name: "palettes", url: null },
   ]);
 });
 

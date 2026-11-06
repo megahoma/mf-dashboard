@@ -226,14 +226,18 @@ test("a foreign host on the same port is still otherHost", () => {
   assert.equal(classify({ ...base, url: "http://example.com:4100/mf-manifest.json" }), "otherHost");
 });
 
-test("an undeclared link port is not silent", () => {
+test("an unknown local port is distinct from a stopped app or a mismatched port", () => {
   const input = {
     ...base,
     port: null,
     portOpen: false,
     url: "http://127.0.0.1:4100/mf-manifest.json",
   };
-  assert.equal(classify(input), "otherPort");
+  assert.equal(classify(input), "unknownPort");
+  const app = rowModel({ ...input, role: "app", url: null });
+  assert.equal(app.kind, "unknownPort");
+  assert.equal(app.description, "port unknown");
+  assert.equal(app.tooltip, "port unknown");
 });
 
 test("implicit ports 80 and 443 are not written into the gray line", () => {

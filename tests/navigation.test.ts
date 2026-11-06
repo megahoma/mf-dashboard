@@ -23,6 +23,130 @@ registerHooks({
 const { ManifestDocuments } = await import("../src/features/open-manifest/documents.ts");
 const { MfDashboardProvider } = await import("../src/widgets/mf-dashboard-tree/provider.ts");
 
+test("Start uses the same saved app entry as discovery after a federation rename", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-renamed-launch-"));
+  fs.writeFileSync(
+    path.join(root, "package.json"),
+    JSON.stringify({ scripts: { dev: "rsbuild dev", local: "rsbuild dev --config local.ts" } }),
+  );
+  fs.writeFileSync(path.join(root, "local.ts"), 'export default { name: "renamed" };');
+  Object.assign(vscode.workspace, {
+    workspaceFolders: [{ name: "sample", uri: vscode.Uri.file(root) }],
+  });
+  t.mock.method(vscode.workspace, "getConfiguration", () => ({
+    inspect: () => ({
+      workspaceValue: { retired: { path: ".", scripts: { start: "local" } } },
+    }),
+    get: () => undefined,
+  }));
+  const commands: string[] = [];
+  Object.assign(vscode.window, {
+    createTerminal: () => ({ sendText: (command: string) => commands.push(command), show() {} }),
+  });
+  const provider = new MfDashboardProvider(() => terms);
+  t.after(() => {
+    provider.dispose();
+    Reflect.deleteProperty(vscode.window, "createTerminal");
+    Reflect.deleteProperty(vscode.workspace, "workspaceFolders");
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  await provider.refresh();
+  const [row] = provider.session.nodes();
+  assert.equal(row?.name, "renamed");
+  await provider.start(row);
+  assert.deepEqual(commands, ["npm run local"]);
+});
+
+test("saving the selected profile or start script refreshes the next rebuild's environment", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-profile-save-"));
+  const pkg = path.join(root, "package.json");
+  const profile = path.join(root, ".env.review.local");
+  fs.writeFileSync(pkg, '{"scripts":{"dev":"rsbuild dev --env-mode review"}}');
+  fs.writeFileSync(profile, "FIXTURE_VARIANT=initial\n");
+  fs.writeFileSync(
+    path.join(root, "rsbuild.config.ts"),
+    'export default { plugins: [pluginModuleFederation({ name: "fixture", dts: { generateTypes: true, consumeTypes: false } })] };',
+  );
+  Object.assign(vscode.workspace, {
+    workspaceFolders: [{ name: "sample", uri: vscode.Uri.file(root) }],
+  });
+  t.mock.method(vscode.workspace, "getConfiguration", () => ({
+    async update() {},
+    inspect: () => ({ workspaceValue: { fixture: { path: "." } } }),
+    get: () => undefined,
+  }));
+  const provider = new MfDashboardProvider(() => terms);
+  t.after(() => {
+    provider.dispose();
+    Reflect.deleteProperty(vscode.workspace, "workspaceFolders");
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  await provider.refresh();
+  const environment = () => provider.session.loaded[0]?.launchEnvironment;
+  assert.deepEqual(environment(), { envMode: "review", env: { FIXTURE_VARIANT: "initial" } });
+
+  fs.writeFileSync(profile, "FIXTURE_VARIANT=updated-profile\n");
+  await provider.fileSaved(profile);
+  assert.equal(environment()?.env.FIXTURE_VARIANT, "updated-profile");
+
+  fs.writeFileSync(
+    pkg,
+    '{"scripts":{"dev":"cross-env FIXTURE_VARIANT=script rsbuild dev --env-mode review"}}',
+  );
+  await provider.fileSaved(pkg);
+  assert.equal(environment()?.env.FIXTURE_VARIANT, "script");
+});
+
+test("saving a nested launch config or its JSON import refreshes the first discovery snapshot", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-config-save-"));
+  const tools = path.join(root, "tools");
+  const config = path.join(tools, "launch.ts");
+  const data = path.join(tools, "listener.json");
+  const options = path.join(tools, "federation.ts");
+  fs.mkdirSync(tools);
+  fs.writeFileSync(
+    path.join(root, "package.json"),
+    '{"scripts":{"dev":"rsbuild dev -c tools/launch.ts"}}',
+  );
+  fs.writeFileSync(data, '{"port":4675}');
+  fs.writeFileSync(options, 'export const options = { name: "fixture", dts: false };');
+  const source = `import { options } from './federation';
+    import listener from './listener.json' with { type: 'json' };
+    export default { server: { port: listener.port }, plugins: [pluginModuleFederation(options)] };`;
+  fs.writeFileSync(config, source);
+  Object.assign(vscode.workspace, {
+    workspaceFolders: [{ name: "sample", uri: vscode.Uri.file(root) }],
+  });
+  let apps: unknown;
+  t.mock.method(vscode.workspace, "getConfiguration", () => ({
+    async update(_key: string, value: unknown) {
+      apps = value;
+    },
+    inspect: () => ({ workspaceValue: apps }),
+    get: () => undefined,
+  }));
+  const provider = new MfDashboardProvider(() => terms);
+  t.after(() => {
+    provider.dispose();
+    Reflect.deleteProperty(vscode.workspace, "workspaceFolders");
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  await provider.discover();
+  const loaded = () => provider.session.loaded[0];
+  assert.equal(loaded()?.configFile, options);
+  assert.equal(loaded()?.port, 4675);
+  fs.writeFileSync(data, '{"port": 4676}\n');
+  await provider.fileSaved(data);
+  assert.equal(loaded()?.port, 4676);
+
+  fs.writeFileSync(config, source.replace("port: listener.port", "port: listener.port + 1"));
+  await provider.fileSaved(config);
+  assert.equal(loaded()?.port, 4677);
+});
+
 test("refresh and Fetch confirm published types and keep offline type changes visible", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-watch-refresh-"));
   const consumer = path.join(root, "workshop");

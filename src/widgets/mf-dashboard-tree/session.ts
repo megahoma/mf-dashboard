@@ -28,6 +28,7 @@ export type { DashboardNode, DashboardStructure } from "./presentation.ts";
 
 export interface AppSetting {
   path: string;
+  configFile?: string;
   workspaceFolder?: string;
   manifestPath?: string;
   typesZipPath?: string;
@@ -42,6 +43,7 @@ export interface WorkspaceRoot {
 export interface DashboardSettings {
   apps: Record<string, AppSetting> | undefined;
   envMode: string;
+  startScript?: string;
   ignorePaths: readonly string[];
   extraManifestUrls: readonly string[];
   structure: DashboardStructure;
@@ -58,6 +60,7 @@ export interface DashboardPorts {
     ignorePaths: readonly string[],
     cache?: AppParseCache,
     log?: LogContext,
+    startScript?: string,
   ): LocalApp[];
   probe(book: ProbeBook, input: ProbeCycleInput): Promise<void>;
   roots(): WorkspaceRoot[];
@@ -74,20 +77,30 @@ export function endRefetch(pending: Set<string>, linkId: string): void {
 }
 
 export function savedFileKind(
-  app: Pick<LocalApp, "folder" | "configFile" | "generateTypes">,
+  app: Pick<
+    LocalApp,
+    "folder" | "configFile" | "configDependencies" | "generateTypes" | "launchEnvironment"
+  >,
   file: string,
   envMode: string,
 ): "config" | "source" | null {
   const folder = path.resolve(app.folder);
   const full = path.resolve(file);
+  if (app.configDependencies?.includes(full)) return "config";
   const relative = path.relative(folder, full);
   if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))
     return null;
   if (full === path.resolve(app.configFile)) return "config";
   if (path.dirname(full) === folder) {
     const name = path.basename(full);
+    if (name === "package.json") return "config";
     if (/^(module-federation|webpack|rspack|rsbuild|vite)\.config\./.test(name)) return "config";
-    if (name === `.env.${envMode}` || name === `.env.${envMode}.local`) return "config";
+    if (
+      [envMode, app.launchEnvironment?.envMode].some(
+        (mode) => mode !== undefined && (name === `.env.${mode}` || name === `.env.${mode}.local`),
+      )
+    )
+      return "config";
   }
   return app.generateTypes && /\.tsx?$/.test(full) && !full.endsWith(".d.ts") ? "source" : null;
 }
@@ -200,36 +213,72 @@ export function loadKnownApps(
   _ignorePaths: readonly string[] = [],
   cache: AppParseCache = createAppParseCache(),
   log: LogContext = noLog,
+  startScript = "dev",
 ): LocalApp[] {
-  const loaded: LocalApp[] = [];
+  return [...resolveKnownApps(roots, apps, envMode, cache, log, undefined, startScript).values()];
+}
+
+function appParseKey(
+  root: string,
+  folder: string,
+  envMode: string,
+  name: string,
+  script: string,
+  configFile?: string,
+): string {
+  return JSON.stringify([root, folder, envMode, name, script, configFile]);
+}
+
+export function resolveKnownApps(
+  roots: readonly WorkspaceRoot[],
+  apps: Record<string, AppSetting>,
+  envMode: string,
+  cache: AppParseCache = createAppParseCache(),
+  log: LogContext = noLog,
+  onError?: (name: string, error: unknown) => void,
+  startScript = "dev",
+): Map<string, LocalApp> {
+  const entries: { name: string; app: LocalApp; identity: string }[] = [];
+  const matches = new Map<string, number>();
   for (const [name, setting] of Object.entries(apps)) {
     if (!setting || typeof setting.path !== "string" || setting.path.trim() === "") continue;
     const candidates = setting.workspaceFolder
       ? roots.filter((root) => root.name === setting.workspaceFolder)
       : roots;
-    let fallback: LocalApp | undefined;
-    let matched = false;
-    for (const root of candidates) {
-      const abs = confinedAppPath(root.path, setting.path);
-      if (!abs) {
-        log.event("warn", "config.path.invalid", { app: name });
-        continue;
+    const script = typeof setting.scripts?.start === "string" ? setting.scripts.start : startScript;
+    const configFile = typeof setting.configFile === "string" ? setting.configFile : undefined;
+    try {
+      for (const root of candidates) {
+        const confined = confinedAppPath(root.path, setting.path);
+        if (!confined) {
+          log.event("warn", "config.path.invalid", { app: name });
+          continue;
+        }
+        const { absolute, canonical } = confined;
+        const key = appParseKey(root.path, absolute, envMode, name, script, configFile);
+        const cached = cache.lookup(key, absolute, envMode);
+        const dependencies = new Set<string>();
+        const parsed =
+          cached ?? readAppFolder(absolute, envMode, name, dependencies, log, script, configFile);
+        if (!parsed) continue;
+        const app = cached ?? { ...parsed, configDependencies: [...dependencies] };
+        if (!cached) cache.store(key, absolute, envMode, app, [...dependencies]);
+        if (app.name !== name && candidates.length !== 1) continue;
+        const identity = `${canonical}\0${app.name}`;
+        matches.set(identity, (matches.get(identity) ?? 0) + 1);
+        const resolved = withManifestPathOverride(app, setting.manifestPath);
+        resolved.settingsKey = name;
+        entries.push({ name, app: resolved, identity });
+        break;
       }
-      const key = `${root.path}\0${abs}\0${envMode}\0${name}`;
-      const cached = cache.lookup(key, abs, envMode);
-      const dependencies = new Set<string>();
-      const parsed = cached ?? readAppFolder(abs, envMode, name, dependencies, log);
-      if (!parsed) continue;
-      const match = cached ?? { ...parsed, configDependencies: [...dependencies] };
-      if (!cached) cache.store(key, abs, envMode, match, [...dependencies]);
-      fallback ??= match;
-      if (match.name !== name) continue;
-      loaded.push(withManifestPathOverride(match, setting.manifestPath));
-      matched = true;
-      break;
+    } catch (error) {
+      if (!onError) throw error;
+      onError(name, error);
     }
-    if (!matched && fallback && candidates.length === 1)
-      loaded.push(withManifestPathOverride(fallback, setting.manifestPath));
+  }
+  const loaded = new Map<string, LocalApp>();
+  for (const { name, app, identity } of entries) {
+    if (name === app.name || matches.get(identity) === 1) loaded.set(name, app);
   }
   return loaded;
 }
@@ -244,17 +293,20 @@ function pathInsideRoot(root: string, target: string): boolean {
   return rel === "" || (!rel.startsWith(`..${path.sep}`) && rel !== ".." && !path.isAbsolute(rel));
 }
 
-function confinedAppPath(root: string, settingPath: string): string | null {
+function confinedAppPath(
+  root: string,
+  settingPath: string,
+): { absolute: string; canonical: string } | null {
   const base = path.resolve(root);
-  const abs = path.resolve(base, settingPath);
-  if (!pathInsideRoot(base, abs)) return null;
+  const absolute = path.resolve(base, settingPath);
+  if (!pathInsideRoot(base, absolute)) return null;
   try {
-    if (!fs.existsSync(abs)) return abs;
-    if (!pathInsideRoot(fs.realpathSync(base), fs.realpathSync(abs))) return null;
+    if (!fs.existsSync(absolute)) return { absolute, canonical: absolute };
+    const canonical = fs.realpathSync.native(absolute);
+    return pathInsideRoot(fs.realpathSync.native(base), canonical) ? { absolute, canonical } : null;
   } catch {
     return null;
   }
-  return abs;
 }
 
 function workspaceRelative(root: string, folder: string): string {
@@ -371,6 +423,7 @@ export class DashboardSession {
               current.ignorePaths,
               cache,
               loadLog,
+              current.startScript,
             );
       log.event("debug", "config.loaded", {
         configured: Object.keys(current.apps ?? {}).length,
@@ -437,11 +490,13 @@ export class DashboardSession {
     this.preparedDiscovery = undefined;
     const current = this.ports.readSettings();
     const roots = this.ports.roots();
+    const startScript = current.startScript ?? "dev";
     const scans = roots.map((root) => {
       const dependencies = new Set<string>();
       const apps = this.ports.scan(root.path, {
         envMode: current.envMode,
         ignorePaths: current.ignorePaths,
+        startScript,
         dependencies,
         log,
       });
@@ -455,7 +510,7 @@ export class DashboardSession {
     const parsed: DiscoverySnapshot["parsed"] = new Map();
     for (const { root, apps } of scans) {
       for (const [name, app] of Object.entries(apps)) {
-        const key = `${root.path}\0${app.folder}\0${current.envMode}\0${name}`;
+        const key = appParseKey(root.path, app.folder, current.envMode, name, startScript);
         parsed.set(key, {
           app,
           stamp: appConfigStamp(app.folder, current.envMode, app.configFile),
@@ -463,7 +518,7 @@ export class DashboardSession {
       }
     }
     this.preparedDiscovery = {
-      key: JSON.stringify([roots, current.envMode, current.ignorePaths]),
+      key: JSON.stringify([roots, current.envMode, current.ignorePaths, startScript]),
       scans,
       parsed,
     };
@@ -482,7 +537,12 @@ export class DashboardSession {
         failureFields = { reason: "duplicate-workspace-folder-name" };
         throw new Error("workspace folder names must be unique");
       }
-      const key = JSON.stringify([roots, current.envMode, current.ignorePaths]);
+      const key = JSON.stringify([
+        roots,
+        current.envMode,
+        current.ignorePaths,
+        current.startScript ?? "dev",
+      ]);
       if (
         this.preparedDiscovery?.key !== key ||
         this.preparedDiscovery.scans.some(
@@ -506,7 +566,6 @@ export class DashboardSession {
             foundApps[name] = {
               path: workspaceRelative(root.path, foundApp.folder),
               ...(roots.length > 1 ? { workspaceFolder: root.name } : {}),
-              scripts: { start: "dev" },
             };
           }
         }

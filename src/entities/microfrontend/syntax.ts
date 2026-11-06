@@ -88,6 +88,23 @@ export function hasMemberWrites(binding: Binding, handled?: ReadonlySet<t.Node>)
           (parent?.isUnaryExpression({ operator: "delete" }) && target.key === "argument"))
       )
         if (!handled?.has(parent.node)) return true;
+      if (
+        (parent?.isCallExpression() || parent?.isOptionalCallExpression()) &&
+        target.listKey === "arguments" &&
+        target.key === 0
+      ) {
+        const callee = parent.get("callee") as AstPath;
+        if (
+          !parent.scope.getBinding("Object") &&
+          [
+            "Object.assign",
+            "Object.defineProperty",
+            "Object.defineProperties",
+            "Object.setPrototypeOf",
+          ].some((method) => callee.matchesPattern(method))
+        )
+          return true;
+      }
       if (parent?.isVariableDeclarator() && target.key === "init") {
         for (const name of Object.keys(parent.get("id").getBindingIdentifiers())) {
           const next = parent.scope.getBinding(name);
@@ -140,6 +157,7 @@ export function parseProgram(
         program!.exports.set("default", value);
       },
       ExportNamedDeclaration(p) {
+        if (p.node.exportKind === "type") return;
         const declaration = p.get("declaration");
         if (declaration.isVariableDeclaration()) {
           for (const variable of declaration.get("declarations")) {
@@ -150,7 +168,7 @@ export function parseProgram(
           program!.exports.set(declaration.node.id.name, declaration.get("id") as AstPath);
         }
         for (const specifier of p.get("specifiers")) {
-          if (!specifier.isExportSpecifier()) continue;
+          if (!specifier.isExportSpecifier() || specifier.node.exportKind === "type") continue;
           const exported = specifier.node.exported;
           const name = exported.type === "Identifier" ? exported.name : exported.value;
           const local = specifier.get("local");
@@ -163,7 +181,7 @@ export function parseProgram(
         }
       },
       ExportAllDeclaration(p) {
-        program!.stars.push(p.node.source.value);
+        if (p.node.exportKind !== "type") program!.stars.push(p.node.source.value);
       },
       VariableDeclarator(p) {
         if (!commonJsRoot(p, p.get("init") as AstPath)) return;

@@ -1,6 +1,7 @@
 export const icons = {
   listen: "pass",
   silent: "error",
+  unknownPort: "question",
   otherHost: "warning",
   otherPort: "warning",
   stale: "clock",

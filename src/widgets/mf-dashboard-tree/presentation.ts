@@ -259,15 +259,16 @@ function linkNode(
   const linkProbe = view.book.links.get(linkProbeId(link));
   const status = linkStatusInput(view, parent, remote, byName);
   const producer = byName.get(remote.name);
-  const input: StatusInput & { folder?: string } =
-    producer !== undefined && producer.port !== null
-      ? { ...status, folder: producer.folder }
-      : status;
+  const input = producer ? { ...status, folder: producer.folder } : status;
   const linkId = linkRowId(link);
   const row = model(view, input, view.pending.has(linkId), linkId, remote.name, {
     exposes: linkProbe?.exposes ?? [],
     shared: linkProbe?.shared ?? [],
   });
+  if (producer?.port === null) {
+    row.description += ` · ${view.terms.unknownPort}`;
+    row.tooltip += `\n${view.terms.unknownPort}`;
+  }
   const checkedAt = view.typesAutoCheck === false ? view.typesCheckedAt?.(link) : null;
   if (checkedAt != null)
     row.tooltip = `${row.tooltip}\n${view.terms.typesCheckedAt}: ${new Date(checkedAt).toLocaleString()}`;

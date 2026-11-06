@@ -45,6 +45,7 @@ import {
 import {
   linksOf,
   loadKnownApps,
+  resolveKnownApps,
   savedFileKind,
   DashboardSession,
   type AppSetting,
@@ -568,7 +569,7 @@ export class MfDashboardProvider
         "mf-dashboard.scripts.start": settings.startScript,
         "mf-dashboard.apps": settings.apps,
       },
-      app.name,
+      app.settingsKey ?? app.name,
     );
     const cwd = app.folder;
     const invocation = startInvocation({
@@ -678,27 +679,31 @@ export class MfDashboardProvider
       const apps: LocalApp[] = [];
       const skipped: RebuildAllReport["skipped"] = [];
       const zipPaths = new Map<string, string>();
-      for (const [name, setting] of Object.entries(settings.apps ?? {})) {
-        try {
-          const [app] = loadKnownApps(
-            roots,
-            { [name]: setting },
-            settings.envMode,
-            settings.ignorePaths,
-            undefined,
-            log,
-          );
-          if (!app) {
-            skipped.push({ app: name, reason: "Could not read the microfrontend config" });
-            continue;
-          }
-          apps.push(app);
-          if (typeof setting.typesZipPath === "string")
-            zipPaths.set(app.name, setting.typesZipPath);
-        } catch (error) {
-          skipped.push({ app: name, reason: errorText(error) });
+      const configured = settings.apps ?? {};
+      const configErrors = new Map<string, string>();
+      const resolved = resolveKnownApps(
+        roots,
+        configured,
+        settings.envMode,
+        undefined,
+        log,
+        (name, error) => {
+          configErrors.set(name, errorText(error));
           log.event("warn", "types.rebuild.all.config-failed", { app: name, ...safeError(error) });
+        },
+        settings.startScript,
+      );
+      for (const [name, setting] of Object.entries(configured)) {
+        const app = resolved.get(name);
+        if (!app) {
+          skipped.push({
+            app: name,
+            reason: configErrors.get(name) ?? "Could not read the microfrontend config",
+          });
+          continue;
         }
+        apps.push(app);
+        if (typeof setting.typesZipPath === "string") zipPaths.set(app.name, setting.typesZipPath);
       }
       log.event("info", "types.rebuild.all.started", { apps: apps.length });
       const report = await rebuildAllTypes({
