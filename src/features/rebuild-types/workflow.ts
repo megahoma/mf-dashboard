@@ -81,6 +81,7 @@ export async function rebuildTypes(
           context.refetchCommand(),
           undefined,
           log,
+          apps,
         );
         const url = remote.url ?? manifestUrl;
         confirmations.saveInstall(

@@ -536,6 +536,7 @@ export class MfDashboardProvider
         settings.refetchCommand,
         undefined,
         log,
+        this.session.loaded,
       );
       this.confirmations.saveInstall(link, installed.filesFingerprint, installed.zipHash, true);
       await this.persistConfirmations();

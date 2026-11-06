@@ -1,13 +1,14 @@
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import fs from "node:fs";
-import { mkdtemp, mkdir, readFile, rename, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { filesFingerprint } from "../../shared/fingerprint.ts";
 import { readLimitedBody } from "../../shared/http-body.ts";
 import { createKeyedLock } from "../../shared/queue.ts";
 import { DiagnosticError } from "../../shared/diagnostic-error.ts";
+import { resolveTypesPath, typesPathEscape } from "./destination.ts";
 import { readInstalledEvidenceAsync, runEvidenceTask } from "./evidence-worker-client.mts";
 
 const destinationLock = createKeyedLock();
@@ -43,6 +44,7 @@ export interface InstallTypesInput {
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
   expectedZipHash?: string;
+  beforeReplace?: () => void;
 }
 
 export interface InstallTypesResult {
@@ -55,19 +57,21 @@ export interface ArchiveComparison extends InstallTypesResult {
 }
 
 // Download, check, then swap. The live types directory is not removed before the archive checks out.
-export function installTypesArchive(input: InstallTypesInput): Promise<InstallTypesResult> {
+export async function installTypesArchive(input: InstallTypesInput): Promise<InstallTypesResult> {
+  const target = installTarget(input);
   return destinationLock(path.resolve(input.destination), async () =>
-    writeTypesArchive(input.destination, await loadZip(input)),
+    writeTypesArchive(target, await loadZip(input), input.beforeReplace),
   );
 }
 
-export function installLocalTypesArchive(
-  input: Pick<InstallTypesInput, "destination" | "appDir"> & {
+export async function installLocalTypesArchive(
+  input: Pick<InstallTypesInput, "destination" | "appDir" | "beforeReplace"> & {
     zipPath: string;
     expectedZipHash: string;
     confirmedFilesFingerprint?: string;
   },
 ): Promise<InstallTypesResult & { changed: boolean }> {
+  const target = installTarget(input);
   return destinationLock(path.resolve(input.destination), async () => {
     const bytes = await readFile(input.zipPath);
     const zipHash = sha256(bytes);
@@ -76,47 +80,105 @@ export function installLocalTypesArchive(
         stage: "archive",
         reason: "fingerprint-mismatch",
       });
+    target.verify();
     const { filesFingerprint: fingerprint } = await readInstalledEvidenceAsync(
-      input.destination,
+      target.path,
       undefined,
       true,
     );
     const hasFiles = fingerprint && fingerprint !== filesFingerprint([]);
-    if (hasFiles && fingerprint === input.confirmedFilesFingerprint)
+    if (hasFiles && fingerprint === input.confirmedFilesFingerprint) {
+      target.verify();
       return { zipHash, filesFingerprint: fingerprint, changed: false };
+    }
     const archive = checkedArchive(bytes, input.appDir);
-    if (hasFiles && fingerprint === (await fingerprintArchive(archive)))
+    if (hasFiles && fingerprint === (await fingerprintArchive(archive))) {
+      target.verify();
       return { zipHash, filesFingerprint: fingerprint, changed: false };
-    const installed = await writeTypesArchive(input.destination, { archive, zipHash });
+    }
+    const installed = writeTypesArchive(target, { archive, zipHash }, input.beforeReplace);
     return { ...installed, changed: true };
   });
 }
 
-async function writeTypesArchive(
-  target: string,
+function installTarget({ appDir, destination }: Pick<InstallTypesInput, "appDir" | "destination">) {
+  const consumer = fs.realpathSync.native(appDir);
+  const absolute = path.resolve(destination);
+  const parent = path.dirname(absolute);
+  const resolveParent = () => resolveTypesPath(appDir, parent);
+  const directory = resolveParent();
+  const changed = () => typesPathEscape("types destination changed during installation");
+  const directoryId = (folder: string) => {
+    const stat = fs.statSync(folder, { bigint: true, throwIfNoEntry: false });
+    return stat ? `${stat.dev}:${stat.ino}` : undefined;
+  };
+  let original = directoryId(directory);
+  let anchor = directory;
+  let anchorId = original;
+  while (anchorId === undefined) {
+    if (path.relative(consumer, anchor) === "") throw changed();
+    anchor = path.dirname(anchor);
+    anchorId = directoryId(anchor);
+  }
+  return {
+    path: path.join(directory, path.basename(absolute)),
+    verify() {
+      if (
+        fs.realpathSync.native(appDir) !== consumer ||
+        resolveParent() !== directory ||
+        directoryId(anchor) !== anchorId
+      )
+        throw changed();
+      const current = anchor === directory ? anchorId : directoryId(directory);
+      if (original !== undefined && current !== original) throw changed();
+      original ??= current;
+    },
+  };
+}
+
+function writeTypesArchive(
+  target: ReturnType<typeof installTarget>,
   loaded: { archive: ZipArchive; zipHash: string },
-): Promise<InstallTypesResult> {
-  const destination = path.resolve(target);
-  await mkdir(path.dirname(destination), { recursive: true });
-  const staging = await mkdtemp(path.join(path.dirname(destination), ".install-"));
+  beforeReplace?: () => void,
+): InstallTypesResult {
+  const destination = target.path;
+  const parent = path.dirname(destination);
+  // Keep validation and filesystem changes together after the asynchronous ZIP work.
+  target.verify();
+  fs.mkdirSync(parent, { recursive: true });
+  target.verify();
+  const staging = fs.mkdtempSync(path.join(parent, ".install-"));
   const backup = `${destination}.backup-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   let parked = false;
   try {
     loaded.archive.extractTo(staging);
+    target.verify();
     assertTreeInside(staging);
-    if (fs.existsSync(destination)) {
-      await rename(destination, backup);
+    const fingerprint = filesFingerprint(readTree(staging));
+    beforeReplace?.();
+    target.verify();
+    if (fs.lstatSync(destination, { throwIfNoEntry: false })) {
+      fs.renameSync(destination, backup);
       parked = true;
     }
-    await rename(staging, destination);
-    if (parked) await rm(backup, { recursive: true, force: true });
+    fs.renameSync(staging, destination);
+    if (parked) fs.rmSync(backup, { recursive: true, force: true });
+    return { zipHash: loaded.zipHash, filesFingerprint: fingerprint };
   } catch (error) {
-    await rm(staging, { recursive: true, force: true }).catch(() => undefined);
-    if (parked && !fs.existsSync(destination) && fs.existsSync(backup))
-      await rename(backup, destination);
+    target.verify();
+    if (
+      parked &&
+      !fs.lstatSync(destination, { throwIfNoEntry: false }) &&
+      fs.lstatSync(backup, { throwIfNoEntry: false })
+    )
+      fs.renameSync(backup, destination);
+    try {
+      fs.rmSync(staging, { recursive: true, force: true });
+    } catch {
+      // Keep the installation error if staging cleanup fails.
+    }
     throw unzipError(error);
   }
-  return { zipHash: loaded.zipHash, filesFingerprint: filesFingerprint(readTree(destination)) };
 }
 
 // A custom command is not trusted: compare the directory to the zip and do not delete it on failure.

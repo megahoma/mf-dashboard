@@ -3,7 +3,7 @@ import { DiagnosticError } from "../../shared/diagnostic-error.ts";
 import type { LocalApp } from "../../entities/microfrontend/index.ts";
 import { runShell } from "../../shared/shell.ts";
 import { manifestZipUrl } from "../rebuild-types/zip-url.ts";
-import { dependencyRefetchCommand, refetchInstalled } from "./refetch.ts";
+import { dependencyRefetchCommand, dependencyTypesTarget, refetchInstalled } from "./refetch.ts";
 
 export async function installRemoteTypes(
   consumer: LocalApp,
@@ -12,6 +12,7 @@ export async function installRemoteTypes(
   command: string,
   operations = { manifestZipUrl, refetchInstalled, runShell },
   log: LogContext = noLog,
+  apps: readonly LocalApp[] = [consumer],
 ) {
   const started = Date.now();
   log.event("debug", "types.install.started", {
@@ -45,7 +46,8 @@ export async function installRemoteTypes(
       remoteAlias: remote.alias,
       typesFolder: consumer.typesFolder,
       url: zipUrl,
-      command: dependencyRefetchCommand(command, { ...consumer, alias: remote.alias }),
+      command: dependencyRefetchCommand(command, consumer, remote, apps),
+      beforeReplace: () => dependencyTypesTarget(consumer, remote, apps),
       runCommand: async (command, cwd, timeoutMs) => {
         const started = Date.now();
         log.event("debug", "shell.started", { app: consumer.name, kind: "fetch" });
