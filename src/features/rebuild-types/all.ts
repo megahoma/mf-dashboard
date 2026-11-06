@@ -10,7 +10,7 @@ import {
 import { EMPTY_TYPES_FINGERPRINT } from "../../entities/federated-types/freshness.ts";
 import { readModeEnv, type LocalApp, type RemoteLink } from "../../entities/microfrontend/index.ts";
 import { noLog, safeError, type LogContext } from "../../shared/logging.ts";
-import { refetchTarget } from "../refetch-types/index.ts";
+import { dependencyTypesTarget } from "../refetch-types/refetch.ts";
 import { installRemoteTypes } from "../refetch-types/remote.ts";
 import { runRebuildCommand } from "./command.ts";
 import {
@@ -157,7 +157,8 @@ export async function rebuildAllTypes(
           remoteName: remote.name,
           url: remote.url,
         };
-        const destination = refetchTarget(app.folder, remote.alias, app.typesFolder);
+        const resolveTarget = () => dependencyTypesTarget(app, remote, context.apps);
+        const destination = resolveTarget();
         const previous = confirmations.install(link) ?? confirmations.installedAt(link);
         const sameRemote = previous?.remoteName === link.remoteName && previous.url === link.url;
         if (producer !== undefined) {
@@ -167,6 +168,7 @@ export async function rebuildAllTypes(
             expectedZipHash: zip.zipHash,
             destination,
             appDir: app.folder,
+            beforeReplace: resolveTarget,
             confirmedFilesFingerprint:
               sameRemote && previous.zipHash === zip.zipHash
                 ? previous.filesFingerprint
@@ -206,6 +208,7 @@ export async function rebuildAllTypes(
             context.refetchCommand,
             undefined,
             log,
+            context.apps,
           );
           confirmations.saveInstall(link, installed.filesFingerprint, installed.zipHash, true);
           fingerprint = installed.filesFingerprint;

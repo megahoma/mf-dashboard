@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
-import { createRequire } from "node:module";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 import {
   createConfirmationStore,
+  installLocalTypesArchive,
+  installTypesArchive,
   sourceIdentity,
   treeFingerprint,
 } from "../src/entities/federated-types/index.ts";
@@ -27,6 +30,7 @@ import {
   type LocalGenerationInput,
 } from "../src/features/rebuild-types/generate.mts";
 import { installRemoteTypes } from "../src/features/refetch-types/remote.ts";
+import { safeError } from "../src/shared/logging.ts";
 import { loadKnownApps } from "../src/widgets/mf-dashboard-tree/session.ts";
 import { localApp } from "./support/app.ts";
 
@@ -74,6 +78,17 @@ function writeZip(zipPath: string, content: string) {
   fs.mkdirSync(path.dirname(zipPath), { recursive: true });
   fs.writeFileSync(zipPath, bytes);
   return { zipPath, zipHash: createHash("sha256").update(bytes).digest("hex") };
+}
+
+function serveZip(t: TestContext, manifestUrl: string, zipPath: string, beforeZip?: () => void) {
+  const publicPath = new URL(".", manifestUrl).href;
+  t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
+    if (String(input) === manifestUrl)
+      return Response.json({ metaData: { publicPath, types: { zip: "types.zip" } } });
+    assert.equal(String(input), `${publicPath}types.zip`);
+    beforeZip?.();
+    return new Response(fs.readFileSync(zipPath));
+  });
 }
 
 function remote(app: LocalApp, alias = app.name) {
@@ -268,7 +283,8 @@ test("bulk rebuild installs types from a local ZIP through the Rsbuild dev asset
 test("offline workspace rebuild installs dependencies before generation and visits a shared producer once", async (t) => {
   const f = fixture(t);
   const leaf = f.app("leaf", 4501);
-  const middle = f.app("middle", 4502, { consumeTypes: true, remotes: [remote(leaf)] });
+  const leafAlias = "@fixture/leaf";
+  const middle = f.app("middle", 4502, { consumeTypes: true, remotes: [remote(leaf, leafAlias)] });
   const shell = f.app("a-shell", 4503, {
     hasExposes: false,
     consumeTypes: true,
@@ -288,7 +304,7 @@ test("offline workspace rebuild installs dependencies before generation and visi
     generateLocalFederatedTypes: mockGeneration((appDir) => {
       const name = path.basename(appDir);
       calls.push(name);
-      const input = name === "middle" ? fs.readFileSync(typeFile(middle, "leaf"), "utf8") : "";
+      const input = name === "middle" ? fs.readFileSync(typeFile(middle, leafAlias), "utf8") : "";
       const source = fs.readFileSync(path.join(appDir, "index.ts"), "utf8");
       return writeZip(path.join(appDir, "dist", "@mf-types.zip"), `${source}${input}`);
     }),
@@ -503,6 +519,483 @@ test("a staging URL uses external types even when a same-named local producer fa
   const second = await rebuildAllTypes(context, io);
   assert.deepEqual(second.current, ["shell"]);
   assert.deepEqual(requests, [staging]);
+});
+
+test("bulk rebuild fetches scoped remote types into the nested directory before generating", async (t) => {
+  const f = fixture(t);
+  const alias = "@fixture/ui-kit";
+  const origin = "https://assets.example.test/";
+  const manifestUrl = `${origin}mf-manifest.json`;
+  const zipUrl = `${origin}types.zip`;
+  const consumer = f.app("fixture-client", 4502, {
+    consumeTypes: true,
+    remotes: [{ alias, name: "fixture-library", url: manifestUrl }],
+  });
+  const content = 'export declare const version: "fixture";';
+  const archive = writeZip(path.join(consumer.folder, "fixture.zip"), content);
+  const requests: string[] = [];
+  t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
+    requests.push(String(input));
+    if (String(input) === manifestUrl)
+      return Response.json({ metaData: { publicPath: origin, types: { zip: "types.zip" } } });
+    assert.equal(String(input), zipUrl);
+    return new Response(fs.readFileSync(archive.zipPath));
+  });
+  const report = await rebuildAllTypes(f.context([consumer]), {
+    ...unused,
+    installRemoteTypes,
+    generateLocalFederatedTypes: mockGeneration((appDir) => {
+      assert.equal(fs.readFileSync(typeFile(consumer, alias), "utf8"), content);
+      return writeZip(path.join(appDir, "dist", "@mf-types.zip"), content);
+    }),
+  });
+  assert.deepEqual(report.failed, []);
+  assert.deepEqual(report.rebuilt, [consumer.name]);
+  assert.deepEqual(report.installed, [{ consumer: consumer.name, alias }]);
+  assert.deepEqual(requests, [manifestUrl, zipUrl]);
+});
+
+for (const source of ["manifest", "local"] as const) {
+  test(`scoped install rejects a scope replaced while loading a ${source} ZIP`, async (t) => {
+    const f = fixture(t);
+    const alias = "@fixture/widget";
+    const origin = "https://assets.example.test/";
+    const manifestUrl = `${origin}mf-manifest.json`;
+    const dependency = { alias, name: "fixture-library", url: manifestUrl };
+    const consumer = f.app("fixture-client", 4502, { remotes: [dependency] });
+    const unrelated = f.app("fixture-unrelated", 4503);
+    const installed = typeFile(consumer, alias);
+    const destination = path.dirname(installed);
+    const scope = path.dirname(destination);
+    const oldScope = `${scope}-old`;
+    const unrelatedTypes = path.join(unrelated.folder, "widget", "index.d.ts");
+    fs.mkdirSync(destination, { recursive: true });
+    fs.mkdirSync(path.dirname(unrelatedTypes), { recursive: true });
+    fs.writeFileSync(installed, "previous");
+    fs.writeFileSync(unrelatedTypes, "keep");
+    const { zipPath, zipHash } = writeZip(path.join(consumer.folder, "fixture.zip"), "new");
+    const replaceScope = () => {
+      fs.renameSync(scope, oldScope);
+      fs.symlinkSync(unrelated.folder, scope, "junction");
+    };
+
+    let pending: Promise<unknown>;
+    if (source === "manifest") {
+      t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
+        if (String(input) === manifestUrl)
+          return Response.json({ metaData: { publicPath: origin, types: { zip: "types.zip" } } });
+        assert.equal(String(input), `${origin}types.zip`);
+        replaceScope();
+        return new Response(fs.readFileSync(zipPath));
+      });
+      pending = installRemoteTypes(consumer, dependency, manifestUrl, "");
+    } else {
+      pending = installLocalTypesArchive({
+        zipPath,
+        expectedZipHash: zipHash,
+        destination,
+        appDir: consumer.folder,
+      });
+      await Promise.resolve();
+      replaceScope();
+    }
+
+    await assert.rejects(pending, (error: unknown) => {
+      const { stage, reason } = safeError(error);
+      assert.equal(stage, "destination");
+      assert.equal(reason, "path-escape");
+      return true;
+    });
+    assert.equal(fs.readFileSync(unrelatedTypes, "utf8"), "keep");
+    assert.equal(fs.readFileSync(path.join(oldScope, "widget", "index.d.ts"), "utf8"), "previous");
+    assert.deepEqual(fs.readdirSync(unrelated.folder).sort(), ["index.ts", "widget"]);
+  });
+}
+
+test("a missing scope still protects its existing types root while a ZIP loads", async (t) => {
+  const f = fixture(t);
+  const app = f.app("fixture-client", 4502);
+  const root = path.join(app.folder, app.typesFolder);
+  const installed = typeFile(app, "@fixture/widget");
+  const archive = writeZip(path.join(app.folder, "fixture.zip"), "new");
+  fs.mkdirSync(root);
+
+  await assert.rejects(
+    () =>
+      installTypesArchive({
+        appDir: app.folder,
+        destination: path.dirname(installed),
+        url: "https://assets.example.test/types.zip",
+        fetchImpl: async () => {
+          fs.renameSync(root, `${root}-old`);
+          fs.mkdirSync(path.dirname(installed), { recursive: true });
+          fs.writeFileSync(installed, "previous");
+          return new Response(fs.readFileSync(archive.zipPath));
+        },
+      }),
+    (error: unknown) => {
+      assert.equal(safeError(error).reason, "path-escape");
+      return true;
+    },
+  );
+  assert.equal(fs.readFileSync(installed, "utf8"), "previous");
+});
+
+test(
+  "Fetch writes through a relative symlink in filesystem order",
+  { skip: process.platform === "win32" },
+  async (t) => {
+    const f = fixture(t);
+    const dependency = {
+      alias: "@fixture/widget",
+      name: "fixture-library",
+      url: "https://fixture.example/mf-manifest.json",
+    };
+    const app = f.app("fixture-client", 4502, {
+      consumeTypes: true,
+      typesFolder: "linked-types",
+      remotes: [dependency],
+    });
+    const unrelated = typeFile({ ...app, typesFolder: "types" }, dependency.alias);
+    fs.mkdirSync(path.join(app.folder, "group", "nested"), { recursive: true });
+    fs.mkdirSync(path.join(app.folder, "group", "types"));
+    fs.mkdirSync(path.dirname(unrelated), { recursive: true });
+    fs.writeFileSync(unrelated, "keep");
+    fs.symlinkSync("group/nested", path.join(app.folder, "jump"), "dir");
+    fs.symlinkSync("jump/../types", path.join(app.folder, app.typesFolder), "dir");
+    const archive = writeZip(path.join(app.folder, "fixture.zip"), "new");
+    serveZip(t, dependency.url, archive.zipPath);
+
+    await installRemoteTypes(app, dependency, dependency.url, "");
+    assert.equal(fs.readFileSync(typeFile(app, dependency.alias), "utf8"), "new");
+    assert.equal(fs.readFileSync(unrelated, "utf8"), "keep");
+  },
+);
+
+for (const source of ["HTTP", "local"] as const) {
+  test(`installation checks for new overlaps after loading a ${source} ZIP`, async (t) => {
+    const f = fixture(t);
+    const producer = f.app("fixture-library", 4501);
+    const flat = remote(producer, "@fixture");
+    const first = f.app("fixture-flat", 4502, {
+      consumeTypes: true,
+      generateTypes: false,
+      remotes: [flat],
+    });
+    const scoped = {
+      alias: "@library/widget",
+      name: "other",
+      url: "https://fixture.example/mf-manifest.json",
+    };
+    const second = localApp("fixture-scoped", first.folder, {
+      consumeTypes: true,
+      generateTypes: false,
+      typesFolder: "linked-types",
+      remotes: [scoped],
+    });
+    const root = path.join(first.folder, first.typesFolder);
+    const link = path.join(second.folder, second.typesFolder);
+    const intermediate = path.join(root, flat.alias, "types-link");
+    const existing = path.join(root, scoped.alias, "index.d.ts");
+    fs.mkdirSync(path.dirname(existing), { recursive: true });
+    fs.mkdirSync(path.dirname(intermediate));
+    fs.writeFileSync(existing, "previous");
+    fs.symlinkSync(root, link, "junction");
+    const archive = writeZip(path.join(producer.folder, "fixture.zip"), "new");
+    const relink = () => {
+      fs.unlinkSync(link);
+      fs.symlinkSync(root, intermediate, "junction");
+      fs.symlinkSync(intermediate, link, "junction");
+    };
+
+    if (source === "HTTP") {
+      serveZip(t, flat.url, archive.zipPath, relink);
+      await assert.rejects(
+        () => installRemoteTypes(first, flat, flat.url, "", undefined, undefined, [first, second]),
+        /remote aliases share a types directory/,
+      );
+    } else {
+      const readFile = fs.promises.readFile;
+      const mock = t.mock.method(
+        fs.promises,
+        "readFile",
+        async (...args: Parameters<typeof readFile>) => {
+          if (args[0] === archive.zipPath) relink();
+          return readFile(...args);
+        },
+      );
+      syncBuiltinESMExports();
+      try {
+        const report = await rebuildAllTypes(f.context([producer, first, second]), {
+          ...unused,
+          async generateLocalFederatedTypes() {
+            return { ...archive, current: false, inputsFingerprint: null };
+          },
+        });
+        assert.deepEqual(report.installed, []);
+        assert.deepEqual(report.failed, [
+          { app: first.name, reason: `remote aliases share a types directory: ${flat.alias}` },
+        ]);
+      } finally {
+        mock.mock.restore();
+        syncBuiltinESMExports();
+      }
+    }
+    assert.equal(fs.readFileSync(typeFile(second, scoped.alias), "utf8"), "previous");
+    assert.deepEqual(fs.readdirSync(root).sort(), [flat.alias, "@library"]);
+  });
+}
+
+test("archive installation normalizes a destination ending in a dot component", async (t) => {
+  const f = fixture(t);
+  const app = f.app("fixture-client", 4502);
+  const target = typeFile(app, "widget");
+  const sibling = typeFile(app, "sibling");
+  fs.mkdirSync(path.dirname(sibling), { recursive: true });
+  fs.writeFileSync(sibling, "keep");
+  const archive = writeZip(path.join(app.folder, "fixture.zip"), "new");
+
+  await installTypesArchive({
+    appDir: app.folder,
+    destination: `${path.dirname(target)}${path.sep}.`,
+    url: "https://fixture.example/types.zip",
+    fetchImpl: async () => new Response(fs.readFileSync(archive.zipPath)),
+  });
+  assert.equal(fs.readFileSync(target, "utf8"), "new");
+  assert.equal(fs.readFileSync(sibling, "utf8"), "keep");
+});
+
+const composedName = "caf\u00e9";
+const decomposedName = composedName.normalize("NFD");
+const overlapFixtures = [
+  {
+    name: "a linked alias's backing directory",
+    alias: "@fixture/widget",
+    protectedAlias: "other",
+    protectedFolder: "@mf-types",
+    physicalFolder: "@mf-types/@fixture/widget/nested",
+    link: "@mf-types/other",
+    linkTarget: "@mf-types/@fixture/widget/nested",
+  },
+  {
+    name: "a directory traversed before ..",
+    alias: "@fixture",
+    protectedAlias: "@library/widget",
+    protectedFolder: "linked-types",
+    physicalFolder: "@mf-types/other/@library/widget",
+    link: "linked-types",
+    relativeTarget: "@mf-types/@fixture/nested/../../other",
+  },
+  {
+    name: "an existing directory with an equivalent Unicode name",
+    alias: decomposedName,
+    protectedAlias: "@library/widget",
+    protectedFolder: `@mf-types/${composedName}`,
+    physicalFolder: `@mf-types/${composedName}/@library/widget`,
+    equivalentName: composedName,
+  },
+  {
+    name: "a symlink entry with an equivalent Unicode name",
+    alias: decomposedName,
+    protectedAlias: "@library/widget",
+    protectedFolder: `@mf-types/${composedName}`,
+    physicalFolder: "actual/@library/widget",
+    link: `@mf-types/${composedName}`,
+    linkTarget: "actual",
+    equivalentName: composedName,
+  },
+  {
+    name: "a hard-linked symlink with a filesystem-equivalent name",
+    alias: "\u03c3",
+    protectedAlias: "@library/widget",
+    protectedFolder: "linked-types",
+    physicalFolder: "actual/@library/widget",
+    link: "@mf-types/\u03c2",
+    linkTarget: "actual",
+    equivalentName: "\u03c2",
+    hardLink: true,
+  },
+  {
+    name: "a hard-linked symlink when directory listing is denied",
+    alias: "linked-target",
+    protectedAlias: "@library/widget",
+    protectedFolder: "linked-types",
+    physicalFolder: "actual/@library/widget",
+    link: "@mf-types/linked-target",
+    linkTarget: "actual",
+    hardLink: true,
+    denyList: true,
+  },
+] as const;
+
+for (const scenario of overlapFixtures) {
+  test(`Fetch and local rebuild protect ${scenario.name}`, async (t) => {
+    if ("relativeTarget" in scenario && process.platform === "win32") {
+      t.skip("requires POSIX relative symlink traversal");
+      return;
+    }
+    if ("hardLink" in scenario && process.platform === "win32") {
+      t.skip("requires POSIX hard links to symlinks");
+      return;
+    }
+    const f = fixture(t);
+    const producer = f.app("fixture-library", 4501);
+    const dependency = remote(producer, scenario.alias);
+    const consumer = f.app("fixture-consumer", 4502, {
+      consumeTypes: true,
+      generateTypes: false,
+      remotes: [dependency],
+    });
+    const other = localApp("fixture-other", consumer.folder, {
+      consumeTypes: true,
+      generateTypes: false,
+      typesFolder: scenario.protectedFolder,
+      remotes: [
+        {
+          alias: scenario.protectedAlias,
+          name: "other",
+          url: "https://fixture.example/mf-manifest.json",
+        },
+      ],
+    });
+    const physical = path.join(consumer.folder, scenario.physicalFolder);
+    const installed = typeFile(other, scenario.protectedAlias);
+    fs.mkdirSync(physical, { recursive: true });
+    fs.writeFileSync(path.join(physical, "index.d.ts"), "previous");
+    if ("link" in scenario) {
+      const link = path.join(consumer.folder, scenario.link);
+      fs.mkdirSync(path.dirname(link), { recursive: true });
+      if ("relativeTarget" in scenario) {
+        fs.mkdirSync(path.join(consumer.folder, "@mf-types", scenario.alias, "nested"), {
+          recursive: true,
+        });
+        fs.symlinkSync(scenario.relativeTarget, link, "dir");
+      } else {
+        fs.symlinkSync(path.join(consumer.folder, scenario.linkTarget), link, "junction");
+      }
+      if ("hardLink" in scenario) {
+        execFileSync("ln", ["-P", link, path.join(path.dirname(link), "other-entry")]);
+        fs.symlinkSync(link, path.join(consumer.folder, scenario.protectedFolder), "junction");
+      }
+    }
+    const typeRoot = path.join(consumer.folder, consumer.typesFolder);
+    if ("equivalentName" in scenario) {
+      const existing = fs.lstatSync(path.join(typeRoot, scenario.equivalentName), { bigint: true });
+      const alternate = fs.lstatSync(path.join(typeRoot, scenario.alias), {
+        bigint: true,
+        throwIfNoEntry: false,
+      });
+      if (alternate?.ino !== existing.ino || alternate.dev !== existing.dev) {
+        t.skip("requires a filesystem with equivalent Unicode names");
+        return;
+      }
+    }
+    let deniedReads = 0;
+    if ("denyList" in scenario) {
+      const denied = fs.realpathSync.native(typeRoot);
+      const readdir = fs.readdirSync;
+      t.mock.method(fs, "readdirSync", (...args: Parameters<typeof readdir>) => {
+        if (args[0] === denied) {
+          deniedReads++;
+          throw Object.assign(new Error("cannot list fixture types folder"), { code: "EACCES" });
+        }
+        return readdir(...args);
+      });
+    }
+    assert.equal(fs.readFileSync(installed, "utf8"), "previous");
+    const archive = writeZip(path.join(producer.folder, "fixture.zip"), "new");
+    const apps = [producer, consumer, other];
+    serveZip(t, dependency.url, archive.zipPath);
+
+    await assert.rejects(
+      () =>
+        installRemoteTypes(consumer, dependency, dependency.url, "", undefined, undefined, apps),
+      /remote aliases share a types directory/,
+    );
+    assert.equal(fs.readFileSync(installed, "utf8"), "previous");
+
+    const report = await rebuildAllTypes(f.context(apps), {
+      ...unused,
+      async generateLocalFederatedTypes() {
+        return { ...archive, current: false, inputsFingerprint: null };
+      },
+    });
+    assert.deepEqual(report.installed, []);
+    assert.deepEqual(report.failed, [
+      { app: consumer.name, reason: `remote aliases share a types directory: ${scenario.alias}` },
+    ]);
+    assert.equal(fs.readFileSync(installed, "utf8"), "previous");
+    if ("denyList" in scenario) assert.ok(deniedReads > 0);
+  });
+}
+
+test(
+  "Fetch can replace one hard-linked alias entry without changing the others",
+  { skip: process.platform === "win32" },
+  async (t) => {
+    const f = fixture(t);
+    const producer = f.app("fixture-library", 4501);
+    const dependency = remote(producer, "@fixture/widget");
+    const related = [remote(producer, "@fixture/other"), remote(producer, "@library/widget")];
+    const app = f.app("fixture-consumer", 4502, {
+      consumeTypes: true,
+      remotes: [dependency, ...related],
+    });
+    const types = path.join(app.folder, app.typesFolder);
+    for (const scope of ["@fixture", "@library"]) {
+      const backing = path.join(types, scope, "backing");
+      fs.mkdirSync(backing, { recursive: true });
+      fs.writeFileSync(path.join(backing, "index.d.ts"), scope);
+    }
+    const destination = path.join(types, dependency.alias);
+    fs.symlinkSync("backing", destination, "dir");
+    for (const { alias } of related)
+      execFileSync("ln", ["-P", destination, path.join(types, alias)]);
+    const archive = writeZip(path.join(producer.folder, "fixture.zip"), "new");
+    serveZip(t, dependency.url, archive.zipPath);
+
+    await installRemoteTypes(app, dependency, dependency.url, "");
+    assert.equal(fs.readFileSync(typeFile(app, dependency.alias), "utf8"), "new");
+    assert.equal(fs.readFileSync(typeFile(app, related[0].alias), "utf8"), "@fixture");
+    assert.equal(fs.readFileSync(typeFile(app, related[1].alias), "utf8"), "@library");
+  },
+);
+
+test("bulk rebuild preserves installed scoped types when another config owns their parent", async (t) => {
+  const f = fixture(t);
+  const producer = f.app("fixture-library", 4501);
+  const scoped = f.app("fixture-scoped", 4502, {
+    consumeTypes: true,
+    generateTypes: false,
+    remotes: [remote(producer, "@fixture/widget")],
+  });
+  const flat = localApp("fixture-flat", scoped.folder, {
+    port: 4503,
+    configFile: path.join(scoped.folder, "webpack.config.ts"),
+    typesFolder: `./${scoped.typesFolder}`,
+    consumeTypes: true,
+    generateTypes: false,
+    remotes: [remote(producer, "@fixture")],
+  });
+  const installed = typeFile(scoped, "@fixture/widget");
+  fs.mkdirSync(path.dirname(installed), { recursive: true });
+  fs.writeFileSync(installed, "previous");
+
+  const report = await rebuildAllTypes(f.context([flat, producer, scoped]), {
+    ...unused,
+    generateLocalFederatedTypes: mockGeneration((appDir) =>
+      writeZip(path.join(appDir, "dist", "@mf-types.zip"), "new"),
+    ),
+  });
+  assert.deepEqual(report.rebuilt, [producer.name]);
+  assert.deepEqual(report.installed, []);
+  assert.deepEqual(
+    report.failed.map(({ app }) => app),
+    [flat.name, scoped.name],
+  );
+  for (const { reason } of report.failed)
+    assert.match(reason, /remote aliases share a types directory/);
+  assert.equal(fs.readFileSync(installed, "utf8"), "previous");
 });
 
 test("types verified against a staging manifest can be reused when staging is offline", async (t) => {
