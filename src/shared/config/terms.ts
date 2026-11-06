@@ -1,6 +1,7 @@
 export const terms = {
   listen: "listening",
   silent: "stopped",
+  unknownPort: "port unknown",
   otherHost: "non-local URL",
   otherPort: "different port",
   stale: "types not rebuilt",

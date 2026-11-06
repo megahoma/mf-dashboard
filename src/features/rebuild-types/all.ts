@@ -56,6 +56,7 @@ async function inputsFingerprint(
   external: readonly [string, string, string][],
 ): Promise<string> {
   const hash = createHash("sha256");
+  const envMode = app.launchEnvironment?.envMode ?? context.envMode;
   hash.update(
     JSON.stringify([
       app.folder,
@@ -64,16 +65,16 @@ async function inputsFingerprint(
       app.tsconfig,
       app.compilerInstance,
       app.typesFolder,
-      context.envMode,
+      envMode,
       context.rebuildCommand,
       customZipPath,
       tsconfigFingerprint,
       external,
     ]),
   );
+  if (app.launchEnvironment) hash.update(JSON.stringify(app.launchEnvironment.env));
   const names = ["package.json", app.tsconfig?.trim() || "tsconfig.json", ".env", ".env.local"];
-  if (/^[A-Za-z0-9_-]+$/.test(context.envMode))
-    names.push(`.env.${context.envMode}`, `.env.${context.envMode}.local`);
+  if (/^[\w-]+(?:\.[\w-]+)*$/.test(envMode)) names.push(`.env.${envMode}`, `.env.${envMode}.local`);
   const files = new Set([
     app.configFile,
     app.buildConfigFile ?? app.configFile,
@@ -242,12 +243,15 @@ export async function rebuildAllTypes(
           )
             ? { ...previous.local, zipHash: previous.zipHash }
             : undefined;
+        const environment = app.launchEnvironment ?? {
+          envMode: context.envMode,
+          env: readModeEnv(app.folder, context.envMode),
+        };
         const result = await io.generateLocalFederatedTypes({
           appDir: app.folder,
           name: app.name,
           configFile: app.buildConfigFile ?? app.configFile,
-          envMode: context.envMode,
-          env: readModeEnv(app.folder, context.envMode),
+          ...environment,
           workspaceFingerprint: inputs,
           confirmed,
         });

@@ -370,12 +370,10 @@ test("a failed manual refresh retains the previous type result and check time", 
   await f.provider.refresh("startup");
   await f.provider.checkTypes(f.row().children.find((node) => node.name === "palette")!);
   const previous = f.row().children.find((node) => node.name === "palette")!;
-  const config = path.join(f.root, "editor", "rsbuild.config.ts");
-  fs.writeFileSync(
-    config,
-    fs.readFileSync(config, "utf8").replace('"name":"editor"', '"name":"studio","extra":true'),
-  );
-  await assert.rejects(() => f.provider.checkTypes(f.row()), /duplicate federation name/);
+  t.mock.method(f.provider.session["ports"], "probe", async () => {
+    throw new Error("probe failed");
+  });
+  await assert.rejects(() => f.provider.checkTypes(f.row()), /probe failed/);
   assert.deepEqual(
     f.row().children.find((node) => node.name === "palette"),
     previous,

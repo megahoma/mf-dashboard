@@ -27,7 +27,8 @@ MF Dashboard is a VS Code extension for working with Module Federation microfron
 | Status                      | Meaning                                                                          |
 | --------------------------- | -------------------------------------------------------------------------------- |
 | `listening`                 | The local app's port is open.                                                    |
-| `stopped`                   | The local port is closed or not declared.                                        |
+| `stopped`                   | The local port is closed.                                                        |
+| `port unknown`              | No local port could be resolved from the configuration.                          |
 | `types not rebuilt`         | Producer sources are newer than the types ZIP and the settle period has elapsed. |
 | `types not updated`         | The consumer's types are missing or do not match the remote ZIP.                 |
 | `URL error`                 | The URL is empty, has unresolved variables, or is not HTTP(S).                   |
@@ -53,9 +54,13 @@ The extension activates on startup and looks for these config files:
 | Rsbuild           | `rsbuild.config.*`           |
 | Vite              | `vite.config.*`              |
 
-Supported extensions are `.mjs`, `.cjs`, `.js`, `.mts`, `.cts`, `.ts`, `.jsx`, and `.tsx`. Discovery uses Babel to read source without executing the config. It recognizes `pluginModuleFederation`, `ModuleFederationPlugin`, and `createModuleFederationConfig`, constants, aliases, object spreads, static expressions, and synchronous helpers with an unconditional return. Relative named/default/namespace imports and local re-exports are supported within the same package. The project's TypeScript version does not affect discovery. Conditional returns, dynamic imports, package helpers, and tsconfig path aliases remain unresolved.
+Supported extensions are `.mjs`, `.cjs`, `.js`, `.mts`, `.cts`, `.ts`, `.jsx`, and `.tsx`. Discovery uses Babel to read source without executing the config. It recognizes `pluginModuleFederation`, `ModuleFederationPlugin`, and `createModuleFederationConfig`, constants, aliases, object spreads, static expressions, and synchronous helpers with statically known `if` and `switch` branches. Relative named/default/namespace imports, local JSON, and local re-exports are supported within the same package. The project's TypeScript version does not affect discovery. Async helpers, dynamic imports, package helpers, and tsconfig path aliases remain unresolved.
 
-The local port comes from `server.port` or `devServer.port`. Remote URLs may use `process.env` or `import.meta.env` values from `.env.<mode>` and `.env.<mode>.local`; the local file takes precedence. The default manifest path is `/mf-manifest.json`.
+Discovery uses the dev context for Rsbuild and Vite config functions. It reads literal environment assignments from a simple start script, including scripts prefixed with `cross-env`. It can statically read a selected `.env` file in the config directory through `dotenv.parse`.
+
+A simple start script can select a config with `--config`. Discovery uses `mf-dashboard.scripts.start`, which new app entries inherit. Set `configFile` on an app entry to select a file explicitly. The path is relative to the app folder and takes precedence over the script.
+
+The local port comes from `server.port` or `devServer.port`. Remote URLs may use `process.env` or `import.meta.env` values from `.env.<mode>` and `.env.<mode>.local`, with the local file taking precedence. When discovery recognizes a Vite start script, it resolves `process.env` from literal assignments in the script and uses Vite's default `NODE_ENV` when the script leaves it unset. The default manifest path is `/mf-manifest.json`.
 
 Discovery skips `node_modules`, `.git`, `dist`, and `mf-dashboard.ignorePaths`. It adds missing app names without overwriting saved entries. Once `mf-dashboard.apps` exists, even as an empty object, startup reloads that list instead of scanning for new apps. An empty scan writes no settings and an explicit search with no loaded apps shows a notification.
 
@@ -116,7 +121,7 @@ Example app entry:
 }
 ```
 
-`path` is relative to the workspace folder. Discovery accepts paths inside that folder. Multi-root entries can specify `workspaceFolder` by name. Set `manifestPath` to override the route detected from the build config. If an older release filled in `manifestPath` automatically, remove the field to use the detected route. An app's `scripts.start` overrides the global setting. Discovery sets `dev` for new entries.
+`path` is relative to the workspace folder. Discovery accepts paths inside that folder. Multi-root entries can specify `workspaceFolder` by name. Set `manifestPath` to override the route detected from the build config. If an older release filled in `manifestPath` automatically, remove the field to use the detected route. An app's `scripts.start` overrides the global setting.
 
 With `packageManager: auto`, Start reads the root `packageManager` field, then checks `pnpm-lock.yaml`, `yarn.lock`, `bun.lock` / `bun.lockb`, and `package-lock.json`, falling back to npm. The command is `<manager> run <script>`; a missing script or invalid script key starts no process.
 

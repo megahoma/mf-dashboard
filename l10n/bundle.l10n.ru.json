@@ -1,6 +1,7 @@
 {
   "listening": "работает",
   "stopped": "остановлен",
+  "port unknown": "порт не определён",
   "non-local URL": "URL не локальный",
   "different port": "URL на другой порт",
   "types not rebuilt": "типы не пересобраны",

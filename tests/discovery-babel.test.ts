@@ -22,7 +22,7 @@ const cases: [string, string, string | null][] = [
   [
     "conditional return",
     `function options() { if (false) { return {name:'decoy'} } return {name:'app'} }`,
-    null,
+    "app",
   ],
   [
     "loop return",
@@ -31,7 +31,12 @@ const cases: [string, string, string | null][] = [
   ],
   [
     "switch return",
-    `function options() { switch (1) {case 1: return {name:'decoy'}} return {name:'app'} }`,
+    `function options() { switch (1) {case 1: return {name:'app'}} return {name:'decoy'} }`,
+    "app",
+  ],
+  [
+    "unsupported labeled control never selects the later fallback",
+    `function options() { selected: switch (1) {case 1: return {name:'app'}} return {name:'decoy'} }`,
     null,
   ],
   [
@@ -281,7 +286,7 @@ test("safe trace reasons distinguish syntax and conditional returns without sour
   );
   fs.writeFileSync(
     path.join(root, "vite.config.ts"),
-    `function options() {if (false) return {name:'TOP_SECRET'}; return {name:'app'}}; pluginModuleFederation(options());`,
+    `function options() {if (readExternalFlag()) return {name:'TOP_SECRET'}; return {name:'app'}}; pluginModuleFederation(options());`,
   );
   assert.deepEqual(scanWorkspace(root, { log }), {});
   const output = JSON.stringify(events);
@@ -332,6 +337,52 @@ test("default re-exports resolve the config and record its dependencies", (t) =>
   assert.equal(app.port, 3001);
   assert.equal(app.configFile, helper);
   assert.ok(dependencies.has(helper));
+});
+
+test("a shared star-export graph resolves the same binding without expanding every path", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-star-graph-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, "package.json"), "{}");
+  fs.writeFileSync(path.join(root, "leaf.ts"), "export const listener = 4620;");
+  for (let layer = 6; layer >= 0; layer--) {
+    const exports =
+      layer === 6
+        ? "export * from './leaf.ts';"
+        : ["a", "b"].map((side) => `export * from './${side}${layer + 1}.ts';`).join("\n");
+    for (const side of ["a", "b"])
+      fs.writeFileSync(path.join(root, `${side}${layer}.ts`), exports.repeat(4));
+  }
+  fs.writeFileSync(
+    path.join(root, "module-federation.config.ts"),
+    `
+    import { listener } from './a0.ts';
+    export default {name:'compass', server:{port:listener}};
+  `,
+  );
+  const stat = t.mock.method(fs, "statSync", fs.statSync);
+  assert.equal(readAppFolder(root, "development")?.port, 4620);
+  assert.ok(stat.mock.callCount() < 40);
+});
+
+test("star re-exports of imported aliases resolve the original binding", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-star-alias-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, "leaf.ts"), "export const listener = 4620;");
+  for (const alias of ["left", "right"])
+    fs.writeFileSync(
+      path.join(root, alias + ".ts"),
+      "import { listener } from './leaf.ts'; export { listener };",
+    );
+  fs.writeFileSync(
+    path.join(root, "barrel.ts"),
+    "export * from './left.ts'; export * from './right.ts'; export type * from './typings.ts';",
+  );
+  fs.writeFileSync(path.join(root, "typings.ts"), "export const listener = 4621;");
+  fs.writeFileSync(
+    path.join(root, "module-federation.config.ts"),
+    "import { listener } from './barrel.ts'; export default {name:'compass', server:{port:listener}};",
+  );
+  assert.equal(readAppFolder(root, "development")?.port, 4620);
 });
 
 test("only plugins retained by the final configuration select the application", () => {

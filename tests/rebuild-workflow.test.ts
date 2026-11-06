@@ -17,6 +17,7 @@ import {
 } from "../src/features/rebuild-types/evidence.ts";
 import { rebuildTypes, type RebuildContext } from "../src/features/rebuild-types/workflow.ts";
 import { installRemoteTypes } from "../src/features/refetch-types/remote.ts";
+import { loadKnownApps } from "../src/widgets/mf-dashboard-tree/session.ts";
 import { localApp } from "./support/app.ts";
 
 test("a dependency named __proto__ retains its published ZIP hash", () => {
@@ -41,6 +42,7 @@ test("rebuild installs dependencies before generation and saves the newly built 
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const child = localApp("child", path.join(root, "child"));
   const parent = localApp("parent", path.join(root, "parent"), {
+    launchEnvironment: { envMode: "fixture.profile", env: { FIXTURE_VARIANT: "local" } },
     consumeTypes: true,
     remotes: [
       { alias: "child", name: "child", url: "https://configured.example/mf-manifest.json" },
@@ -93,7 +95,9 @@ test("rebuild installs dependencies before generation and saves the newly built 
     async generateFederatedTypes(input) {
       const name = path.basename(input.appDir);
       assert.equal(input.name, name);
-      assert.equal(input.envMode, "development");
+      const launch = name === parent.name ? parent.launchEnvironment : undefined;
+      assert.equal(input.envMode, launch?.envMode ?? "development");
+      assert.deepEqual(input.env, launch?.env);
       events.push(`generate:${name}`);
       return { zipPath: "unused", zipUrl: "unused", zipHash: `new-${name}` };
     },
@@ -195,7 +199,14 @@ test("rebuild installs dependencies before generation and saves the newly built 
 test("custom rebuild checks the published archive and never confirms a failed command", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-rebuild-command-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const app = localApp("app", root);
+  fs.writeFileSync(
+    path.join(root, "rsbuild.config.ts"),
+    `export default { name: 'app', server: { port: 4100 }, dts: { generateTypes: true, consumeTypes: false } };`,
+  );
+  const apps = {
+    retired: { path: ".", manifestPath: "custom.json" },
+    app: { path: "missing", manifestPath: "unrelated.json" },
+  };
   const confirmations = createConfirmationStore();
   const messages: string[] = [];
   const log = createLogger({
@@ -204,13 +215,13 @@ test("custom rebuild checks the published archive and never confirms a failed co
   }).operation("rebuild");
   const context: RebuildContext = {
     log,
-    apps: [app],
+    apps: loadKnownApps([{ name: "sample", path: root }], apps, "development"),
     book: createProbeBook(),
     confirmations,
     published: new Map(),
     settings: {
       "mf-dashboard.scripts.start": "dev",
-      "mf-dashboard.apps": { app: { manifestPath: "custom.json" } },
+      "mf-dashboard.apps": apps,
       rebuildCommand: "build {name}",
       envMode: "development",
     },

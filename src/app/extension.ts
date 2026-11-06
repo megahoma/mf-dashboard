@@ -100,6 +100,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (
         event.affectsConfiguration("mf-dashboard.apps") ||
         event.affectsConfiguration("mf-dashboard.envMode") ||
+        event.affectsConfiguration("mf-dashboard.scripts.start") ||
         event.affectsConfiguration("mf-dashboard.ignorePaths") ||
         event.affectsConfiguration("mf-dashboard.extraManifestUrls") ||
         event.affectsConfiguration("mf-dashboard.typesSettleMs") ||

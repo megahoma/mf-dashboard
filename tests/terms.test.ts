@@ -6,6 +6,7 @@ import { icons } from "../src/shared/config/icons.ts";
 const statusKeys = [
   "listen",
   "silent",
+  "unknownPort",
   "otherHost",
   "otherPort",
   "stale",

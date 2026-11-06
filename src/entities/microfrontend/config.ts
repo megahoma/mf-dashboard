@@ -1,4 +1,5 @@
 import path from "node:path";
+import { parse as parseEnv } from "dotenv";
 import type { Binding } from "@babel/traverse";
 import type * as t from "@babel/types";
 import { noLog, type LogContext } from "../../shared/logging.ts";
@@ -23,10 +24,14 @@ export interface LocalApp {
   buildConfigFile?: string;
   generatedZipPath?: string | null;
   configDependencies?: readonly string[];
+  settingsKey?: string;
+  launchEnvironment?: { envMode: string; env: Readonly<Record<string, string>> };
   hasExposes?: boolean;
 }
 
 const UNKNOWN = Symbol("unknown");
+const NO_RETURN = Symbol("no-return");
+const OPTIONAL_MISS = Symbol("optional-miss");
 const TAG = Symbol("static-value");
 interface FunctionValue {
   [TAG]: "function";
@@ -44,11 +49,14 @@ type Value =
   | null
   | undefined
   | typeof UNKNOWN
+  | typeof OPTIONAL_MISS
   | Value[]
   | { [key: string]: Value }
   | FunctionValue
   | MissingTemplate;
 type ObjectValue = { [key: string]: Value };
+type ConfigBundler = "rsbuild" | "vite";
+type ConfigOrigin = { bundler: ConfigBundler; direct: boolean } | null;
 const PLUGINS = new Set([
   "pluginModuleFederation",
   "ModuleFederationPlugin",
@@ -87,31 +95,62 @@ function flag(value: Value, fallback: boolean): boolean {
   return typeof value === "boolean" ? value : value && typeof value === "object" ? true : fallback;
 }
 
+function remoteNameSeparator(value: string): number {
+  return /^\s*https?:/i.test(value) ? -1 : value.indexOf("@");
+}
+
+interface ConfigContext {
+  mode?: string;
+  command?: string;
+  bundler?: string;
+  preferImportedBundler?: boolean;
+  appDir?: string;
+  processEnv?: Readonly<Record<string, string>>;
+}
+
 class StaticConfig {
   readonly imports: ConfigImports;
   readonly origins = new WeakMap<object, string>();
   readonly plugins = new Set<Value>();
   private readonly active = new Set<t.Node>();
+  private remainingSteps = 50_000;
+  private remainingSpreadItems = 1_000_000;
   private evaluationCutoffs = 0;
   // A snapshot belongs to one helper invocation and one source position.
   private readonly objectSnapshots = new WeakMap<Map<Binding, Value>, Map<t.Node, ObjectValue>>();
-  private configResult: { value: Value } | undefined;
+  private readonly configOrigins = new WeakMap<object, ConfigOrigin>();
+  private configResult: { value: Value; origin?: ConfigOrigin } | undefined;
   private readUnresolvedEnv = false;
   private readonly missingEnv: typeof UNKNOWN | undefined;
   readonly parsed: Program;
   readonly env: Record<string, string>;
   readonly log: LogContext;
+  private readonly context: ConfigContext;
+  private readonly factoryFrames = new WeakSet<Map<Binding, Value>>();
   constructor(
     imports: ConfigImports,
     env: Record<string, string>,
     log: LogContext,
+    context: ConfigContext = {},
     missingEnv?: typeof UNKNOWN,
   ) {
     this.parsed = imports.entry;
     this.env = env;
+    this.context = context;
     this.log = log;
     this.imports = imports;
     this.missingEnv = missingEnv;
+  }
+  get importedBundler(): ConfigBundler | undefined {
+    const origin = this.configResult?.origin;
+    return origin?.direct ? origin.bundler : undefined;
+  }
+  get bundler(): string | undefined {
+    return this.bundlerFor(this.configResult?.origin);
+  }
+  private bundlerFor(origin: ConfigOrigin | undefined): string | undefined {
+    if (this.context.preferImportedBundler && origin?.direct) return origin.bundler;
+    return this.context.bundler ?? origin?.bundler;
   }
   private unknown(p: AstPath, reason = "unsupported-expression"): typeof UNKNOWN {
     this.log.event("trace", "config.helper.unresolved", {
@@ -120,6 +159,21 @@ class StaticConfig {
       line: p.node.loc?.start.line,
     });
     return UNKNOWN;
+  }
+  private appendArraySpread(target: Value[], value: Value, site: AstPath): boolean {
+    if (!Array.isArray(value)) {
+      this.unknown(site, "unknown-spread");
+      return false;
+    }
+    // One AST node can copy a whole imported array, including arrays built by earlier spreads.
+    if (value.length > this.remainingSpreadItems) {
+      this.evaluationCutoffs++;
+      this.unknown(site, "array-spread-budget");
+      return false;
+    }
+    this.remainingSpreadItems -= value.length;
+    for (const element of value) target.push(element);
+    return true;
   }
   // Imported or unbound known API names only; a local function with the same name is a helper.
   api(p: AstPath, names: ReadonlySet<string>): boolean {
@@ -206,15 +260,28 @@ class StaticConfig {
           : null;
     return name ? { ...reference, members: [...reference.members, name] } : null;
   }
-  evaluate(p: AstPath | null, frame = new Map<Binding, Value>(), depth = 0): Value {
+  evaluate(
+    p: AstPath | null,
+    frame = new Map<Binding, Value>(),
+    depth = 0,
+    inChain = false,
+  ): Value {
     if (!p?.node) return undefined;
+    if (this.remainingSteps === 0) {
+      this.remainingSteps--;
+      this.evaluationCutoffs++;
+      return this.unknown(p, "evaluation-budget");
+    }
+    if (this.remainingSteps < 0) return UNKNOWN;
+    this.remainingSteps--;
     if (depth > 64 || this.active.has(p.node)) {
       this.evaluationCutoffs++;
       return this.unknown(p, "evaluation-cycle-or-depth");
     }
     this.active.add(p.node);
     try {
-      return this.value(p, frame, depth + 1);
+      const value = this.value(p, frame, depth + 1);
+      return value === OPTIONAL_MISS && !inChain ? undefined : value;
     } finally {
       this.active.delete(p.node);
     }
@@ -237,14 +304,18 @@ class StaticConfig {
     depth: number,
   ): Value {
     const declaration = binding.path;
-    const owner = declaration.getFunctionParent();
+    const owner = declaration.getFunctionParent() ?? declaration.findParent((p) => p.isProgram());
+    const withinOwner = (p: AstPath) =>
+      (p.getFunctionParent() ?? p.findParent((parent) => parent.isProgram()))?.node === owner?.node;
+    const factory = reference.getFunctionParent();
+    const captured = owner?.isProgram() === true && !!factory && this.factoryFrames.has(frame);
     if (
       binding.kind !== "const" ||
       !declaration.isVariableDeclarator() ||
       !declaration.get("id").isIdentifier() ||
       !declaration.get("init").isObjectExpression() ||
       !owner ||
-      reference.getFunctionParent() !== owner
+      (!withinOwner(reference) && !captured)
     )
       return this.unknown(reference, "unsupported-write");
     let snapshots = this.objectSnapshots.get(frame);
@@ -265,10 +336,7 @@ class StaticConfig {
         member.key === "left" &&
         write.parentPath.isExpressionStatement()
       ) {
-        if (
-          write.getFunctionParent() !== owner ||
-          (write.node.start ?? 0) < (declaration.node.end ?? 0)
-        )
+        if (!withinOwner(write) || (write.node.start ?? 0) < (declaration.node.end ?? 0))
           return this.unknown(write, "unsupported-write");
         writes.push(write);
       } else if (
@@ -278,7 +346,8 @@ class StaticConfig {
         !(
           member?.isObjectProperty() &&
           use.key === "value" &&
-          member.parentPath?.parentPath?.isReturnStatement()
+          (this.isOptionsSink(member.parentPath?.parentPath) ||
+            (captured && member.parentPath?.parentPath?.node === factory?.node))
         )
       )
         return this.unknown(use, "unsupported-object-reference");
@@ -315,9 +384,16 @@ class StaticConfig {
     const result = this.evaluate(declaration.get("init") as AstPath, frame, depth);
     if (!object(result)) return UNKNOWN;
     writes.sort((left, right) => (left.node.start ?? 0) - (right.node.start ?? 0));
+    const returnsObject = reference
+      .findParent((parent) => parent.isReturnStatement() || parent.isFunction())
+      ?.isReturnStatement();
     for (const write of writes) {
       // A key or RHS reads the state before its own assignment completes.
-      if ((write.node.end ?? 0) >= (reference.node.start ?? 0)) continue;
+      if (!captured && (write.node.end ?? 0) >= (reference.node.start ?? 0)) {
+        if (!returnsObject && reference.parentPath?.isObjectProperty() && reference.key === "value")
+          return this.unknown(write, "write-after-options");
+        continue;
+      }
       const branches: { test: AstPath; consequent: boolean }[] = [];
       for (
         let child = write;
@@ -354,6 +430,15 @@ class StaticConfig {
     if (this.evaluationCutoffs === cutoffs) snapshots.set(reference.node, result);
     return result;
   }
+  private isOptionsSink(p: AstPath | null | undefined): boolean {
+    return (
+      !!p &&
+      (p.isReturnStatement() ||
+        p.isExportDefaultDeclaration() ||
+        ((p.isCallExpression() || p.isNewExpression()) &&
+          this.api(p.get("callee") as AstPath, PLUGINS)))
+    );
+  }
   private value(p: AstPath, frame: Map<Binding, Value>, depth: number): Value {
     const ev = (child: AstPath | null): Value => this.evaluate(child, frame, depth);
     if (p.isStringLiteral() || p.isNumericLiteral() || p.isBooleanLiteral()) return p.node.value;
@@ -378,10 +463,13 @@ class StaticConfig {
       if (frame.has(binding)) return frame.get(binding);
       const declaration = binding.path;
       if (declaration.isImportSpecifier() || declaration.isImportDefaultSpecifier()) {
-        const target = this.imports.resolve(
-          declaration,
-          (declaration.parent as t.ImportDeclaration).source.value,
-        );
+        const source = (declaration.parent as t.ImportDeclaration).source.value;
+        if (source.endsWith(".json")) {
+          if (!declaration.isImportDefaultSpecifier()) return UNKNOWN;
+          const value = this.imports.readJson(declaration, source);
+          return value === undefined ? UNKNOWN : value;
+        }
+        const target = this.imports.resolve(declaration, source);
         const imported = declaration.isImportDefaultSpecifier()
           ? "default"
           : declaration.node.imported.type === "Identifier"
@@ -393,6 +481,18 @@ class StaticConfig {
       if (declaration.isVariableDeclarator()) {
         let value = ev(declaration.get("init") as AstPath);
         const id = declaration.get("id");
+        if (id.isArrayPattern()) {
+          if (!Array.isArray(value)) return UNKNOWN;
+          const index = id.get("elements").findIndex((item) => {
+            const target = item.isAssignmentPattern() ? item.get("left") : item;
+            return target.node === binding.identifier;
+          });
+          if (index < 0) return UNKNOWN;
+          const item = id.get("elements")[index];
+          return value[index] === undefined && item.isAssignmentPattern()
+            ? ev(item.get("right"))
+            : value[index];
+        }
         if (id.isObjectPattern()) {
           const prop = id
             .get("properties")
@@ -426,6 +526,17 @@ class StaticConfig {
           const spread = ev(prop.get("argument"));
           if (!object(spread)) return this.unknown(prop, "unresolved-spread");
           Object.assign(result, spread);
+          const origin = this.configOrigins.get(spread);
+          if (origin !== undefined) {
+            const previous = this.configOrigins.get(result);
+            // Shared config fragments are a fallback. Conflicting origins are inconclusive.
+            this.configOrigins.set(
+              result,
+              origin && (previous === undefined || previous?.bundler === origin.bundler)
+                ? { bundler: origin.bundler, direct: false }
+                : null,
+            );
+          }
         } else if (prop.isObjectProperty() || prop.isObjectMethod()) {
           const key = prop.node.computed
             ? ev(prop.get("key") as AstPath)
@@ -445,27 +556,28 @@ class StaticConfig {
       const result: Value[] = [];
       for (const item of p.get("elements")) {
         if (item.isSpreadElement()) {
-          const value = ev(item.get("argument"));
-          if (!Array.isArray(value)) return this.unknown(item, "unknown-spread");
-          result.push(...value);
+          if (!this.appendArraySpread(result, ev(item.get("argument")), item)) return UNKNOWN;
         } else result.push(item.node ? ev(item as AstPath) : undefined);
       }
       return result;
     }
     if (p.isMemberExpression() || p.isOptionalMemberExpression()) {
       const owner = p.get("object") as AstPath;
+      const optional = p.isOptionalMemberExpression();
+      const chained = optional ? this.evaluate(owner, frame, depth, true) : undefined;
+      if (chained === OPTIONAL_MISS || (optional && p.node.optional && chained == null))
+        return OPTIONAL_MISS;
       const key = p.node.computed
         ? ev(p.get("property") as AstPath)
         : p.node.property.type === "Identifier"
           ? p.node.property.name
           : UNKNOWN;
       if (!primitive(key)) return UNKNOWN;
-      if (
-        (owner.matchesPattern("process.env") && !p.scope.getBinding("process")) ||
-        owner.matchesPattern("import.meta.env")
-      ) {
+      const readsProcessEnv = owner.matchesPattern("process.env") && !p.scope.getBinding("process");
+      if (readsProcessEnv || owner.matchesPattern("import.meta.env")) {
+        const env = readsProcessEnv ? (this.context.processEnv ?? this.env) : this.env;
         const name = String(key);
-        if (Object.hasOwn(this.env, name)) return this.env[name];
+        if (Object.hasOwn(env, name)) return env[name];
         this.readUnresolvedEnv = true;
         return this.missingEnv;
       }
@@ -481,7 +593,7 @@ class StaticConfig {
           return target ? this.exported(target, String(key), frame, depth) : UNKNOWN;
         }
       }
-      const value = ev(owner);
+      const value = optional ? chained : ev(owner);
       if (object(value) || Array.isArray(value))
         return Object.hasOwn(value, String(key)) ? (value as ObjectValue)[String(key)] : undefined;
       return UNKNOWN;
@@ -497,12 +609,12 @@ class StaticConfig {
         text += p.node.quasis[index + 1].value.cooked ?? "";
         if (!missing) knownPrefix = text;
       }
-      return missing
-        ? {
-            [TAG]: "missing-template",
-            name: knownPrefix.includes("@") ? knownPrefix.slice(0, knownPrefix.indexOf("@")) : null,
-          }
-        : text;
+      if (!missing) return text;
+      const separator = remoteNameSeparator(knownPrefix);
+      return {
+        [TAG]: "missing-template",
+        name: separator > 0 ? knownPrefix.slice(0, separator) : null,
+      };
     }
     if (p.isBinaryExpression() || p.isLogicalExpression()) {
       const left = ev(p.get("left") as AstPath);
@@ -538,22 +650,70 @@ class StaticConfig {
       return primitive(condition) ? ev(p.get(condition ? "consequent" : "alternate")) : UNKNOWN;
     }
     if (p.isFunction()) return { [TAG]: "function", path: p, frame: new Map(frame) };
-    if (p.isCallExpression() || p.isNewExpression()) {
+    if (p.isCallExpression() || p.isNewExpression() || p.isOptionalCallExpression()) {
       const callee = p.get("callee") as AstPath;
       const args = p.get("arguments") as AstPath[];
+      const optional = p.isOptionalCallExpression();
+      const chained = optional ? this.evaluate(callee, frame, depth, true) : undefined;
+      if (chained === OPTIONAL_MISS || (optional && p.node.optional && chained == null))
+        return OPTIONAL_MISS;
+      if (
+        p.isCallExpression() &&
+        callee.isIdentifier() &&
+        !callee.scope.getBinding(callee.node.name)
+      ) {
+        if (callee.node.name === "Number" || callee.node.name === "parseInt") {
+          const value = ev(args[0] ?? null);
+          if (!primitive(value) || args.some((arg) => arg.isSpreadElement())) return UNKNOWN;
+          if (args.length > (callee.node.name === "Number" ? 1 : 2)) return UNKNOWN;
+          if (callee.node.name === "Number") return args.length ? Number(value) : 0;
+          const radix = ev(args[1] ?? null);
+          return primitive(radix) ? Number.parseInt(String(value), Number(radix)) : UNKNOWN;
+        }
+      }
       if (this.api(callee, PLUGINS)) {
         const options = ev((args[0] as AstPath) ?? null);
         this.plugins.add(options);
         return options;
       }
       if (this.api(callee, new Set(["defineConfig"]))) {
-        const config = ev((args[0] as AstPath) ?? null);
-        return config && typeof config === "object" && TAG in config && config[TAG] === "function"
-          ? this.call(config as FunctionValue, [], depth)
-          : config;
+        const config = ev(args[0] ?? null);
+        if (config && typeof config === "object") {
+          const source = this.apiReference(callee)?.source;
+          if (source === "@rsbuild/core")
+            this.configOrigins.set(config, { bundler: "rsbuild", direct: true });
+          if (source === "vite") this.configOrigins.set(config, { bundler: "vite", direct: true });
+        }
+        return config;
       }
       const reference = this.apiReference(callee);
       const method = reference?.members.length === 1 ? reference.members[0] : undefined;
+      if (p.isCallExpression() && reference?.source === "dotenv" && method === "parse") {
+        const input = args[0];
+        if (input?.isCallExpression()) {
+          const read = this.apiReference(input.get("callee") as AstPath);
+          if (
+            (read?.source === "fs" || read?.source === "node:fs") &&
+            read.members.length === 1 &&
+            read.members[0] === "readFileSync"
+          ) {
+            const readArgs = input.get("arguments") as AstPath[];
+            const options = ev(readArgs[1] ?? null);
+            const encoding = object(options) ? options.encoding : options;
+            if (
+              args.length !== 1 ||
+              readArgs.length > 2 ||
+              ![undefined, null, "utf8", "utf-8"].includes(encoding as string | null | undefined)
+            )
+              return this.unknown(input, "unresolved-env-file");
+            const file = ev(readArgs[0] ?? null);
+            const text = typeof file === "string" ? this.imports.readEnvText(file) : null;
+            return text === null ? this.unknown(input, "unresolved-env-file") : parseEnv(text);
+          }
+        }
+        const text = ev(input ?? null);
+        return typeof text === "string" ? parseEnv(text) : this.unknown(p, "unresolved-env-file");
+      }
       if (
         p.isCallExpression() &&
         (reference?.source === "node:path" || reference?.source === "path") &&
@@ -571,25 +731,32 @@ class StaticConfig {
         !callee.scope.getBinding("require") &&
         args[0]?.isStringLiteral()
       ) {
-        const target = this.imports.resolve(p, args[0].node.value);
+        const source = args[0].node.value;
+        if (source.endsWith(".json")) {
+          const value = this.imports.readJson(p, source);
+          return value === undefined ? UNKNOWN : value;
+        }
+        const target = this.imports.resolve(p, source);
         return target ? this.exported(target, "default", frame, depth) : UNKNOWN;
       }
-      const fn = ev(callee);
+      const fn = optional ? chained : ev(callee);
       if (!fn || typeof fn !== "object" || !(TAG in fn) || fn[TAG] !== "function")
         return this.unknown(p, "unsupported-call");
-      return this.call(
-        fn as FunctionValue,
-        args.map((arg) => ev(arg as AstPath)),
-        depth,
-      );
+      const values: Value[] = [];
+      for (const arg of args) {
+        if (!arg.isSpreadElement()) values.push(ev(arg));
+        else if (!this.appendArraySpread(values, ev(arg.get("argument")), arg)) return UNKNOWN;
+      }
+      return this.call(fn, values, depth);
     }
     return this.unknown(p);
   }
-  private call(fn: FunctionValue, args: Value[], depth: number): Value {
+  private call(fn: FunctionValue, args: Value[], depth: number, factory = false): Value {
     const p = fn.path;
     if (!p.isFunction() || p.node.async || p.node.generator)
       return this.unknown(p, "async-or-generator-helper");
     const frame = new Map(fn.frame);
+    if (factory) this.factoryFrames.add(frame);
     const bind = (param: AstPath, value: Value): void => {
       if (param.isAssignmentPattern()) {
         bind(
@@ -615,56 +782,133 @@ class StaticConfig {
           bind(prop.get("value"), object(value) ? value[key] : UNKNOWN);
         }
       }
+      if (param.isArrayPattern())
+        param.get("elements").forEach((item, index) => {
+          if (item.node) bind(item as AstPath, Array.isArray(value) ? value[index] : UNKNOWN);
+        });
     };
     p.get("params").forEach((param, index) => bind(param, args[index]));
     const body = p.get("body");
     if (!body.isBlockStatement()) return this.evaluate(body, frame, depth);
-    let conditional = false;
+    const controls = new Set<t.Node>();
     body.traverse({
       Function(nested) {
         nested.skip();
       },
-      ReturnStatement(returned) {
-        if (
-          returned.findParent((parent) =>
-            parent === body
-              ? false
-              : CONTROLS.has(parent.node.type) && parent.getFunctionParent() === p,
-          )
+      "ReturnStatement|ThrowStatement"(returned) {
+        for (
+          let parent: AstPath | null = returned.parentPath;
+          parent && parent.node !== body.node;
+          parent = parent.parentPath
         )
-          conditional = true;
+          controls.add(parent.node);
       },
     });
-    if (conditional) return this.unknown(p, "conditional-return");
-    const returned = this.returned(body);
-    return returned ? this.evaluate(returned.get("argument") as AstPath, frame, depth) : undefined;
+    const returned = this.returned(body, controls, frame, depth);
+    return returned === NO_RETURN ? undefined : returned;
   }
-  private returned(block: AstPath): AstPath | null {
-    if (!block.isBlockStatement()) return null;
-    for (const statement of block.get("body")) {
-      if (statement.isReturnStatement()) return statement;
-      if (statement.isBlockStatement()) {
-        const result = this.returned(statement);
-        if (result) return result;
+  private returned(
+    statement: AstPath | null,
+    controls: ReadonlySet<t.Node>,
+    frame: Map<Binding, Value>,
+    depth: number,
+  ): Value | typeof NO_RETURN {
+    if (!statement?.node) return NO_RETURN;
+    if (depth > 64) return this.unknown(statement, "conditional-return");
+    if (statement.isReturnStatement())
+      return this.evaluate(statement.get("argument") as AstPath, frame, depth);
+    if (statement.isBlockStatement()) {
+      for (const child of statement.get("body")) {
+        const value = this.returned(child, controls, frame, depth + 1);
+        if (value !== NO_RETURN) return value;
       }
+      return NO_RETURN;
     }
-    return null;
+    if (statement.isThrowStatement()) return this.unknown(statement, "conditional-return");
+    if (!controls.has(statement.node)) return NO_RETURN;
+    if (statement.isIfStatement()) {
+      const condition = this.evaluate(statement.get("test"), frame, depth);
+      if (!primitive(condition)) return this.unknown(statement, "conditional-return");
+      return this.returned(
+        statement.get(condition ? "consequent" : "alternate") as AstPath,
+        controls,
+        frame,
+        depth + 1,
+      );
+    }
+    if (statement.isSwitchStatement()) {
+      const selector = this.evaluate(statement.get("discriminant"), frame, depth);
+      if (!primitive(selector)) return this.unknown(statement, "conditional-return");
+      const cases = statement.get("cases");
+      let start = -1;
+      let fallback = -1;
+      for (const [index, branch] of cases.entries()) {
+        const test = branch.get("test");
+        if (!test.node) {
+          fallback = index;
+          continue;
+        }
+        const value = this.evaluate(test as AstPath, frame, depth);
+        if (!primitive(value)) return this.unknown(statement, "conditional-return");
+        if (selector === value) {
+          start = index;
+          break;
+        }
+      }
+      const selected = start === -1 ? fallback : start;
+      if (selected === -1) return NO_RETURN;
+      for (const branch of cases.slice(selected)) {
+        for (const child of branch.get("consequent")) {
+          if (child.isReturnStatement())
+            return this.evaluate(child.get("argument") as AstPath, frame, depth);
+          if (child.isBreakStatement() && !child.node.label) return NO_RETURN;
+          if (!child.isEmptyStatement()) return this.unknown(child, "conditional-return");
+        }
+      }
+      return NO_RETURN;
+    }
+    return this.unknown(statement, "conditional-return");
   }
   config(): Value {
     if (this.configResult) return this.configResult.value;
     const value = this.exported(this.parsed, "default");
+    const origin = value && typeof value === "object" ? this.configOrigins.get(value) : undefined;
+    // defineConfig returns its argument. Only an exported factory gets the bundler's arguments.
     const result =
       value && typeof value === "object" && TAG in value && value[TAG] === "function"
-        ? this.call(value as FunctionValue, [], 0)
+        ? this.call(value, this.factoryArgs(this.bundlerFor(origin)), 0, true)
         : value;
-    this.configResult = { value: result };
+    this.configResult = {
+      value: result,
+      origin: origin ?? (object(result) ? this.configOrigins.get(result) : undefined),
+    };
     return result;
+  }
+  private factoryArgs(bundler: string | undefined): Value[] {
+    const { mode = "development", command } = this.context;
+    if (bundler === "vite")
+      return [
+        {
+          command: command === "build" ? "build" : "serve",
+          mode,
+          isPreview: command === "preview",
+        },
+      ];
+    if (bundler === "rsbuild")
+      return [
+        {
+          command: command ?? "dev",
+          env: this.env.NODE_ENV ?? (command ? "production" : "development"),
+          envMode: mode,
+        },
+      ];
+    return [];
   }
   configForDevRoutes(): Value {
     const config = this.config();
     if (!this.readUnresolvedEnv) return config;
     // Rsbuild or the shell may supply variables absent from discovery's env files.
-    return new StaticConfig(this.imports, this.env, noLog, UNKNOWN).config();
+    return new StaticConfig(this.imports, this.env, noLog, this.context, UNKNOWN).config();
   }
   options(): ObjectValue | null {
     const config = this.config(); // Only values retained in the exported config participate.
@@ -706,11 +950,13 @@ export function discoverSource(
   env: Record<string, string>,
 ): LocalApp | null {
   const parsed = parseProgram(source, filePath);
-  return parsed ? readConfigCandidate(parsed, source, filePath, env).app : null;
+  return parsed ? readConfigCandidate(new ConfigImports(parsed), source, env).app : null;
 }
 
 interface ConfigCandidate {
   app: LocalApp | null;
+  bundler?: string;
+  importedBundler?: ConfigBundler;
   port: number | null;
   outputDir: string | null;
   bundlerZipName?: string;
@@ -720,23 +966,25 @@ interface ConfigCandidate {
 }
 
 export function readConfigCandidate(
-  parsed: Program,
+  imports: ConfigImports,
   source: string,
-  filePath: string,
   env: Record<string, string>,
-  dependencies?: Set<string>,
   log: LogContext = noLog,
+  context?: ConfigContext,
 ): ConfigCandidate {
-  const evaluator = new StaticConfig(new ConfigImports(parsed, dependencies, log), env, log);
+  const filePath = imports.entry.file;
+  const evaluator = new StaticConfig(imports, env, log, {
+    ...context,
+    bundler: context?.bundler ?? /^(vite|rsbuild)\.config\./.exec(path.basename(filePath))?.[1],
+  });
   const options = evaluator.options();
   const config = evaluator.config();
+  const { bundler, importedBundler } = evaluator;
   const server = object(config) && object(config.server) ? config.server : null;
   const devServer = object(config) && object(config.devServer) ? config.devServer : null;
   const port = portValue(server?.port) ?? portValue(devServer?.port);
   const serverBase = string(server?.base) ?? "";
-  const rsbuildBase = path.basename(filePath).startsWith("rsbuild.config.")
-    ? serverBase
-    : undefined;
+  const rsbuildBase = bundler === "rsbuild" ? serverBase : undefined;
   const resolveRsbuildDevManifest =
     rsbuildBase !== undefined &&
     object(config) &&
@@ -747,7 +995,15 @@ export function readConfigCandidate(
   const outputDir = buildOutputDir(config);
   const name = options && string(options.name);
   if (!options || !name)
-    return { app: null, port, outputDir, rsbuildBase, resolveRsbuildDevManifest };
+    return {
+      app: null,
+      bundler,
+      importedBundler,
+      port,
+      outputDir,
+      rsbuildBase,
+      resolveRsbuildDevManifest,
+    };
   const dts = object(options.dts) ? options.dts : null;
   const generateTypes = dts ? flag(dts.generateTypes, true) : options.dts === true;
   const consumeTypes = dts ? flag(dts.consumeTypes, true) : options.dts === true;
@@ -773,9 +1029,10 @@ export function readConfigCandidate(
       ? joinManifestPath(assetPrefix || serverBase, fileName)
       : joinManifestPath(rsbuildBase, rsbuildManifestFile);
   const devManifestPath = resolveRsbuildDevManifest?.(rsbuildManifestFile);
+  const folder = context?.appDir ?? path.dirname(filePath);
   const app: LocalApp = {
     name,
-    folder: path.dirname(filePath),
+    folder,
     configFile: evaluator.origins.get(options) ?? filePath,
     port,
     manifest: flag(options.manifest, false),
@@ -794,8 +1051,7 @@ export function readConfigCandidate(
       : [],
     ...(generateTypes && {
       buildConfigFile: filePath,
-      generatedZipPath:
-        zipName && zipOutput ? path.resolve(path.dirname(filePath), zipOutput, zipName) : null,
+      generatedZipPath: zipName && zipOutput ? path.resolve(folder, zipOutput, zipName) : null,
       hasExposes:
         exposes === UNKNOWN ||
         (object(exposes) && Object.keys(exposes).length > 0) ||
@@ -804,6 +1060,8 @@ export function readConfigCandidate(
   };
   return {
     app,
+    bundler,
+    importedBundler,
     port,
     outputDir,
     rsbuildBase,
@@ -888,7 +1146,7 @@ function readRemote(alias: string, value: Value): LocalApp["remotes"][number] {
   if (value && typeof value === "object" && TAG in value && value[TAG] === "missing-template")
     return { alias, name: (value as MissingTemplate).name || alias, url: null };
   if (typeof value !== "string") return { alias, name: alias, url: null };
-  const at = value.indexOf("@");
+  const at = remoteNameSeparator(value);
   const name = at > 0 ? value.slice(0, at) : alias;
   const url = (at > 0 ? value.slice(at + 1) : value).trim();
   return { alias, name, url: url && !url.includes("${") ? url : null };

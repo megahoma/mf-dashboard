@@ -105,6 +105,7 @@ interface GenerationInput {
   name: string;
   configFile: string;
   envMode: string;
+  env?: Readonly<Record<string, string>>;
 }
 
 export interface LocalGenerationInput extends GenerationInput {

@@ -154,7 +154,7 @@ test("Start stays inline while Rebuild and Fetch use the types context menu", ()
   const byCommand = new Map(items.map((item) => [item.command, item]));
   assert.deepEqual(byCommand.get("mf-dashboard.start"), {
     command: "mf-dashboard.start",
-    when: "view == mf-dashboard && viewItem =~ /^silent($| )/",
+    when: "view == mf-dashboard && viewItem =~ /^(silent|unknownPort)($| )/",
     group: "inline",
   });
   assert.deepEqual(byCommand.get("mf-dashboard.rebuildTypes"), {

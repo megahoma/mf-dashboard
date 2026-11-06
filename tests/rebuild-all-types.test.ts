@@ -709,9 +709,11 @@ test("the built-in generator calls a Rsbuild config function with the discovery 
     path.join(folder, "rsbuild.config.cjs"),
     `
 const { pluginModuleFederation } = require("@module-federation/rsbuild-plugin");
+const fs = require("node:fs");
 module.exports = ({ command, env, envMode }) => {
-  if (command !== "build" || env !== "development" || envMode !== "development")
+  if ((command !== "build" && command !== "dev") || env !== "development" || envMode !== "development")
     throw new Error("unexpected Rsbuild config parameters");
+  fs.writeFileSync("config-command.txt", command);
   return { plugins: [pluginModuleFederation({
     name: "catalog",
     exposes: { "./index": "./index.ts" },
@@ -731,9 +733,11 @@ fs.writeFileSync("dist/@mf-types.zip", Buffer.concat([
   );
   const app = readAppFolder(folder, "development", "catalog");
   assert.ok(app?.generateTypes);
+  assert.equal(fs.existsSync(path.join(folder, "config-command.txt")), false);
   const report = await rebuildAllTypes(f.context([app]));
   assert.deepEqual(report.failed, []);
   assert.deepEqual(report.rebuilt, ["catalog"]);
+  assert.equal(fs.readFileSync(path.join(folder, "config-command.txt"), "utf8"), "build");
   assert.equal(
     fs
       .readFileSync(path.join(folder, "dist", "@mf-types.zip"))
@@ -741,6 +745,70 @@ fs.writeFileSync("dist/@mf-types.zip", Buffer.concat([
       .toString(),
     "local",
   );
+  assert.equal(process.env[envKey], original);
+});
+
+test("bulk generation uses the selected script environment and rebuilds when it changes", async (t) => {
+  const f = fixture(t);
+  const { name, folder } = f.app("fixture-profile", 4653);
+  const envKey = "MF_DASHBOARD_TEST_VARIANT";
+  const original = process.env[envKey];
+  fs.writeFileSync(
+    path.join(folder, "package.json"),
+    JSON.stringify({
+      scripts: {
+        first: `cross-env ${envKey}=first rsbuild dev --env-mode fixture.profile`,
+        second: `cross-env ${envKey}=second rsbuild dev --env-mode fixture.profile`,
+      },
+    }),
+  );
+  fs.writeFileSync(
+    path.join(folder, ".env.fixture.profile"),
+    `${envKey}=fallback\nMF_DASHBOARD_TEST_APP=${name}\n`,
+  );
+  fs.writeFileSync(path.join(folder, "tsconfig.json"), '{"files":["index.ts"]}');
+  fs.writeFileSync(
+    path.join(folder, "rsbuild.config.cjs"),
+    `const { pluginModuleFederation } = require("@module-federation/rsbuild-plugin");
+    module.exports = ({ envMode }) => {
+      if (envMode !== "fixture.profile") throw new Error("wrong generation profile");
+      return { plugins: [pluginModuleFederation({
+        name: process.env.MF_DASHBOARD_TEST_APP,
+        exposes: { "./index": "./index.ts" }, dts: { generateTypes: true, consumeTypes: false }
+      })] };
+    };`,
+  );
+  installGeneratorFixture(
+    folder,
+    `fs.mkdirSync("dist", { recursive: true });
+    fs.writeFileSync("dist/@mf-types.zip", Buffer.concat([
+      Buffer.from([0x50, 0x4b, 3, 4]), Buffer.from(process.env.${envKey})
+    ]));`,
+  );
+  const run = (start: string) => {
+    const [app] = loadKnownApps(
+      [{ name: "workspace", path: folder }],
+      { [name]: { path: ".", scripts: { start } } },
+      "development",
+    );
+    assert.equal(app?.name, name);
+    return rebuildAllTypes(f.context([app]));
+  };
+  const archive = () =>
+    fs
+      .readFileSync(path.join(folder, "dist", "@mf-types.zip"))
+      .subarray(4)
+      .toString();
+  const first = await run("first");
+  assert.deepEqual(first.failed, []);
+  assert.deepEqual(first.rebuilt, [name]);
+  assert.equal(archive(), "first");
+  assert.deepEqual((await run("first")).current, [name]);
+
+  const second = await run("second");
+  assert.deepEqual(second.failed, []);
+  assert.deepEqual(second.rebuilt, [name]);
+  assert.equal(archive(), "second");
   assert.equal(process.env[envKey], original);
 });
 
@@ -898,7 +966,7 @@ test("single rebuild generates in a child and checks the published ZIP using the
     `
 const { pluginModuleFederation } = require("@module-federation/rsbuild-plugin");
 module.exports = { server: { port: ${port} }, plugins: [pluginModuleFederation({
-  name: "${name}", exposes: { "./index": "./index.ts" }, dts: { generateTypes: {} }
+  name: process.env.MF_DASHBOARD_TEST_PUBLISHED_NAME, exposes: { "./index": "./index.ts" }, dts: { generateTypes: {} }
 })] };
 `,
   );
@@ -930,6 +998,7 @@ fs.writeFileSync(${JSON.stringify(zipPath)}, Buffer.from(${JSON.stringify(bytes)
       name,
       configFile,
       envMode: "development",
+      env: { MF_DASHBOARD_TEST_PUBLISHED_NAME: name },
       port: null,
       manifestPath,
     }),

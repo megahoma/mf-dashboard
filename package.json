@@ -171,7 +171,7 @@
         },
         {
           "command": "mf-dashboard.start",
-          "when": "view == mf-dashboard && viewItem =~ /^silent($| )/",
+          "when": "view == mf-dashboard && viewItem =~ /^(silent|unknownPort)($| )/",
           "group": "inline"
         },
         {
@@ -308,6 +308,10 @@
               },
               "workspaceFolder": {
                 "type": "string"
+              },
+              "configFile": {
+                "type": "string",
+                "description": "%configuration.apps.configFile%"
               },
               "manifestPath": {
                 "type": "string"

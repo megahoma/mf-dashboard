@@ -5,7 +5,7 @@ process.once("disconnect", () => process.exit(1));
 process.once("message", async (input: GenerationRequest) => {
   let reply: GenerationReply;
   try {
-    if ("env" in input) Object.assign(process.env, input.env);
+    if (input.env) Object.assign(process.env, input.env);
     reply = { result: await generateTypesOnDisk(input) };
   } catch (error) {
     reply = {
