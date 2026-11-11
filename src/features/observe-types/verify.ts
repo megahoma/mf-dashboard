@@ -1,4 +1,4 @@
-import { noLog, safeError, type LogContext } from "../../shared/logging.ts";
+import { logDuration, noLog, safeError, type LogContext } from "../../shared/logging.ts";
 import path from "node:path";
 import {
   linkProbeId,
@@ -28,7 +28,7 @@ export async function verifyTypeInstalls(
   confirmations: ConfirmationStore,
   checks: Map<string, InstallCheck>,
   log: LogContext = noLog,
-  compare = createArchiveComparisonBatch(),
+  compare = createArchiveComparisonBatch(log),
   installedEvidence = new Map<string, InstalledEvidence>(),
   readInstalled = readInstalledEvidenceAsync,
   selectedLinks?: ReadonlySet<string>,
@@ -42,6 +42,7 @@ export async function verifyTypeInstalls(
     const consumer = byName.get(link.consumer);
     const probe = book.links.get(linkProbeId(link));
     if (!consumer?.consumeTypes) continue;
+    const started = Date.now();
     try {
       const destination = refetchTarget(consumer.folder, link.alias, consumer.typesFolder);
       const key = path.resolve(destination);
@@ -100,6 +101,12 @@ export async function verifyTypeInstalls(
         consumer: link.consumer,
         alias: link.alias,
         ...safeError(error),
+      });
+    } finally {
+      logDuration(log, "types.install.check.finished", started, {
+        consumer: link.consumer,
+        alias: link.alias,
+        zipUrl: probe?.zipUrl,
       });
     }
   }

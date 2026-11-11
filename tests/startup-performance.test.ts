@@ -5,7 +5,7 @@ import path from "node:path";
 import { registerHooks } from "node:module";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
-import type { ExtensionContext } from "vscode";
+import type { ConfigurationChangeEvent, ExtensionContext } from "vscode";
 import * as stub from "./support/vscode.ts";
 import { defaultWorkspaceSettings } from "../src/features/init-settings/defaults.ts";
 import { scanWorkspace, createProbeBook } from "../src/entities/microfrontend/index.ts";
@@ -46,11 +46,18 @@ async function start(
   root: string,
   initial: Record<string, unknown>,
   onWrite?: (key: string) => void,
+  emitConfigurationEvents = false,
 ) {
   const values = new Map(Object.entries(initial));
   const writes: string[] = [];
   const defaults = defaultWorkspaceSettings() as unknown as Record<string, unknown>;
   const subscriptions: { dispose(): unknown }[] = [];
+  const changes = new stub.EventEmitter<ConfigurationChangeEvent>();
+  t.mock.method(
+    stub.workspace,
+    "onDidChangeConfiguration",
+    changes.event as unknown as typeof stub.workspace.onDidChangeConfiguration,
+  );
   t.after(() => {
     for (const subscription of subscriptions.reverse()) subscription.dispose();
   });
@@ -75,6 +82,8 @@ async function start(
       const full = section ? `${section}.${key}` : key;
       writes.push(full);
       values.set(full, value);
+      if (emitConfigurationEvents)
+        changes.fire({ affectsConfiguration: (key) => key === full } as ConfigurationChangeEvent);
       onWrite?.(full);
     },
   })) as unknown as typeof stub.workspace.getConfiguration);
@@ -100,7 +109,7 @@ async function start(
   for (
     let turn = 0;
     turn < 100 &&
-    !channel.messages.some((message) => /refresh.completed|startup.failed/.test(message));
+    !channel.messages.some((message) => /startup.completed|startup.failed/.test(message));
     turn++
   )
     await new Promise<void>((resolve) => setImmediate(resolve));
@@ -109,8 +118,22 @@ async function start(
     channel.messages.join("\n"),
   );
   assert.ok(session);
-  return { session, values, writes };
+  return { session, values, writes, channel };
 }
+
+test("startup diagnostics expose settings writes and preserve all configuration-triggered refreshes", async (t) => {
+  const { root, writeApp } = fixture(t);
+  writeApp("shell");
+  writeApp("widget");
+  const { channel, writes } = await start(t, root, {}, undefined, true);
+  for (let turn = 0; turn < 20; turn++) await new Promise<void>((resolve) => setImmediate(resolve));
+  const refreshes = () => channel.messages.filter((text) => text.startsWith("refresh.started"));
+  assert.equal(writes.length, Object.keys(defaultWorkspaceSettings()).length + 1);
+  assert.equal(refreshes().length, 8, channel.messages.join("\n"));
+  assert.ok(channel.messages.some((text) => text.startsWith("settings.seed.completed")));
+  assert.ok(channel.messages.some((text) => text.startsWith("discovery.scan.completed")));
+  assert.ok(channel.messages.some((text) => text.startsWith("startup.completed")));
+});
 
 for (const seeded of [false, true]) {
   test(`configured startup skips workspace discovery with defaults ${seeded ? "saved" : "missing"}`, async (t) => {

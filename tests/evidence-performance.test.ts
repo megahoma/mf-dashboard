@@ -21,7 +21,7 @@ import {
 } from "../src/entities/microfrontend/index.ts";
 import { verifyTypeInstalls, type InstallCheck } from "../src/features/observe-types/verify.ts";
 import { diagnosticFields } from "../src/shared/diagnostic-error.ts";
-import type { LogContext } from "../src/shared/logging.ts";
+import { createLogger, type LogContext } from "../src/shared/logging.ts";
 import { localApp } from "./support/app.ts";
 
 after(disposeEvidenceWorker);
@@ -242,6 +242,47 @@ test("archive batch retains failures and a new batch permits retry", async (t) =
     true,
     "the next refresh retries failed archive evidence",
   );
+});
+
+test("verification logs archive extraction and internal installed reads in the same operation", async (t) => {
+  const f = archiveFixture(t);
+  f.write("@mf-types/widget/index.d.ts", "export type Value = 1;");
+  const app = localApp("shell", f.root, { consumeTypes: true });
+  const link = {
+    consumer: app.name,
+    alias: "widget",
+    remoteName: "widget",
+    url: "https://example.test/manifest.json",
+  };
+  const book = createProbeBook();
+  putLinkResult(book, {
+    link,
+    manifestReachable: true,
+    buildVersion: null,
+    zipUrl: f.input.url,
+    zipHash: f.input.expectedZipHash,
+    zipMtime: null,
+    exposes: [],
+    shared: [],
+  });
+  const fetch = t.mock.method(globalThis, "fetch", async () => new Response(f.bytes));
+  const messages: string[] = [];
+  const log = createLogger({
+    enabled: () => true,
+    write: (_level, message) => messages.push(message),
+  }).operation("manual");
+  const confirmations = createConfirmationStore();
+  assert.equal(await verifyTypeInstalls([app], [link], book, confirmations, new Map(), log), true);
+  const tasks = messages.filter((message) => message.startsWith("evidence.task.finished"));
+  assert.equal(tasks.filter((message) => message.includes("task=archive")).length, 1);
+  assert.equal(tasks.filter((message) => message.includes("task=installed")).length, 3);
+  for (const message of tasks) {
+    assert.match(message, /operation=1 source=manual/);
+    assert.match(message, /durationMs=\d+/);
+  }
+  assert.equal(fetch.mock.callCount(), 1);
+  assert.equal(f.extractions(), 1);
+  assert.equal(confirmations.install(link)?.zipHash, f.input.expectedZipHash);
 });
 
 test("verification downloads a rejected shared archive once per refresh across four consumers", async (t) => {

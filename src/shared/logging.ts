@@ -20,6 +20,20 @@ export const noLog: LogContext = {
   },
 };
 
+export function logDuration(
+  log: LogContext,
+  event: string,
+  started: number,
+  fields: LogFields = {},
+  level: LogLevel = "debug",
+): void {
+  const durationMs = Date.now() - started;
+  log.event(durationMs >= 1000 && level !== "error" ? "warn" : level, event, {
+    ...fields,
+    durationMs,
+  });
+}
+
 export function safeUrl(value: string): string {
   try {
     if (value.includes("${")) return "[invalid-url]";

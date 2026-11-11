@@ -1,4 +1,10 @@
-import { noLog, safeError, type LogContext, type LogFields } from "../../shared/logging.ts";
+import {
+  logDuration,
+  noLog,
+  safeError,
+  type LogContext,
+  type LogFields,
+} from "../../shared/logging.ts";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -425,7 +431,7 @@ export class DashboardSession {
               loadLog,
               current.startScript,
             );
-      log.event("debug", "config.loaded", {
+      logDuration(log, "config.loaded", started, {
         configured: Object.keys(current.apps ?? {}).length,
         loaded: loaded.length,
       });
@@ -476,17 +482,25 @@ export class DashboardSession {
     }
     this.pathWarnings = seenWarnings;
     this.probeRunning = false;
-    log.event(source === "timer" ? "debug" : "info", "refresh.completed", {
-      apps: this.loaded.length,
-      links: this.book.links.size,
-      extras: this.extraUrls.length,
-      durationMs: Date.now() - started,
-    });
+    const renderStarted = Date.now();
     this.beforeRefreshChange(log);
     this.onChange();
+    logDuration(
+      log,
+      "refresh.completed",
+      started,
+      {
+        apps: this.loaded.length,
+        links: this.book.links.size,
+        extras: this.extraUrls.length,
+        renderMs: Date.now() - renderStarted,
+      },
+      source === "timer" ? "debug" : "info",
+    );
   }
 
   prepareDiscovery(log = this.log.operation("startup")): string[] {
+    const started = Date.now();
     this.preparedDiscovery = undefined;
     const current = this.ports.readSettings();
     const roots = this.ports.roots();
@@ -522,11 +536,17 @@ export class DashboardSession {
       scans,
       parsed,
     };
+    logDuration(
+      log,
+      "discovery.prepare.completed",
+      started,
+      { roots: roots.length, apps: parsed.size },
+      "info",
+    );
     return scans.flatMap(({ apps }) => Object.keys(apps));
   }
 
-  async discover(): Promise<void> {
-    const log = this.log.operation("discovery");
+  async discover(log = this.log.operation("discovery")): Promise<void> {
     const started = Date.now();
     let failureFields: LogFields = {};
     log.event("info", "discovery.started");

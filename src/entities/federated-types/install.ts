@@ -8,6 +8,7 @@ import { filesFingerprint } from "../../shared/fingerprint.ts";
 import { readLimitedBody } from "../../shared/http-body.ts";
 import { createKeyedLock } from "../../shared/queue.ts";
 import { DiagnosticError } from "../../shared/diagnostic-error.ts";
+import { noLog, type LogContext } from "../../shared/logging.ts";
 import { resolveTypesPath, typesPathEscape } from "./destination.ts";
 import { readInstalledEvidenceAsync, runEvidenceTask } from "./evidence-worker-client.mts";
 
@@ -206,7 +207,9 @@ export function compareInstalledArchive(input: InstallTypesInput): Promise<Archi
 }
 
 // Share outcomes for this refresh, including failures; archive bytes are released after each task.
-export function createArchiveComparisonBatch(): typeof compareInstalledArchive {
+export function createArchiveComparisonBatch(
+  log: LogContext = noLog,
+): typeof compareInstalledArchive {
   const archives = new Map<string, Promise<InstallTypesResult>>();
   return (input) =>
     destinationLock(path.resolve(input.destination), async () => {
@@ -223,22 +226,22 @@ export function createArchiveComparisonBatch(): typeof compareInstalledArchive {
               stage: "archive",
               reason: "fingerprint-mismatch",
             });
-          const filesFingerprint = await runEvidenceTask<string>({
-            kind: "archive",
-            bytes: buffer,
-            appDir: input.appDir,
-          });
+          const filesFingerprint = await runEvidenceTask<string>(
+            { kind: "archive", bytes: buffer, appDir: input.appDir },
+            log,
+          );
           return { zipHash, filesFingerprint };
         })();
         archives.set(key, archive);
       }
-      return compareArchive(input, await archive);
+      return compareArchive(input, await archive, log);
     });
 }
 
 async function compareArchive(
   input: InstallTypesInput,
   loaded: InstallTypesResult,
+  log: LogContext = noLog,
 ): Promise<ArchiveComparison> {
   const destination = path.resolve(input.destination);
   if (!fs.existsSync(destination) || !fs.statSync(destination).isDirectory()) {
@@ -247,7 +250,7 @@ async function compareArchive(
       reason: "directory-missing",
     });
   }
-  const installed = await readInstalledEvidenceAsync(destination, undefined, true);
+  const installed = await readInstalledEvidenceAsync(destination, log, true);
   const fingerprint = installed.filesFingerprint;
   if (fingerprint === filesFingerprint([]))
     throw new DiagnosticError("unzip: types directory is empty", {

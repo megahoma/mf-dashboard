@@ -1,4 +1,4 @@
-import { createLogger, safeError, type LogContext } from "../shared/logging.ts";
+import { createLogger, logDuration, safeError, type LogContext } from "../shared/logging.ts";
 import {
   createConfirmationStore,
   type ConfirmationSnapshot,
@@ -218,8 +218,11 @@ async function showRebuildReport(report: RebuildAllReport): Promise<void> {
 }
 
 async function openPanel(provider: MfDashboardProvider, log: LogContext): Promise<void> {
+  log = log.operation("startup");
+  const started = Date.now();
+  log.event("info", "startup.started");
   try {
-    await ensureWorkspaceSettings(provider.session, log.operation("startup"));
+    await ensureWorkspaceSettings(provider.session, log);
     const inspected = vscode.workspace.getConfiguration("mf-dashboard").inspect("apps");
     const appsDefined =
       inspected != null &&
@@ -228,6 +231,7 @@ async function openPanel(provider: MfDashboardProvider, log: LogContext): Promis
         inspected.globalValue !== undefined);
     if (startupLoad(appsDefined) === "discover") await provider.discover();
     else await provider.refresh("startup");
+    logDuration(log, "startup.completed", started, {}, "info");
   } finally {
     provider.armProbe();
   }
@@ -275,9 +279,16 @@ async function ensureWorkspaceSettings(
     return;
   const foundNames = apps === undefined ? session.prepareDiscovery(log) : Object.keys(apps);
   const seed = settingsSeed(foundNames, defined);
+  const started = Date.now();
   for (const [key, value] of Object.entries(seed)) {
-    await config.update(key, value, vscode.ConfigurationTarget.Workspace);
+    const writeStarted = Date.now();
+    try {
+      await config.update(key, value, vscode.ConfigurationTarget.Workspace);
+    } finally {
+      logDuration(log, "settings.write.finished", writeStarted, { key });
+    }
   }
+  logDuration(log, "settings.seed.completed", started, { keys: Object.keys(seed).length }, "info");
 }
 
 function readConfirmations(context: vscode.ExtensionContext): ConfirmationSnapshot | undefined {

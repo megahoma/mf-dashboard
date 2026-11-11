@@ -1,7 +1,7 @@
 import { describeLink } from "../src/entities/federated-types/observe.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createLogger, safeError, safeUrl } from "../src/shared/logging.ts";
+import { createLogger, logDuration, safeError, safeUrl } from "../src/shared/logging.ts";
 import { DashboardSession } from "../src/widgets/mf-dashboard-tree/session.ts";
 import { localApp } from "./support/app.ts";
 import {
@@ -62,6 +62,27 @@ test("disabled logs do not evaluate fields, and throwing sinks cannot break work
     },
   ])
     assert.doesNotThrow(() => createLogger(sink).operation("test").event("info", "completed"));
+});
+
+test("slow timings surface at Info and retain URL redaction", (t) => {
+  const messages: string[] = [];
+  const log = createLogger({
+    enabled: (level) => ["info", "warn", "error"].includes(level),
+    write: (level, text) => messages.push(`${level} ${text}`),
+  });
+  t.mock.method(Date, "now", () => 2500);
+  logDuration(log, "fast", 2400);
+  assert.deepEqual(messages, []);
+  logDuration(
+    log,
+    "slow",
+    0,
+    { url: "https://user:password@example.com/manifest.json?token=secret" },
+    "trace",
+  );
+  assert.match(messages[0], /^warn slow url=https:\/\/example.com\/manifest.json durationMs=2500$/);
+  logDuration(log, "failed", 0, {}, "error");
+  assert.match(messages[1], /^error failed durationMs=2500$/);
 });
 
 test("nested events share an operation and separate actions get distinct ids", () => {

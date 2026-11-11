@@ -1,4 +1,10 @@
-import { noLog, safeError, type LogContext } from "../../shared/logging.ts";
+import {
+  logDuration,
+  noLog,
+  safeError,
+  type LogContext,
+  type LogFields,
+} from "../../shared/logging.ts";
 import { localManifestUrl, isHttpUrl } from "../../shared/urls.ts";
 import { createHash } from "node:crypto";
 import type { LocalApp } from "./discover.ts";
@@ -279,8 +285,7 @@ export function createProbeCycle(
       inflight = run
         .then(
           () => {
-            log.event("debug", "probe.completed", {
-              durationMs: Date.now() - started,
+            logDuration(log, "probe.completed", started, {
               manifestRequests: cache.manifestRequests,
               zipRequests: cache.zipRequests,
             });
@@ -374,8 +379,13 @@ function createRequestQueue(): RequestQueue {
   };
 }
 
-function request<T>(work: () => Promise<T>, cache?: ZipCache): Promise<T> {
-  const timed = () => withTimeout(work(), REQUEST_TIMEOUT_MS);
+function request<T>(work: () => Promise<T>, cache?: ZipCache, fields: LogFields = {}): Promise<T> {
+  const queued = Date.now();
+  const timed = () => {
+    const queueMs = Date.now() - queued;
+    cache?.log.event(queueMs >= 1000 ? "warn" : "trace", "request.started", { ...fields, queueMs });
+    return withTimeout(work(), REQUEST_TIMEOUT_MS);
+  };
   return cache ? cache.request(timed) : timed();
 }
 
@@ -422,26 +432,37 @@ async function requestZip(url: string, net: Net, cache?: ZipCache): Promise<ZipP
           previous?.zipMtime != null ? { ifModifiedSince: previous.zipMtime } : undefined,
         ),
       cache,
+      { kind: "zip", url },
     );
   } catch (error) {
-    cache?.log.event("trace", "zip.failed", {
-      url,
-      reason:
-        error instanceof Error && (error.name === "TimeoutError" || error.message === "timeout")
-          ? "timeout"
-          : "network",
-      durationMs: Date.now() - started,
-      ...safeError(error),
-    });
+    logDuration(
+      cache?.log ?? noLog,
+      "zip.failed",
+      started,
+      {
+        url,
+        reason:
+          error instanceof Error && (error.name === "TimeoutError" || error.message === "timeout")
+            ? "timeout"
+            : "network",
+        ...safeError(error),
+      },
+      "trace",
+    );
     return null;
   }
-  cache?.log.event("trace", "zip.response", {
-    url,
-    status: zip?.status,
-    ok: zip?.ok ?? false,
-    bytes: zip?.body?.byteLength ?? 0,
-    durationMs: Date.now() - started,
-  });
+  logDuration(
+    cache?.log ?? noLog,
+    "zip.response",
+    started,
+    {
+      url,
+      status: zip?.status,
+      ok: zip?.ok ?? false,
+      bytes: zip?.body?.byteLength ?? 0,
+    },
+    "trace",
+  );
   if (zip?.notModified || zip?.status === 304) {
     if (!previous || previous.zipMtime == null) {
       cache?.log.event("trace", "zip.skipped", { url, reason: "304-without-prior-hash" });
@@ -498,25 +519,35 @@ async function requestManifest(
   let response: Awaited<ReturnType<Net["get"]>>;
   try {
     if (cache) cache.manifestRequests++;
-    response = await request(() => net.get(url), cache);
+    response = await request(() => net.get(url), cache, { kind: "manifest", url });
   } catch (error) {
     const timeout =
       error instanceof Error && (error.name === "TimeoutError" || error.message === "timeout");
-    log.event("trace", "manifest.failed", {
-      url,
-      reason: timeout ? "timeout" : "network",
-      durationMs: Date.now() - started,
-      ...safeError(error),
-    });
+    logDuration(
+      log,
+      "manifest.failed",
+      started,
+      {
+        url,
+        reason: timeout ? "timeout" : "network",
+        ...safeError(error),
+      },
+      "trace",
+    );
     return { ...blank, requestFailure: timeout ? "timeout" : "network" };
   }
-  log.event("trace", "manifest.response", {
-    url,
-    status: response.status,
-    ok: response.ok,
-    durationMs: Date.now() - started,
-    validJson: response.json != null,
-  });
+  logDuration(
+    log,
+    "manifest.response",
+    started,
+    {
+      url,
+      status: response.status,
+      ok: response.ok,
+      validJson: response.json != null,
+    },
+    "trace",
+  );
   if (!response.ok)
     return {
       ...blank,
