@@ -3,9 +3,9 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { fillTemplate, runShell } from "../src/shared/shell.ts";
-import { safeError } from "../src/shared/logging.ts";
-import { createSerialQueue } from "../src/shared/queue.ts";
+import { fillTemplate, runShell } from "../src/shared/lib/shell.ts";
+import { safeError } from "../src/shared/lib/logging.ts";
+import { createSerialQueue } from "../src/shared/lib/queue.ts";
 
 test("placeholder values are one quoted shell word", () => {
   if (process.platform === "win32") {

@@ -1,14 +1,12 @@
-import { describeLink } from "../src/entities/federated-types/observe.ts";
+import { describeLink } from "../src/entities/federated-types/lib/observe.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createLogger, logDuration, safeError, safeUrl } from "../src/shared/logging.ts";
-import { DashboardSession } from "../src/widgets/mf-dashboard-tree/session.ts";
+import { createLogger, logDuration, safeError, safeUrl } from "../src/shared/lib/logging.ts";
+import { DashboardSession } from "../src/widgets/mf-dashboard-tree/models/session.ts";
 import { localApp } from "./support/app.ts";
-import {
-  createProbeBook,
-  createProbeCycle,
-  type Net,
-} from "../src/entities/microfrontend/probe.ts";
+import { createProbeBook } from "../src/entities/microfrontend/lib/probe-book.ts";
+import { createProbeCycle } from "../src/entities/microfrontend/lib/probe.ts";
+import type { Net } from "../src/entities/microfrontend/models/probe.ts";
 
 test("logs strip URL secrets, reject invalid URLs and escape external line breaks", () => {
   const messages: string[] = [];

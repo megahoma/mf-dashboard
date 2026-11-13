@@ -6,7 +6,7 @@ import {
   extraManifestSettingsFile,
   problemDraft,
   problemSeverity,
-} from "../src/entities/status/problems.ts";
+} from "../src/entities/status/lib/problems.ts";
 
 test("extra manifest diagnostics follow the workspace value", () => {
   const folder = "/app";

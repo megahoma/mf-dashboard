@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { resolvePackageManager, startInvocation } from "../src/features/start-app/start.ts";
+import { resolvePackageManager, startInvocation } from "../src/features/start-app/lib/start.ts";
 
 function withTemp(run: (root: string) => void): void {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-pm-"));

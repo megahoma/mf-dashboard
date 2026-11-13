@@ -1,10 +1,12 @@
 import { parentPort } from "node:worker_threads";
-import { DiagnosticError } from "../../shared/diagnostic-error.ts";
-import type { LogContext } from "../../shared/logging.ts";
-import { sourceContains, sourceIdentity } from "./sources.ts";
-import { readInstalledEvidence } from "./observe.ts";
-import { fingerprintArchiveBytes } from "./install.ts";
-import type { EvidenceReply, EvidenceTask } from "./evidence-worker-client.mts";
+import { errorMessage } from "../../shared/lib/errors.ts";
+import { resolveLogFields } from "../../shared/lib/logging.ts";
+import { DiagnosticError } from "../../shared/models/diagnostic-error.ts";
+import type { LogContext } from "../../shared/models/logging.ts";
+import { fingerprintArchiveBytes } from "./lib/archive.ts";
+import { readInstalledEvidence } from "./lib/observe.ts";
+import { sourceContains, sourceIdentity } from "./lib/sources.ts";
+import type { EvidenceReply, EvidenceTask } from "./models/evidence-worker-client.ts";
 
 parentPort!.on("message", async (task: EvidenceTask) => {
   const reply: EvidenceReply = { events: [] };
@@ -13,7 +15,7 @@ parentPort!.on("message", async (task: EvidenceTask) => {
       return log;
     },
     event(level, event, fields) {
-      reply.events.push({ level, event, fields: typeof fields === "function" ? fields() : fields });
+      reply.events.push({ level, event, fields: resolveLogFields(fields) });
     },
   };
   try {
@@ -33,7 +35,7 @@ parentPort!.on("message", async (task: EvidenceTask) => {
     }
   } catch (error) {
     reply.error = {
-      message: error instanceof Error ? error.message : String(error),
+      message: errorMessage(error),
       code:
         error instanceof Error && "code" in error && typeof error.code === "string"
           ? error.code

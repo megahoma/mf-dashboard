@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { setImmediate } from "node:timers/promises";
-import { createProbeCycle, createProbeBook } from "../../src/entities/microfrontend/probe.ts";
+import { createProbeCycle } from "../../src/entities/microfrontend/lib/probe.ts";
+import { createProbeBook } from "../../src/entities/microfrontend/lib/probe-book.ts";
 
 const archives: WeakRef<Uint8Array>[] = [];
 let reached: () => void = () => {};

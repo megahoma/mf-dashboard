@@ -1,4 +1,4 @@
-import { createLogger } from "../src/shared/logging.ts";
+import { createLogger } from "../src/shared/lib/logging.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -14,10 +14,11 @@ import { createConfirmationStore } from "../src/entities/federated-types/index.t
 import {
   collectProducerEvidence,
   dependencyEvidence,
-} from "../src/features/rebuild-types/evidence.ts";
-import { rebuildTypes, type RebuildContext } from "../src/features/rebuild-types/workflow.ts";
-import { installRemoteTypes } from "../src/features/refetch-types/remote.ts";
-import { loadKnownApps } from "../src/widgets/mf-dashboard-tree/session.ts";
+} from "../src/features/rebuild-types/lib/evidence.ts";
+import { rebuildTypes } from "../src/features/rebuild-types/lib/workflow.ts";
+import type { RebuildContext } from "../src/features/rebuild-types/models/workflow.ts";
+import { installRemoteTypes } from "../src/features/refetch-types/lib/remote.ts";
+import { loadKnownApps } from "../src/widgets/mf-dashboard-tree/lib/known-apps.ts";
 import { localApp } from "./support/app.ts";
 
 test("a dependency named __proto__ retains its published ZIP hash", () => {

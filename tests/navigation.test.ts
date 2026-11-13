@@ -1,4 +1,4 @@
-import { createLogger } from "../src/shared/logging.ts";
+import { createLogger } from "../src/shared/lib/logging.ts";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
@@ -20,8 +20,8 @@ registerHooks({
     return nextResolve(specifier, context);
   },
 });
-const { ManifestDocuments } = await import("../src/features/open-manifest/documents.ts");
-const { MfDashboardProvider } = await import("../src/widgets/mf-dashboard-tree/provider.ts");
+const { ManifestDocuments } = await import("../src/features/open-manifest/models/documents.ts");
+const { MfDashboardProvider } = await import("../src/widgets/mf-dashboard-tree/models/provider.ts");
 
 test("Start uses the same saved app entry as discovery after a federation rename", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-renamed-launch-"));

@@ -16,8 +16,9 @@ import {
   linkProbeId,
   putLinkResult,
 } from "../src/entities/microfrontend/index.ts";
-import { verifyTypeInstalls, type InstallCheck } from "../src/features/observe-types/verify.ts";
-import { dashboardNodes } from "../src/widgets/mf-dashboard-tree/presentation.ts";
+import { verifyTypeInstalls } from "../src/features/observe-types/lib/verify.ts";
+import type { InstallCheck } from "../src/features/observe-types/models/verify.ts";
+import { dashboardNodes } from "../src/widgets/mf-dashboard-tree/lib/presentation.ts";
 import { terms } from "../src/shared/config/index.ts";
 import { localApp } from "./support/app.ts";
 

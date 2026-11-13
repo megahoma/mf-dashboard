@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { selectTerms } from "../src/shared/config/select-terms.ts";
+import { selectTerms } from "../src/shared/lib/select-terms.ts";
 
 const russian = JSON.parse(
   readFileSync(new URL("../l10n/bundle.l10n.ru.json", import.meta.url), "utf8"),

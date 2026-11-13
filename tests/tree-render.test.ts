@@ -1,4 +1,4 @@
-import { createLogger } from "../src/shared/logging.ts";
+import { createLogger } from "../src/shared/lib/logging.ts";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
@@ -9,8 +9,8 @@ import { localApp } from "./support/app.ts";
 import { putAppResult } from "../src/entities/microfrontend/index.ts";
 import * as vscode from "./support/vscode.ts";
 import { terms, type DashboardTerms } from "../src/shared/config/index.ts";
-import { DashboardDetails } from "../src/widgets/mf-dashboard-tree/details.ts";
-import type { DashboardNode } from "../src/widgets/mf-dashboard-tree/presentation.ts";
+import { DashboardDetails } from "../src/widgets/mf-dashboard-tree/models/details.ts";
+import type { DashboardNode } from "../src/widgets/mf-dashboard-tree/models/presentation.ts";
 import type { TreeView, TreeViewSelectionChangeEvent, WebviewView } from "vscode";
 
 registerHooks({
@@ -21,8 +21,8 @@ registerHooks({
     return nextResolve(specifier, context);
   },
 });
-const { linkRowId } = await import("../src/widgets/mf-dashboard-tree/presentation.ts");
-const { MfDashboardProvider } = await import("../src/widgets/mf-dashboard-tree/provider.ts");
+const { linkRowId } = await import("../src/widgets/mf-dashboard-tree/lib/presentation.ts");
+const { MfDashboardProvider } = await import("../src/widgets/mf-dashboard-tree/models/provider.ts");
 
 const workspace = vscode.workspace as typeof vscode.workspace & {
   workspaceFolders?: { name: string; uri: vscode.Uri }[];

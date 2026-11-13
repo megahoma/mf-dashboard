@@ -95,7 +95,7 @@ test("an unsolicited 304 never invents a hash and unused zip facts are pruned", 
 });
 
 test("loopback transport sends the HTTP date and ignores a 304 response body", async (t) => {
-  const { createLoopbackNet } = await import("../src/entities/microfrontend/net.ts");
+  const { createLoopbackNet } = await import("../src/entities/microfrontend/lib/net.ts");
   let reads = 0;
   t.mock.method(globalThis, "fetch", async (_url: unknown, init?: RequestInit) => {
     assert.equal(

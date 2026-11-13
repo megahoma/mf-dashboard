@@ -4,16 +4,18 @@ import test from "node:test";
 import {
   appProbeId,
   createProbeBook,
-  createProbeCycle,
   externalManifestId,
   linkProbeId,
   putLinkResult,
-  type LinkProbeResult,
-  type Net,
-  type RemoteLink,
-} from "../src/entities/microfrontend/probe.ts";
+} from "../src/entities/microfrontend/lib/probe-book.ts";
+import { createProbeCycle } from "../src/entities/microfrontend/lib/probe.ts";
+import type {
+  LinkProbeResult,
+  Net,
+  RemoteLink,
+} from "../src/entities/microfrontend/models/probe.ts";
 import { localApp } from "./support/app.ts";
-import { createLogger } from "../src/shared/logging.ts";
+import { createLogger } from "../src/shared/lib/logging.ts";
 
 const manifestUrl = "http://127.0.0.1:4100/mf-manifest.json";
 const bytes = new Uint8Array([1, 2, 3]);

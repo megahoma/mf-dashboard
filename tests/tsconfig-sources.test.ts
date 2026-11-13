@@ -8,7 +8,7 @@ import {
   sourceIdentity,
   sourceContains,
   sourceSnapshot,
-} from "../src/entities/federated-types/sources.ts";
+} from "../src/entities/federated-types/lib/sources.ts";
 
 const cases: [string, Record<string, unknown> | string][] = [
   ["empty JSONC", ""],

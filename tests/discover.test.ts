@@ -164,7 +164,7 @@ test("scanWorkspace skips node_modules, .git, dist, and extra segments", () => {
 
 test("the microfrontend entity does not import vscode", () => {
   const discover = fs.readFileSync(
-    new URL("../src/entities/microfrontend/discover.ts", import.meta.url),
+    new URL("../src/entities/microfrontend/lib/discover.ts", import.meta.url),
     "utf8",
   );
   const index = fs.readFileSync(

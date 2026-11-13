@@ -15,7 +15,7 @@ import {
 } from "../src/entities/federated-types/index.ts";
 import { appProbeId } from "../src/entities/microfrontend/index.ts";
 import { terms } from "../src/shared/config/index.ts";
-import type { LogContext, LogFields } from "../src/shared/logging.ts";
+import type { LogContext, LogFields } from "../src/shared/models/logging.ts";
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -24,7 +24,7 @@ registerHooks({
     return nextResolve(specifier, context);
   },
 });
-const { MfDashboardProvider } = await import("../src/widgets/mf-dashboard-tree/provider.ts");
+const { MfDashboardProvider } = await import("../src/widgets/mf-dashboard-tree/models/provider.ts");
 
 function fixture(t: TestContext, automatic = false) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mf-manual-check-")));

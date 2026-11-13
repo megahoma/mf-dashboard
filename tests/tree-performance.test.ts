@@ -7,8 +7,8 @@ import {
   putAppResult,
   type LocalApp,
 } from "../src/entities/microfrontend/index.ts";
-import { DashboardSession } from "../src/widgets/mf-dashboard-tree/session.ts";
-import type { DashboardNode } from "../src/widgets/mf-dashboard-tree/presentation.ts";
+import { DashboardSession } from "../src/widgets/mf-dashboard-tree/models/session.ts";
+import type { DashboardNode } from "../src/widgets/mf-dashboard-tree/models/presentation.ts";
 
 function app(name: string, remotes: string[] = []): LocalApp {
   return localApp(name, `/workspace/${name}`, {

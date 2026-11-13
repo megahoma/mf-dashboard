@@ -3,9 +3,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { treeFingerprint } from "../src/entities/federated-types/tree-fingerprint.ts";
-import { readTree } from "../src/entities/federated-types/install.ts";
-import { filesFingerprint } from "../src/shared/fingerprint.ts";
+import { treeFingerprint } from "../src/entities/federated-types/lib/tree-fingerprint.ts";
+import { readTree } from "../src/entities/federated-types/lib/types-tree.ts";
+import { filesFingerprint } from "../src/shared/lib/fingerprint.ts";
 
 function typesDir(t: test.TestContext): { root: string; file: string } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-tree-fingerprint-"));

@@ -13,12 +13,9 @@ import {
   type LocalApp,
 } from "../src/entities/microfrontend/index.ts";
 import { terms } from "../src/shared/config/index.ts";
-import {
-  beginRefetch,
-  endRefetch,
-  DashboardSession,
-  type DashboardSettings,
-} from "../src/widgets/mf-dashboard-tree/session.ts";
+import { beginRefetch, endRefetch } from "../src/widgets/mf-dashboard-tree/lib/links.ts";
+import { DashboardSession } from "../src/widgets/mf-dashboard-tree/models/session.ts";
+import type { DashboardSettings } from "../src/widgets/mf-dashboard-tree/models/session-types.ts";
 
 function app(overrides: Partial<LocalApp> & Pick<LocalApp, "name">): LocalApp {
   return {
@@ -493,7 +490,7 @@ test("each row tooltip uses that row's manifest modules", () => {
 
 test("the provider registers the tree without a view message", () => {
   const provider = fs.readFileSync(
-    new URL("../src/widgets/mf-dashboard-tree/provider.ts", import.meta.url),
+    new URL("../src/widgets/mf-dashboard-tree/models/provider.ts", import.meta.url),
     "utf8",
   );
   const extension = fs.readFileSync(new URL("../src/app/extension.ts", import.meta.url), "utf8");
@@ -704,7 +701,7 @@ test("actual same-root duplicate discovery preserves settings and the previous t
       "export default {name:'same'}",
     );
   }
-  const { scanWorkspace } = await import("../src/entities/microfrontend/discover.ts");
+  const { scanWorkspace } = await import("../src/entities/microfrontend/lib/discover.ts");
   const session = new DashboardSession(
     {
       readSettings: () => settings({ apps: { kept: { path: "kept" } } }),

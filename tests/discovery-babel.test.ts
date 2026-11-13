@@ -3,15 +3,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { createLogger } from "../src/shared/logging.ts";
-import {
-  discoverSource,
-  readEnvFile,
-  scanWorkspace,
-} from "../src/entities/microfrontend/discover.ts";
-import { readAppFolder } from "../src/entities/microfrontend/discover.ts";
-import { createAppParseCache } from "../src/widgets/mf-dashboard-tree/session.ts";
-import { mergeMissingApps } from "../src/features/init-settings/defaults.ts";
+import { createLogger } from "../src/shared/lib/logging.ts";
+import { discoverSource } from "../src/entities/microfrontend/lib/config.ts";
+import { readEnvFile } from "../src/entities/microfrontend/lib/env-files.ts";
+import { scanWorkspace } from "../src/entities/microfrontend/lib/discover.ts";
+import { readAppFolder } from "../src/entities/microfrontend/lib/discover.ts";
+import { createAppParseCache } from "../src/widgets/mf-dashboard-tree/lib/app-parse-cache.ts";
+import { mergeMissingApps } from "../src/features/init-settings/lib/defaults.ts";
 
 const cases: [string, string, string | null][] = [
   [
