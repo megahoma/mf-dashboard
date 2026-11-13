@@ -1,4 +1,4 @@
-import { noLog, safeError, type LogContext } from "../../shared/logging.ts";
+import { logDuration, noLog, safeError, type LogContext } from "../../shared/logging.ts";
 import {
   collectProducerEvidence,
   collectProducerEvidenceAsync,
@@ -100,10 +100,18 @@ function isAppMap(value: unknown): value is Record<string, AppSetting> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-async function writeWorkspaceApps(apps: Record<string, AppSetting>): Promise<void> {
-  await vscode.workspace
-    .getConfiguration("mf-dashboard")
-    .update("apps", apps, vscode.ConfigurationTarget.Workspace);
+async function writeWorkspaceApps(
+  apps: Record<string, AppSetting>,
+  log: LogContext,
+): Promise<void> {
+  const started = Date.now();
+  try {
+    await vscode.workspace
+      .getConfiguration("mf-dashboard")
+      .update("apps", apps, vscode.ConfigurationTarget.Workspace);
+  } finally {
+    logDuration(log, "settings.write.finished", started, { key: "mf-dashboard.apps" });
+  }
 }
 
 function settingsDiagnosticFile(): string | null {
@@ -191,7 +199,7 @@ export class MfDashboardProvider
     this.session = new DashboardSession(
       {
         readSettings: readWorkspaceSettings,
-        writeApps: writeWorkspaceApps,
+        writeApps: (apps) => writeWorkspaceApps(apps, this.log),
         scan: scanWorkspace,
         loadKnown: loadKnownApps,
         probe: async (target, input) => {
@@ -204,6 +212,7 @@ export class MfDashboardProvider
             checkTypes,
             typeLinks: this.requestedTypeLinks,
           });
+          const verifyStarted = Date.now();
           const installed = new Map<string, InstalledEvidence>();
           if (
             checkTypes &&
@@ -226,13 +235,21 @@ export class MfDashboardProvider
               (input.log ?? log).event("error", "confirmations.save.failed", safeError(error));
             }
           }
-          if (checkTypes && this.canCheckTypes())
+          logDuration(input.log ?? log, "types.verify.completed", verifyStarted, { checkTypes });
+          if (checkTypes && this.canCheckTypes()) {
+            const evidenceStarted = Date.now();
             this.pendingEvidence = await this.prepareEvidence(
               input.apps,
               input.links,
               target,
               installed,
+              input.log,
             );
+            logDuration(input.log ?? log, "types.evidence.completed", evidenceStarted, {
+              producers: this.pendingEvidence.producers.size,
+              destinations: this.pendingEvidence.installed.size,
+            });
+          }
         },
         roots: workspaceRoots,
       },
@@ -364,17 +381,39 @@ export class MfDashboardProvider
   }
 
   refresh(source = "manual"): Promise<void> {
-    return this.run(() =>
+    return this.enqueue(source, (log) =>
       source === "manual"
-        ? this.withTypeCheck(() => this.session.refresh(source))
-        : this.session.refresh(source),
+        ? this.withTypeCheck(() => this.session.refresh(source, log))
+        : this.session.refresh(source, log),
     );
   }
 
-  checkTypes(node?: DashboardNode): Promise<void> {
+  private enqueue<T>(source: string, work: (log: LogContext) => Promise<T>): Promise<T> {
+    const log = this.log.operation(source);
+    const queued = Date.now();
+    log.event(source === "timer" ? "debug" : "info", "action.queued");
     return this.run(async () => {
+      const started = Date.now();
+      const queueMs = started - queued;
+      log.event(
+        queueMs >= 1000 ? "warn" : source === "timer" ? "debug" : "info",
+        "action.started",
+        {
+          queueMs,
+        },
+      );
+      try {
+        return await work(log);
+      } finally {
+        logDuration(log, "action.finished", started, { queueMs, totalMs: Date.now() - queued });
+      }
+    });
+  }
+
+  checkTypes(node?: DashboardNode): Promise<void> {
+    return this.enqueue("types", async (log) => {
       if (node && !this.typeLinksForNode(node)) return;
-      await this.withTypeCheck(() => this.session.refresh("types"), node);
+      await this.withTypeCheck(() => this.session.refresh("types", log), node);
     });
   }
 
@@ -428,7 +467,7 @@ export class MfDashboardProvider
   }
 
   discover(): Promise<void> {
-    return this.run(() => this.session.discover());
+    return this.enqueue("discovery", (log) => this.session.discover(log));
   }
 
   async fileSaved(file: string): Promise<void> {
@@ -500,10 +539,10 @@ export class MfDashboardProvider
   }
 
   finishRefetch(linkId: string): Promise<void> {
-    return this.run(() => this.finishRefetchNow(linkId));
+    return this.enqueue("fetch", (log) => this.finishRefetchNow(linkId, log));
   }
 
-  private async finishRefetchNow(linkId: string): Promise<void> {
+  private async finishRefetchNow(linkId: string, log: LogContext): Promise<void> {
     const parsed = parseLinkId(linkId);
     const consumer = parsed
       ? this.session.loaded.find((app) => app.name === parsed.consumer)
@@ -525,7 +564,6 @@ export class MfDashboardProvider
       url: remote.url,
     };
     const settings = readWorkspaceSettings();
-    const log = this.log.operation("fetch");
     const started = Date.now();
     log.event("info", "types.fetch.started", { app: consumer.name, alias: remote.alias });
     try {
@@ -667,15 +705,14 @@ export class MfDashboardProvider
   }
 
   rebuild(node?: DashboardNode): Promise<void> {
-    return this.run(() => this.rebuildNow(node));
+    return this.enqueue("rebuild", (log) => this.rebuildNow(node, log));
   }
 
   rebuildAll(
     progress: (name: string, index: number, total: number) => void,
   ): Promise<RebuildAllReport> {
-    return this.run(async () => {
+    return this.enqueue("rebuild-all", async (log) => {
       const settings = readWorkspaceSettings();
-      const log = this.log.operation("rebuild-all");
       const roots = workspaceRoots();
       const apps: LocalApp[] = [];
       const skipped: RebuildAllReport["skipped"] = [];
@@ -752,10 +789,9 @@ export class MfDashboardProvider
     });
   }
 
-  private async rebuildNow(node?: DashboardNode): Promise<void> {
+  private async rebuildNow(node: DashboardNode | undefined, log: LogContext): Promise<void> {
     if (!node) return;
     const rootName = node.name;
-    const log = this.log.operation("rebuild");
     const started = Date.now();
     log.event("info", "types.rebuild.started", { app: rootName });
     const settings = readWorkspaceSettings();
@@ -902,6 +938,7 @@ export class MfDashboardProvider
     links: readonly RemoteLink[],
     book: import("../../entities/microfrontend/index.ts").ProbeBook,
     installed = new Map<string, InstalledEvidence>(),
+    log: LogContext = this.observationLog,
   ) {
     const producers = new Map<string, ProducerSnapshot>();
     const errors = new Map<string, unknown>();
@@ -916,13 +953,7 @@ export class MfDashboardProvider
         try {
           producers.set(
             producer.name,
-            await collectProducerEvidenceAsync(
-              producer,
-              apps,
-              book,
-              this.confirmations,
-              this.observationLog,
-            ),
+            await collectProducerEvidenceAsync(producer, apps, book, this.confirmations, log),
           );
         } catch (error) {
           errors.set(producer.name, error);
@@ -938,10 +969,7 @@ export class MfDashboardProvider
       }
       if (!installed.has(destination)) {
         try {
-          installed.set(
-            destination,
-            await readInstalledEvidenceAsync(destination, this.observationLog),
-          );
+          installed.set(destination, await readInstalledEvidenceAsync(destination, log));
         } catch {
           installed.set(destination, { folderExists: true, filesFingerprint: "" });
         }

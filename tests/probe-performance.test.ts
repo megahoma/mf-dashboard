@@ -13,6 +13,7 @@ import {
   type RemoteLink,
 } from "../src/entities/microfrontend/probe.ts";
 import { localApp } from "./support/app.ts";
+import { createLogger } from "../src/shared/logging.ts";
 
 const manifestUrl = "http://127.0.0.1:4100/mf-manifest.json";
 const bytes = new Uint8Array([1, 2, 3]);
@@ -46,6 +47,43 @@ function gate() {
   });
   return { promise, release };
 }
+
+test("a ten-second manifest timeout identifies the slow URL at Info without credentials", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let now = 0;
+  t.mock.method(Date, "now", () => now);
+  const messages: string[] = [];
+  const log = createLogger({
+    enabled: (level) => ["info", "warn", "error"].includes(level),
+    write: (level, text) => messages.push(`${level} ${text}`),
+  });
+  const running = createProbeCycle(
+    {
+      connect: async () => false,
+      get: () => new Promise(() => {}),
+    },
+    createProbeBook(),
+  ).start({
+    apps: [],
+    links: [],
+    extraManifestUrls: ["https://user:password@example.com/manifest.json?token=secret"],
+    log,
+  });
+  await setImmediate();
+  now = 10_000;
+  t.mock.timers.tick(10_000);
+  await running;
+  assert.ok(
+    messages.some((text) =>
+      /^warn manifest.failed .*url=https:\/\/example.com\/manifest.json reason=timeout.*durationMs=10000/.test(
+        text,
+      ),
+    ),
+    messages.join("\n"),
+  );
+  assert.ok(messages.some((text) => /^warn probe.completed .*durationMs=10000/.test(text)));
+  assert.doesNotMatch(messages.join("\n"), /user|password|token|secret/);
+});
 
 test("bulk link publication scans the book once and preserves standalone replacement semantics", async () => {
   const book = createProbeBook();

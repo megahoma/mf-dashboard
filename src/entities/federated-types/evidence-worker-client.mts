@@ -1,7 +1,13 @@
 import { Worker } from "node:worker_threads";
 import path from "node:path";
 import { DiagnosticError, type DiagnosticDetails } from "../../shared/diagnostic-error.ts";
-import { noLog, type LogContext, type LogFields, type LogLevel } from "../../shared/logging.ts";
+import {
+  logDuration,
+  noLog,
+  type LogContext,
+  type LogFields,
+  type LogLevel,
+} from "../../shared/logging.ts";
 import type { SourceIdentity } from "./sources.ts";
 import type { InstalledEvidence } from "./observe.ts";
 
@@ -20,6 +26,8 @@ export interface EvidenceReply {
 interface Pending {
   task: EvidenceTask;
   log: LogContext;
+  queuedAt: number;
+  startedAt: number;
   resolve(value: unknown): void;
   reject(error: Error): void;
 }
@@ -52,6 +60,17 @@ function drain(): void {
       const item = active;
       active = undefined;
       for (const entry of reply.events) item.log.event(entry.level, entry.event, entry.fields);
+      logDuration(item.log, "evidence.task.finished", item.startedAt, {
+        task: item.task.kind,
+        path:
+          "folder" in item.task
+            ? item.task.folder
+            : "destination" in item.task
+              ? item.task.destination
+              : item.task.appDir,
+        queueMs: item.startedAt - item.queuedAt,
+        failed: reply.error != null,
+      });
       if (reply.error) {
         const error = reply.error.details
           ? new DiagnosticError(reply.error.message, reply.error.details)
@@ -70,13 +89,21 @@ function drain(): void {
     });
   }
   active = pending.shift()!;
+  active.startedAt = Date.now();
   worker.ref();
   worker.postMessage(active.task);
 }
 
 export function runEvidenceTask<T>(task: EvidenceTask, log: LogContext = noLog): Promise<T> {
   return new Promise((resolve, reject) => {
-    pending.push({ task, log, resolve: (value) => resolve(value as T), reject });
+    pending.push({
+      task,
+      log,
+      queuedAt: Date.now(),
+      startedAt: 0,
+      resolve: (value) => resolve(value as T),
+      reject,
+    });
     try {
       drain();
     } catch (error) {

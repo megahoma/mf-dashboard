@@ -127,6 +127,53 @@ function countBuilds(provider: Provider): { count: number } {
   return state;
 }
 
+test("queue diagnostics measure waiting without merging refresh requests", async (t) => {
+  const events: { level: string; text: string }[] = [];
+  const provider = providerFor(events);
+  t.after(() => provider.dispose());
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const settings = { version: 1 };
+  const versions: number[] = [];
+  t.mock.method(provider.session, "refresh", async () => {
+    versions.push(settings.version);
+    if (versions.length === 1) await gate;
+  });
+  let now = 0;
+  t.mock.method(Date, "now", () => now);
+  const first = provider.refresh("settings");
+  await Promise.resolve();
+  now = 100;
+  const queued = Array.from({ length: 3 }, () => provider.refresh("settings"));
+  assert.equal(new Set(queued).size, 3);
+  settings.version = 2;
+  now = 1600;
+  release();
+  await Promise.all([first, ...queued]);
+  assert.deepEqual(versions, [1, 2, 2, 2]);
+  assert.ok(
+    events.some(
+      ({ level, text }) => level === "warn" && /action.started .*queueMs=1500/.test(text),
+    ),
+  );
+  await provider.refresh("settings");
+  assert.deepEqual(versions, [1, 2, 2, 2, 2]);
+});
+
+test("a rejected refresh does not prevent subsequent refreshes", async (t) => {
+  const provider = providerFor();
+  t.after(() => provider.dispose());
+  let fail = true;
+  t.mock.method(provider.session, "refresh", async () => {
+    if (fail) throw new Error("probe failed");
+  });
+  await assert.rejects(provider.refresh(), /probe failed/);
+  fail = false;
+  await provider.refresh();
+});
+
 function useWorkspace(root: string, apps: Record<string, { path: string }>): () => void {
   const previous = {
     getConfiguration: vscode.workspace.getConfiguration,

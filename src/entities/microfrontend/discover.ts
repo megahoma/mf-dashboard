@@ -1,4 +1,4 @@
-import { noLog, safeError, type LogContext } from "../../shared/logging.ts";
+import { logDuration, noLog, safeError, type LogContext } from "../../shared/logging.ts";
 import fs from "node:fs";
 import { parse as parseEnv } from "dotenv";
 import path from "node:path";
@@ -70,9 +70,20 @@ export function readEnvFile(text: string): Record<string, string> {
 }
 
 export function scanWorkspace(root: string, options: ScanOptions = {}): Record<string, LocalApp> {
+  const started = Date.now();
+  const log = options.log ?? noLog;
+  const stats = { directories: 0, configs: 0 };
   const found = new Map<string, LocalApp>();
   const rootAbs = path.resolve(root);
-  walk(rootAbs, rootAbs, options, found, new Set());
+  log.event("info", "discovery.scan.started", { root: rootAbs });
+  walk(rootAbs, rootAbs, options, found, new Set(), stats);
+  logDuration(
+    log,
+    "discovery.scan.completed",
+    started,
+    { root: rootAbs, ...stats, apps: found.size },
+    "info",
+  );
   return Object.fromEntries(found);
 }
 
@@ -82,6 +93,7 @@ function walk(
   options: ScanOptions,
   found: Map<string, LocalApp>,
   claimedConfigs: Set<string>,
+  stats: { directories: number; configs: number },
 ): void {
   const {
     ignorePaths = [],
@@ -91,6 +103,7 @@ function walk(
     dependencies,
   } = options;
   let entries: fs.Dirent[];
+  stats.directories++;
   dependencies?.add(dir);
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -114,6 +127,7 @@ function walk(
     if (entry.isFile() && CONFIG_FILE.test(entry.name)) configs.push(abs);
   }
   const appDependencies = new Set<string>();
+  stats.configs += configs.length;
   const apps =
     configs.length || entries.some((entry) => entry.name === "package.json" && entry.isFile())
       ? discoverDirectory(dir, configs, envMode, appDependencies, log, {
@@ -145,7 +159,7 @@ function walk(
     app.configDependencies = configDependencies;
     found.set(app.name, app);
   }
-  for (const child of children) walk(child, root, options, found, claimedConfigs);
+  for (const child of children) walk(child, root, options, found, claimedConfigs, stats);
 }
 
 function shouldSkip(name: string, relPosix: string, extra: readonly string[]): boolean {
