@@ -6,5 +6,7 @@ export {
   resolveStartScript,
   settingsSeed,
   startupLoad,
-} from "./defaults.ts";
-export type { AppConfig, ScriptSettings, WorkspaceDefaults } from "./defaults.ts";
+} from "./lib/defaults.ts";
+export type { AppConfig, ScriptSettings, WorkspaceDefaults } from "./models/defaults.ts";
+export { WORKSPACE_DEFAULTS } from "./config/defaults.ts";
+export { readConfiguredApps } from "./lib/configured-apps.ts";

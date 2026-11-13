@@ -1,3 +1,4 @@
+import { rebuildLocalArchive } from "../src/features/rebuild-types/lib/generate-on-disk.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -20,18 +21,20 @@ import {
   readAppFolder,
   type LocalApp,
 } from "../src/entities/microfrontend/index.ts";
-import { verifyTypeInstalls } from "../src/features/observe-types/verify.ts";
-import { rebuildAllTypes, type RebuildAllContext } from "../src/features/rebuild-types/all.ts";
+import { verifyTypeInstalls } from "../src/features/observe-types/lib/verify.ts";
+import { rebuildAllTypes } from "../src/features/rebuild-types/lib/all.ts";
+import type { RebuildAllContext } from "../src/features/rebuild-types/models/all.ts";
 import {
   generateFederatedTypes,
   generateLocalFederatedTypes,
-  rebuildLocalArchive,
-  type LocalGeneratedZip,
-  type LocalGenerationInput,
-} from "../src/features/rebuild-types/generate.mts";
-import { installRemoteTypes } from "../src/features/refetch-types/remote.ts";
-import { safeError } from "../src/shared/logging.ts";
-import { loadKnownApps } from "../src/widgets/mf-dashboard-tree/session.ts";
+} from "../src/features/rebuild-types/lib/generate.mts";
+import type {
+  LocalGeneratedZip,
+  LocalGenerationInput,
+} from "../src/features/rebuild-types/models/generate.ts";
+import { installRemoteTypes } from "../src/features/refetch-types/lib/remote.ts";
+import { safeError } from "../src/shared/lib/logging.ts";
+import { loadKnownApps } from "../src/widgets/mf-dashboard-tree/lib/known-apps.ts";
 import { localApp } from "./support/app.ts";
 
 function fixture(t: TestContext) {

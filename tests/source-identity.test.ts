@@ -3,8 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { sourceIdentity, sourceSnapshot } from "../src/entities/federated-types/sources.ts";
-import { filesFingerprint } from "../src/shared/fingerprint.ts";
+import { sourceIdentity, sourceSnapshot } from "../src/entities/federated-types/lib/sources.ts";
+import { filesFingerprint } from "../src/shared/lib/fingerprint.ts";
 
 function fixture(t: { after(fn: () => void): void }) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-src-identity-"));

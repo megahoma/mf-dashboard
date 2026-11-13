@@ -3,7 +3,7 @@ import { test } from "node:test";
 import {
   manifestTooltipLines,
   readManifestModules,
-} from "../src/entities/microfrontend/manifest-modules.ts";
+} from "../src/entities/microfrontend/lib/manifest-modules.ts";
 
 const terms = { exposes: "exposes", shared: "shared", singleton: "singleton" };
 

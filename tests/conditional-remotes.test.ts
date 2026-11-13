@@ -4,7 +4,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { discoverSource, readAppFolder } from "../src/entities/microfrontend/discover.ts";
+import { discoverSource } from "../src/entities/microfrontend/lib/config.ts";
+import { readAppFolder } from "../src/entities/microfrontend/lib/discover.ts";
 
 test("an imported helper adds remotes according to mode env without executing config code", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-conditional-links-"));
@@ -213,7 +214,7 @@ test("many object-dependent conditions finish within a bounded worker", () => {
     return { name: 'portal', remotes: links };
   }
   export default pluginModuleFederation(buildOptions());`;
-  const module = new URL("../src/entities/microfrontend/config.ts", import.meta.url).href;
+  const module = new URL("../src/entities/microfrontend/lib/config.ts", import.meta.url).href;
   const script = `import { discoverSource } from ${JSON.stringify(module)};
     const app = discoverSource(${JSON.stringify(source)}, ${JSON.stringify(path.resolve("rsbuild.config.ts"))}, {});
     process.stdout.write(JSON.stringify(app?.remotes.map(remote => remote.alias)));`;

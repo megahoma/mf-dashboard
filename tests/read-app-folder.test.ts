@@ -1,11 +1,12 @@
-import { createLogger } from "../src/shared/logging.ts";
+import { createLogger } from "../src/shared/lib/logging.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { readAppFolder, scanWorkspace } from "../src/entities/microfrontend/discover.ts";
-import { createAppParseCache, loadKnownApps } from "../src/widgets/mf-dashboard-tree/session.ts";
+import { readAppFolder, scanWorkspace } from "../src/entities/microfrontend/lib/discover.ts";
+import { createAppParseCache } from "../src/widgets/mf-dashboard-tree/lib/app-parse-cache.ts";
+import { loadKnownApps } from "../src/widgets/mf-dashboard-tree/lib/known-apps.ts";
 
 function fixture(t: { after(fn: () => void): void }) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-known-app-"));

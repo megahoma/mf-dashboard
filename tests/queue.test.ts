@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createKeyedLock, createSerialQueue } from "../src/shared/queue.ts";
+import { createKeyedLock, createSerialQueue } from "../src/shared/lib/queue.ts";
 
 test("queued work runs one at a time, in the order it was scheduled", async () => {
   const run = createSerialQueue();

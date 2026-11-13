@@ -19,9 +19,11 @@ import {
   linkProbeId,
   putLinkResult,
 } from "../src/entities/microfrontend/index.ts";
-import { verifyTypeInstalls, type InstallCheck } from "../src/features/observe-types/verify.ts";
-import { diagnosticFields } from "../src/shared/diagnostic-error.ts";
-import { createLogger, type LogContext } from "../src/shared/logging.ts";
+import { verifyTypeInstalls } from "../src/features/observe-types/lib/verify.ts";
+import type { InstallCheck } from "../src/features/observe-types/models/verify.ts";
+import { diagnosticFields } from "../src/shared/models/diagnostic-error.ts";
+import { createLogger } from "../src/shared/lib/logging.ts";
+import type { LogContext } from "../src/shared/models/logging.ts";
 import { localApp } from "./support/app.ts";
 
 after(disposeEvidenceWorker);

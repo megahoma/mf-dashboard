@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readLimitedBody } from "../src/shared/http-body.ts";
+import { readLimitedBody } from "../src/shared/lib/http-body.ts";
 
 test("readLimitedBody rejects a body past the limit", async () => {
   const small = new Response("hi");

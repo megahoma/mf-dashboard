@@ -1,13 +1,11 @@
-export { MfDashboardProvider } from "./provider.ts";
-export { DashboardDetails } from "./details.ts";
-export {
-  beginRefetch,
-  endRefetch,
-  linkRowId,
-  loadKnownApps,
-  rowContextValue,
-  DashboardSession,
-} from "./session.ts";
-export type { AppSetting, DashboardNode, DashboardSettings, WorkspaceRoot } from "./session.ts";
-export { linkTypesDir, localManifestUrl, rowAction, withActionTokens } from "./targets.ts";
-export type { RowAction, RowActionInput } from "./targets.ts";
+export { MfDashboardProvider } from "./models/provider.ts";
+export { DashboardDetails } from "./models/details.ts";
+export { beginRefetch, endRefetch } from "./lib/links.ts";
+export { linkRowId, rowContextValue } from "./lib/presentation.ts";
+export { loadKnownApps } from "./lib/known-apps.ts";
+export { DashboardSession } from "./models/session.ts";
+export type { AppSetting, DashboardSettings, WorkspaceRoot } from "./models/session-types.ts";
+export type { DashboardNode } from "./models/presentation.ts";
+export { linkTypesDir, rowAction, withActionTokens } from "./lib/targets.ts";
+export { localManifestUrl } from "../../shared/lib/urls.ts";
+export type { RowAction, RowActionInput } from "./models/targets.ts";

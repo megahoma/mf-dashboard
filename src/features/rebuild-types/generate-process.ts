@@ -1,7 +1,10 @@
-import { DiagnosticError } from "../../shared/diagnostic-error.ts";
-import { generateTypesOnDisk, type GenerationReply, type GenerationRequest } from "./generate.mts";
+import { errorMessage } from "../../shared/lib/errors.ts";
+import { DiagnosticError } from "../../shared/models/diagnostic-error.ts";
+import { generateTypesOnDisk } from "./lib/generate-on-disk.ts";
+import type { GenerationReply, GenerationRequest } from "./models/generate.ts";
 
 process.once("disconnect", () => process.exit(1));
+
 process.once("message", async (input: GenerationRequest) => {
   let reply: GenerationReply;
   try {
@@ -9,7 +12,7 @@ process.once("message", async (input: GenerationRequest) => {
     reply = { result: await generateTypesOnDisk(input) };
   } catch (error) {
     reply = {
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
       details: error instanceof DiagnosticError ? error.details : undefined,
     };
   }

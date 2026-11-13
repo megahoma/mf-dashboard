@@ -5,10 +5,10 @@ import path from "node:path";
 import { test } from "node:test";
 import {
   linkTypesDir,
-  localManifestUrl,
   rowAction,
   withActionTokens,
-} from "../src/widgets/mf-dashboard-tree/targets.ts";
+} from "../src/widgets/mf-dashboard-tree/lib/targets.ts";
+import { localManifestUrl } from "../src/shared/lib/urls.ts";
 
 const files = new Set(["/apps/shell/module-federation.config.ts", "/apps/shell/@mf-types"]);
 

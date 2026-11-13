@@ -7,13 +7,11 @@ import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { ConfigurationChangeEvent, ExtensionContext } from "vscode";
 import * as stub from "./support/vscode.ts";
-import { defaultWorkspaceSettings } from "../src/features/init-settings/defaults.ts";
+import { defaultWorkspaceSettings } from "../src/features/init-settings/lib/defaults.ts";
 import { scanWorkspace, createProbeBook } from "../src/entities/microfrontend/index.ts";
-import {
-  DashboardSession,
-  loadKnownApps,
-  type DashboardSettings,
-} from "../src/widgets/mf-dashboard-tree/session.ts";
+import { DashboardSession } from "../src/widgets/mf-dashboard-tree/models/session.ts";
+import { loadKnownApps } from "../src/widgets/mf-dashboard-tree/lib/known-apps.ts";
+import type { DashboardSettings } from "../src/widgets/mf-dashboard-tree/models/session-types.ts";
 
 registerHooks({
   resolve(specifier, context, nextResolve) {

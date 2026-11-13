@@ -13,7 +13,7 @@ import {
   putAppResult,
 } from "../src/entities/microfrontend/index.ts";
 import type { LocalApp, RemoteLink } from "../src/entities/microfrontend/index.ts";
-import { createLoopbackNet } from "../src/entities/microfrontend/net.ts";
+import { createLoopbackNet } from "../src/entities/microfrontend/lib/net.ts";
 
 test("a running probe cycle releases processed archive bodies", () => {
   execFileSync(

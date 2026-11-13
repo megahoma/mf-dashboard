@@ -1,2 +1,2 @@
-export { lookupScript, resolvePackageManager, startInvocation } from "./start.ts";
-export type { PackageManagerName, StartInvocation } from "./start.ts";
+export { lookupScript, readScripts, resolvePackageManager, startInvocation } from "./lib/start.ts";
+export type { PackageManagerName, StartInvocation } from "./models/start.ts";

@@ -3,10 +3,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { installRemoteTypes } from "../src/features/refetch-types/remote.ts";
-import { dependencyTypesTarget, refetchTarget } from "../src/features/refetch-types/refetch.ts";
-import { createLogger, safeError } from "../src/shared/logging.ts";
-import { DiagnosticError, type DiagnosticDetails } from "../src/shared/diagnostic-error.ts";
+import { installRemoteTypes } from "../src/features/refetch-types/lib/remote.ts";
+import { dependencyTypesTarget, refetchTarget } from "../src/features/refetch-types/lib/targets.ts";
+import { createLogger, safeError } from "../src/shared/lib/logging.ts";
+import { DiagnosticError } from "../src/shared/models/diagnostic-error.ts";
+import type { DiagnosticDetails } from "../src/shared/models/diagnostic-error-types.ts";
 import { localApp } from "./support/app.ts";
 
 const url = "https://example.com/manifest.json?token=SECRET#PRIVATE";
@@ -67,8 +68,8 @@ test("Fetch retains shell timeout details at Info without exposing the command",
     enabled: (level) => ["info", "warn", "error"].includes(level),
     write: (_level, text) => messages.push(text),
   }).operation("fetch");
-  const { manifestZipUrl } = await import("../src/features/rebuild-types/zip-url.ts");
-  const { refetchInstalled } = await import("../src/features/refetch-types/refetch.ts");
+  const { manifestZipUrl } = await import("../src/entities/microfrontend/lib/zip-url.ts");
+  const { refetchInstalled } = await import("../src/features/refetch-types/lib/refetch.ts");
   await assert.rejects(
     () =>
       installRemoteTypes(
@@ -375,7 +376,7 @@ test("shared scoped targets require both configs to refer to the same remote", (
 });
 
 test("HTTP timeout while reading an archive keeps its stage and configured timeout", async (t) => {
-  const { installTypesArchive } = await import("../src/entities/federated-types/install.ts");
+  const { installTypesArchive } = await import("../src/entities/federated-types/lib/install.ts");
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-install-log-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   await assert.rejects(

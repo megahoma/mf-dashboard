@@ -4,7 +4,7 @@ import {
   manifestDocumentPath,
   manifestFailureMessage,
   manifestPreviewText,
-} from "../src/features/open-manifest/text.ts";
+} from "../src/features/open-manifest/lib/text.ts";
 
 test("document path keeps a safe file name", () => {
   assert.equal(manifestDocumentPath("widget"), "/widget.json");
