@@ -21,6 +21,7 @@ import type { InstallCheck } from "../src/features/observe-types/models/verify.t
 import { dashboardNodes } from "../src/widgets/mf-dashboard-tree/lib/presentation.ts";
 import { terms } from "../src/shared/config/index.ts";
 import { localApp } from "./support/app.ts";
+import { zipFixture } from "./support/zip.ts";
 
 function fixture(t: TestContext) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-watch-evidence-"));
@@ -242,15 +243,12 @@ test("archive comparison reports content equality without rewriting watch output
     path.join(sdk, "index.js"),
     `const fs=require('node:fs'),path=require('node:path');
     module.exports=class {
-      constructor(blob){this.records=JSON.parse(blob.subarray(4).toString());}
+      constructor(){this.records=[{file:"index.d.ts",text:${JSON.stringify(fs.readFileSync(f.file, "utf8"))}}];}
       getEntries(){return this.records.map(record=>({entryName:record.file,isDirectory:false}));}
       extractAllTo(folder){for(const record of this.records){const target=path.join(folder,record.file);fs.mkdirSync(path.dirname(target),{recursive:true});fs.writeFileSync(target,record.text);}}
     };`,
   );
-  const archive = Buffer.concat([
-    Buffer.from([0x50, 0x4b, 3, 4]),
-    Buffer.from(JSON.stringify([{ file: "index.d.ts", text: fs.readFileSync(f.file, "utf8") }])),
-  ]);
+  const archive = zipFixture([{ file: "index.d.ts", text: fs.readFileSync(f.file, "utf8") }]);
   const input = {
     appDir: f.root,
     destination: f.destination,

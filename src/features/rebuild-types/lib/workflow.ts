@@ -110,8 +110,8 @@ export async function rebuildTypes(
           appDir: app.folder,
           name: app.name,
           configFile: app.buildConfigFile ?? app.configFile,
-          envMode: app.launchEnvironment?.envMode ?? context.settings.envMode,
-          env: app.launchEnvironment?.env,
+          ...(app.bundler && { bundler: app.bundler }),
+          ...(app.launchEnvironment ?? { envMode: context.settings.envMode }),
           port: app.port,
           manifestPath,
         })

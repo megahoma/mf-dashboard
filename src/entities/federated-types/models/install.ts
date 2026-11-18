@@ -35,6 +35,11 @@ export type InstallTypesResult = {
   filesFingerprint: string;
 };
 
+export type ComparisonArchive = {
+  fileCount: number;
+  entryIndex: Uint8Array<SharedArrayBuffer>;
+};
+
 export type ArchiveComparison = InstallTypesResult & {
   matches: boolean;
 };

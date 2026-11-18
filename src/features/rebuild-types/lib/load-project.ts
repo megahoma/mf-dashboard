@@ -2,8 +2,15 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { DEFAULT_TYPES_FOLDER } from "../../../shared/config/project.ts";
-import { cliDefaults, REBUILD_HINT } from "../config/generate.ts";
+import type { StaticConfigValue } from "../../../entities/microfrontend/index.ts";
+import { DEFAULT_ENV_MODE, DEFAULT_TYPES_FOLDER } from "../../../shared/config/project.ts";
+import {
+  cliDefaults,
+  MAX_STATIC_DTS_DEPTH,
+  MAX_STATIC_DTS_TEXT_LENGTH,
+  MAX_STATIC_DTS_VALUES,
+  REBUILD_HINT,
+} from "../config/generate.ts";
 import type {
   DtsApi,
   GenerationInput,
@@ -13,7 +20,8 @@ import type {
 import { generatedZip, zipRevision } from "./generated-zip.ts";
 
 export async function prepareGeneration(input: GenerationInput) {
-  const loaded = await loadProject(input);
+  const loaded =
+    input.bundler === "rslib" ? await loadStaticProject(input) : await loadProject(input);
   const { dts, mfRequire } = loadDts(input.appDir);
   if (!dts.isTSProject(loaded.mf.dts, input.appDir)) {
     throw new Error(
@@ -76,6 +84,81 @@ export function assertCanGenerate(dtsManagerOptions: unknown): void {
       `Module Federation 2.9.1 cannot generate federated types for this config. ${REBUILD_HINT}`,
     );
   }
+}
+
+async function loadStaticProject(input: GenerationInput) {
+  const { readRslibEnv, readStaticConfigFile } =
+    await import("../../../entities/microfrontend/index.ts");
+  const { appDir, configFile, envMode, name, allowLocalEnv = true } = input;
+  const env = input.env ?? (allowLocalEnv ? readRslibEnv(appDir, envMode) : {});
+  const candidate = readStaticConfigFile(
+    configFile,
+    env,
+    { appDir, bundler: "rslib", mode: envMode },
+    allowLocalEnv,
+    input.configDirectory,
+  );
+  if (candidate?.app?.name !== name || !candidate.federationOptions)
+    throw new Error(
+      `Could not resolve the Rslib MF profile for ${name} in ${configFile}. ${REBUILD_HINT}`,
+    );
+  const { dts, exposes, remotes } = candidate.federationOptions;
+  const staticData = staticDataReader(configFile);
+  const resolvedDts = staticData(dts, "Module Federation.dts") as MfOptions["dts"];
+  const generate = typeof resolvedDts === "object" ? resolvedDts?.generateTypes : undefined;
+  const dtsOutputDir = typeof generate === "object" ? generate?.outputDir : undefined;
+  const outputDir =
+    candidate.outputDir ?? (typeof dtsOutputDir === "string" && dtsOutputDir ? dtsOutputDir : null);
+  if (outputDir === null)
+    throw new Error(`Could not resolve output.distPath in ${configFile}. ${REBUILD_HINT}`);
+  const mf = {
+    name,
+    dts: resolvedDts,
+    ...(typeof generate === "object" &&
+      generate?.extractRemoteTypes && {
+        remotes: staticData(remotes, "Module Federation.remotes"),
+      }),
+    exposes: staticData(exposes, "Module Federation.exposes"),
+  } as MfOptions;
+  Object.assign(process.env, { NODE_ENV: DEFAULT_ENV_MODE, ...env });
+  return { mf, port: candidate.port, outputDir };
+}
+
+type StaticData =
+  string | number | boolean | null | undefined | StaticData[] | { [key: string]: StaticData };
+
+function staticDataReader(file: string) {
+  let remainingValues = MAX_STATIC_DTS_VALUES;
+  let remainingText = MAX_STATIC_DTS_TEXT_LENGTH;
+  const limitError = () =>
+    new Error(
+      `Static Module Federation options exceed the DTS conversion limit in ${file}. ${REBUILD_HINT}`,
+    );
+
+  // The SDK can serialize shared values once per reference, so charge every visit.
+  return function staticData(value: StaticConfigValue, field: string, depth = 0): StaticData {
+    if (--remainingValues < 0 || depth > MAX_STATIC_DTS_DEPTH) throw limitError();
+    if (typeof value === "string") {
+      if ((remainingText -= value.length) < 0) throw limitError();
+      return value;
+    }
+    if (value == null || typeof value === "boolean" || typeof value === "number") return value;
+    if (Array.isArray(value)) {
+      if (value.length > remainingValues) throw limitError();
+      return value.map((item, index) => staticData(item, `${field}[${index}]`, depth + 1));
+    }
+    if (typeof value === "object" && Object.getOwnPropertySymbols(value).length === 0) {
+      const record = value as Record<string, StaticConfigValue>;
+      const fields: [string, StaticData][] = [];
+      for (const key in record) {
+        if (!Object.hasOwn(record, key)) continue;
+        if ((remainingText -= key.length) < 0) throw limitError();
+        fields.push([key, staticData(record[key], `${field}.${key}`, depth + 1)]);
+      }
+      return Object.fromEntries(fields);
+    }
+    throw new Error(`Could not resolve ${field} statically in ${file}. ${REBUILD_HINT}`);
+  };
 }
 
 async function loadProject({ appDir, configFile, name, envMode }: GenerationInput) {

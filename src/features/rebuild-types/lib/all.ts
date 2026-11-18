@@ -5,7 +5,12 @@ import {
   readInstalledEvidenceAsync,
   sourceIdentityAsync,
 } from "../../../entities/federated-types/index.ts";
-import { readModeEnv, remoteLink, type RemoteLink } from "../../../entities/microfrontend/index.ts";
+import {
+  readModeEnv,
+  remoteLink,
+  type LocalApp,
+  type RemoteLink,
+} from "../../../entities/microfrontend/index.ts";
 import { noLog } from "../../../shared/config/logging.ts";
 import { errorMessage } from "../../../shared/lib/errors.ts";
 import { safeError } from "../../../shared/lib/logging.ts";
@@ -15,10 +20,11 @@ import type { LocalGeneratedZip } from "../models/generate.ts";
 import { runRebuildCommand } from "./command.ts";
 import { generateLocalFederatedTypes } from "./generate.mts";
 import { generatedZip, zipRevision } from "./generated-zip.ts";
-import { inputsFingerprint } from "./inputs-fingerprint.ts";
+import { inputsFingerprint, rebuildConfigFingerprint } from "./inputs-fingerprint.ts";
 import { workspaceTypesPlan } from "./workspace-plan.ts";
 
 const operations = { generateLocalFederatedTypes, runRebuildCommand, installRemoteTypes };
+const CHANGED_CONFIG = "Sources or build configuration changed during type generation";
 
 export async function rebuildAllTypes(
   context: RebuildAllContext,
@@ -38,6 +44,21 @@ export async function rebuildAllTypes(
     context.apps.filter((app) => app.generateTypes && app.port != null).map((app) => app.name),
   );
   const zips = new Map<string, LocalGeneratedZip>();
+  const configSnapshots = new Map<LocalApp, string>();
+  for (const { app } of order) {
+    if (app.configInputs?.length || app.configDependencies?.length) {
+      configSnapshots.set(
+        app,
+        app.rebuildConfigStamp ?? rebuildConfigFingerprint(app, undefined, true),
+      );
+    }
+  }
+  const verifyConfig = async (app: LocalApp) => {
+    const snapshot = configSnapshots.get(app);
+    if (!snapshot) return;
+    const current = await (context.rebuildConfigStamp?.(app) ?? rebuildConfigFingerprint(app));
+    if (snapshot !== current) throw new Error(CHANGED_CONFIG);
+  };
   let dirty = false;
   log.event("debug", "types.rebuild.all.plan", { apps: order.length, cycles: cycles.size });
   for (const [index, { app, generate, links, dependencies }] of order.entries()) {
@@ -54,6 +75,7 @@ export async function rebuildAllTypes(
       continue;
     }
     try {
+      await verifyConfig(app);
       const command = generate ? context.rebuildCommand.trim() : "";
       const override = command ? context.zipPathOverride(app)?.trim() : undefined;
       const customZipPath = command
@@ -134,13 +156,11 @@ export async function rebuildAllTypes(
       }
       if (!generate) continue;
       const sources = await sourceIdentityAsync(app.folder, app.tsconfig, app.typesFolder, log);
-      const inputs = await inputsFingerprint(
-        app,
-        context,
-        customZipPath,
-        sources.tsconfigFingerprint,
-        external,
-      );
+      const fingerprint = (tsconfig: string) =>
+        context.fingerprintInputs?.(app, customZipPath, tsconfig, external) ??
+        inputsFingerprint(app, context, customZipPath, tsconfig, external);
+      const inputs = await fingerprint(sources.tsconfigFingerprint);
+      await verifyConfig(app);
       let zip: LocalGeneratedZip;
       let localFingerprint: string | null = inputs;
       let current = false;
@@ -162,12 +182,13 @@ export async function rebuildAllTypes(
             : undefined;
         const environment = app.launchEnvironment ?? {
           envMode: context.envMode,
-          env: readModeEnv(app.folder, context.envMode),
+          ...(app.bundler !== "rslib" && { env: readModeEnv(app.folder, context.envMode) }),
         };
         const result = await io.generateLocalFederatedTypes({
           appDir: app.folder,
           name: app.name,
           configFile: app.buildConfigFile ?? app.configFile,
+          ...(app.bundler && { bundler: app.bundler }),
           ...environment,
           workspaceFingerprint: inputs,
           confirmed,
@@ -179,20 +200,15 @@ export async function rebuildAllTypes(
       const after = await sourceIdentityAsync(app.folder, app.tsconfig, app.typesFolder, log);
       if (
         after.fingerprint !== sources.fingerprint ||
-        (await inputsFingerprint(
-          app,
-          context,
-          customZipPath,
-          after.tsconfigFingerprint,
-          external,
-        )) !== inputs
+        (await fingerprint(after.tsconfigFingerprint)) !== inputs
       )
-        throw new Error("Sources or build configuration changed during type generation");
+        throw new Error(CHANGED_CONFIG);
       for (const [destination, fingerprint] of installedInputs) {
         const evidence = await readInstalledEvidenceAsync(destination, log, true);
         if (evidence.filesFingerprint !== fingerprint)
           throw new Error("Installed dependency types changed during type generation");
       }
+      await verifyConfig(app);
       zips.set(app.name, zip);
       if (current) {
         report.current.push(app.name);

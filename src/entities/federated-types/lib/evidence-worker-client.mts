@@ -45,7 +45,9 @@ function drain(): void {
             ? item.task.folder
             : "destination" in item.task
               ? item.task.destination
-              : item.task.appDir,
+              : item.task.kind === "archive"
+                ? item.task.appDir
+                : undefined,
         queueMs: item.startedAt - item.queuedAt,
         failed: reply.error != null,
       });

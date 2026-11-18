@@ -11,11 +11,13 @@ import type { LogContext } from "../../../shared/models/logging.ts";
 import { DEFAULT_TIMEOUT_MS } from "../config/install.ts";
 import type {
   ArchiveComparison,
+  ComparisonArchive,
   InstallTypesInput,
   InstallTypesResult,
   ZipArchive,
 } from "../models/install.ts";
-import { checkedArchive, fingerprintArchive, resolveAdmZip, unzipError } from "./archive.ts";
+import type { InstalledEvidence } from "../models/observe.ts";
+import { checkedArchive, fingerprintArchive, unzipError } from "./archive.ts";
 import { resolveTypesPath, typesPathEscape } from "./destination.ts";
 import { readInstalledEvidenceAsync, runEvidenceTask } from "./evidence-worker-client.mts";
 import { assertTreeInside, readTree } from "./types-tree.ts";
@@ -175,14 +177,12 @@ export function compareInstalledArchive(input: InstallTypesInput): Promise<Archi
 export function createArchiveComparisonBatch(
   log: LogContext = noLog,
 ): typeof compareInstalledArchive {
-  const archives = new Map<string, Promise<InstallTypesResult>>();
+  const archives = new Map<string, Promise<{ zipHash: string; archive: ComparisonArchive }>>();
   return (input) =>
     destinationLock(path.resolve(input.destination), async () => {
       const key = JSON.stringify([input.url, input.expectedZipHash ?? ""]);
       let archive = archives.get(key);
       if (!archive) {
-        // Decoder availability belongs to this consumer, before any shared archive work begins.
-        resolveAdmZip(input.appDir);
         archive = (async () => {
           const buffer = await loadZipBytes(input);
           const zipHash = sha256(buffer);
@@ -191,11 +191,11 @@ export function createArchiveComparisonBatch(
               stage: "archive",
               reason: "fingerprint-mismatch",
             });
-          const filesFingerprint = await runEvidenceTask<string>(
-            { kind: "archive", bytes: buffer, appDir: input.appDir },
+          const archive = await runEvidenceTask<ComparisonArchive>(
+            { kind: "archive-comparison", bytes: buffer },
             log,
           );
-          return { zipHash, filesFingerprint };
+          return { zipHash, archive };
         })();
         archives.set(key, archive);
       }
@@ -205,7 +205,7 @@ export function createArchiveComparisonBatch(
 
 async function compareArchive(
   input: InstallTypesInput,
-  loaded: InstallTypesResult,
+  loaded: InstallTypesResult | { zipHash: string; archive: ComparisonArchive },
   log: LogContext = noLog,
 ): Promise<ArchiveComparison> {
   const destination = path.resolve(input.destination);
@@ -215,7 +215,15 @@ async function compareArchive(
       reason: "directory-missing",
     });
   }
-  const installed = await readInstalledEvidenceAsync(destination, log, true);
+  const installed = await runEvidenceTask<InstalledEvidence & { matches?: boolean }>(
+    {
+      kind: "installed",
+      destination,
+      fresh: true,
+      ...("archive" in loaded && { archive: loaded.archive }),
+    },
+    log,
+  );
   const fingerprint = installed.filesFingerprint;
   if (fingerprint === filesFingerprint([]))
     throw new DiagnosticError("unzip: types directory is empty", {
@@ -226,7 +234,8 @@ async function compareArchive(
   return {
     zipHash: loaded.zipHash,
     filesFingerprint: fingerprint,
-    matches: fingerprint === loaded.filesFingerprint,
+    matches:
+      "archive" in loaded ? installed.matches === true : fingerprint === loaded.filesFingerprint,
   };
 }
 

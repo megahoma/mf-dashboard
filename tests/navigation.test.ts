@@ -11,6 +11,7 @@ import { EventEmitter } from "node:events";
 import { createConfirmationStore } from "../src/entities/federated-types/index.ts";
 import * as vscode from "./support/vscode.ts";
 import { terms } from "../src/shared/config/index.ts";
+import { zipFixture } from "./support/zip.ts";
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -172,9 +173,12 @@ test("refresh and Fetch confirm published types and keep offline type changes vi
     path.join(sdk, "index.js"),
     `const fs=require('node:fs'),path=require('node:path');
     module.exports=class {
-      constructor(blob){this.items=JSON.parse(blob.subarray(4).toString());}
-      getEntries(){return this.items.map(item=>({entryName:item.file,isDirectory:false}));}
-      extractAllTo(folder){for(const item of this.items)fs.writeFileSync(path.join(folder,item.file),item.text);}
+      constructor(blob){
+        const offset=30+blob.readUInt16LE(26)+blob.readUInt16LE(28);
+        this.text=blob.subarray(offset,offset+blob.readUInt32LE(18));
+      }
+      getEntries(){return [{entryName:"index.d.ts",isDirectory:false}];}
+      extractAllTo(folder){fs.writeFileSync(path.join(folder,"index.d.ts"),this.text);}
     };`,
   );
   Object.assign(vscode.workspace, {
@@ -204,10 +208,7 @@ test("refresh and Fetch confirm published types and keep offline type changes vi
         metaData: { publicPath: "http://localhost:4401/", types: { zip: "types.zip" } },
       });
     downloads++;
-    const bytes = Buffer.concat([
-      Buffer.from([0x50, 0x4b, 3, 4]),
-      Buffer.from(JSON.stringify([{ file: "index.d.ts", text }])),
-    ]);
+    const bytes = zipFixture([{ file: "index.d.ts", text }]);
     return new Response(bytes, {
       headers: { "last-modified": new Date(Date.now() + 60_000).toUTCString() },
     });

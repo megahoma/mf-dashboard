@@ -64,24 +64,19 @@ function loadAdmZip(appDir: string): new (source: Buffer) => AdmZipFile {
   }
 }
 
-export function resolveAdmZip(appDir: string): string {
-  const appRequire = createRequire(path.join(appDir, "package.json"));
-  try {
-    return appRequire.resolve("adm-zip");
-  } catch {
-    const enhanced = appRequire.resolve("@module-federation/enhanced");
-    const dts = createRequire(enhanced).resolve("@module-federation/dts-plugin");
-    return createRequire(dts).resolve("adm-zip");
-  }
+function assertZipEntry(entry: ZipEntry): void {
+  checkedZipEntryName(entry.name);
+  if (entry.symlink) throw new Error(`unzip: symlink ${entry.name}`);
 }
 
-function assertZipEntry(entry: ZipEntry): void {
-  const name = entry.name.replaceAll("\\", "/");
+export function checkedZipEntryName(input: string): string {
+  const name = input.replaceAll("\\", "/");
   if (name === "" || name.startsWith("/") || /^[A-Za-z]:/.test(name)) {
-    throw new Error(`unzip: absolute entry ${entry.name}`);
+    throw new Error(`unzip: absolute entry ${input}`);
   }
-  if (name.split("/").includes("..")) throw new Error(`unzip: traversal ${entry.name}`);
-  if (entry.symlink) throw new Error(`unzip: symlink ${entry.name}`);
+  if (name.includes("\0")) throw new Error("unzip: invalid ZIP entry name");
+  if (name.split("/").includes("..")) throw new Error(`unzip: traversal ${input}`);
+  return name;
 }
 
 function isSymlink(attr: number): boolean {

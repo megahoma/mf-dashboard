@@ -19,10 +19,13 @@ import {
   discoverSource,
   putLinkResult,
   readAppFolder,
+  scanWorkspace,
   type LocalApp,
 } from "../src/entities/microfrontend/index.ts";
 import { verifyTypeInstalls } from "../src/features/observe-types/lib/verify.ts";
 import { rebuildAllTypes } from "../src/features/rebuild-types/lib/all.ts";
+import { inputsFingerprint } from "../src/features/rebuild-types/lib/inputs-fingerprint.ts";
+import { rebuildTypes } from "../src/features/rebuild-types/lib/workflow.ts";
 import type { RebuildAllContext } from "../src/features/rebuild-types/models/all.ts";
 import {
   generateFederatedTypes,
@@ -34,8 +37,12 @@ import type {
 } from "../src/features/rebuild-types/models/generate.ts";
 import { installRemoteTypes } from "../src/features/refetch-types/lib/remote.ts";
 import { safeError } from "../src/shared/lib/logging.ts";
+import { noLog } from "../src/shared/config/logging.ts";
 import { loadKnownApps } from "../src/widgets/mf-dashboard-tree/lib/known-apps.ts";
+import { createAppParseCache } from "../src/widgets/mf-dashboard-tree/lib/app-parse-cache.ts";
+import { resolveRebuildApps } from "../src/widgets/mf-dashboard-tree/lib/rebuild-apps.ts";
 import { localApp } from "./support/app.ts";
+import { zipFixture } from "./support/zip.ts";
 
 function fixture(t: TestContext) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-workspace-types-"));
@@ -185,6 +192,1242 @@ exports.generateTypesAPI = async ({ dtsManagerOptions }) => {
   }
 }
 
+test("bulk rebuild discovers the active Rslib profile and installs its types before the consumer", async (t) => {
+  const f = fixture(t);
+  const seed = f.app("designKit", 3000);
+  fs.writeFileSync(
+    path.join(seed.folder, "package.json"),
+    JSON.stringify({ federation: { entry: "./index.ts" } }),
+  );
+  fs.writeFileSync(
+    path.join(seed.folder, "rslib.config.ts"),
+    `
+import { defineConfig } from "@rslib/core";
+import profile from "./mf-profile";
+throw new Error("the extension must not execute this config");
+export default defineConfig({
+  lib: process.env.NODE_ENV === "development" ? [{ format: "esm" }, ...profile] : [{ format: "esm" }],
+  output: { distPath: "dist/shared" },
+});`,
+  );
+  fs.writeFileSync(
+    path.join(seed.folder, "module-federation.config.ts"),
+    `
+import { federation } from "./package.json";
+import shared from "external-runtime-config";
+export default {
+    name: "designKit",
+    exposes: {
+      ".": federation.entry,
+      "./css?inline": "./style.css?inline",
+      "./ignored": "./missing.ts?exclude-mf-dts",
+      "./also-ignored": { import: ["./missing.ts?exclude-mf-dts"] },
+      "./kept": { import: ["./index.ts"] },
+    },
+    dts: { generateTypes: { compilerInstance: "tspc", tsConfigPath: "types.json" } },
+    shared,
+};`,
+  );
+  fs.writeFileSync(
+    path.join(seed.folder, "mf-profile.ts"),
+    `
+import { pluginModuleFederation } from "@module-federation/rsbuild-plugin";
+import federation from "./module-federation.config";
+export default [{
+  format: "mf",
+  output: { distPath: { js: "assets" } },
+  plugins: [[false, [pluginModuleFederation(federation)]]],
+}];`,
+  );
+  const consumerSeed = f.app("reportingHost", 3004);
+  fs.writeFileSync(
+    consumerSeed.configFile,
+    `
+import { pluginModuleFederation } from "@module-federation/rsbuild-plugin";
+export default { server: { port: 3004 }, plugins: [pluginModuleFederation({
+  name: "reportingHost", dts: true, exposes: { ".": "./index.ts" },
+  remotes: { "@fixture/design-kit": "designKit@http://localhost:3000/mf-manifest.json" },
+})] };`,
+  );
+  const { designKit, reportingHost: consumer } = scanWorkspace(path.dirname(seed.folder));
+  assert.ok(designKit);
+  assert.ok(consumer);
+  assert.equal(designKit.port, 3000);
+  assert.equal(designKit.generatedZipPath, path.join(seed.folder, "dist/shared/@mf-types.zip"));
+  installGeneratorFixture(
+    seed.folder,
+    `
+const { compilerInstance, tsConfigPath, moduleFederationConfig: mf } = dtsManagerOptions.remote;
+if (compilerInstance !== "tspc" || tsConfigPath !== "types.json" ||
+    mf.exposes["."] !== "./index.ts" || mf.exposes["./css?inline"] !== "./style.css" ||
+    "./ignored" in mf.exposes || "./also-ignored" in mf.exposes ||
+    mf.exposes["./kept"].import[0] !== "./index.ts" || process.env.NODE_ENV !== "development") {
+  throw new Error("the generator did not receive the resolved MF profile");
+}
+fs.mkdirSync("dist/shared", { recursive: true });
+fs.writeFileSync("dist/shared/@mf-types.zip", Buffer.from([0x50, 0x4b, 3, 4, ...Buffer.from("current widget declarations")]));`,
+  );
+  const report = await rebuildAllTypes(f.context([consumer, designKit]), {
+    ...unused,
+    async generateLocalFederatedTypes(input) {
+      if (input.name === "designKit") return generateLocalFederatedTypes(input);
+      assert.equal(
+        fs.readFileSync(typeFile(consumer, "@fixture/design-kit"), "utf8"),
+        "current widget declarations",
+      );
+      return mockGeneration((dir) => writeZip(path.join(dir, "dist/@mf-types.zip"), "side menu"))(
+        input,
+      );
+    },
+  });
+  assert.deepEqual(report.failed, []);
+  assert.deepEqual(report.rebuilt, ["designKit", "reportingHost"]);
+  assert.deepEqual(report.installed, [{ consumer: "reportingHost", alias: "@fixture/design-kit" }]);
+});
+
+test("bulk rebuild skips an Rslib app whose exposes are all excluded from DTS", async (t) => {
+  const f = fixture(t);
+  const { folder } = f.app("designKit", 3000);
+  fs.writeFileSync(path.join(folder, "tsconfig.json"), "{}");
+  fs.writeFileSync(
+    path.join(folder, "rslib.config.ts"),
+    `export default { lib: [{ format: 'mf', plugins: [pluginModuleFederation({
+      name: 'designKit',
+      exposes: {
+        './view': './index.ts?exclude-mf-dts',
+        './widget': { import: ['./fallback.ts', './index.ts?exclude-mf-dts=true'] },
+      },
+    })] }] };`,
+  );
+  const app = readAppFolder(folder, "development");
+  assert.ok(app?.generateTypes);
+  const progress: string[] = [];
+  const report = await rebuildAllTypes(
+    f.context([app], {
+      progress(name) {
+        progress.push(name);
+      },
+    }),
+    {
+      ...unused,
+      async generateLocalFederatedTypes() {
+        throw new Error("unexpected generation for excluded exposes");
+      },
+    },
+  );
+  assert.equal(app.hasExposes, false);
+  assert.deepEqual(progress, []);
+  assert.deepEqual(report, { rebuilt: [], current: [], installed: [], skipped: [], failed: [] });
+});
+
+test("Rslib uses its configured project root for DTS and launch folder for env", async (t) => {
+  const f = fixture(t);
+  const { folder: launchFolder } = f.app("designKit", 9000);
+  const folder = path.join(launchFolder, "project");
+  fs.mkdirSync(folder);
+  fs.writeFileSync(path.join(launchFolder, "package.json"), '{"scripts":{"dev":"rslib mf-dev"}}');
+  fs.writeFileSync(path.join(launchFolder, ".env.development"), "PORT=9200\n");
+  fs.writeFileSync(path.join(folder, ".env.development"), "PORT=9300\n");
+  const configFile = path.join(launchFolder, "rslib.config.ts");
+  fs.writeFileSync(
+    configFile,
+    `export default {
+    root: 'project', server: { port: process.env.PORT }, output: { distPath: 'artifacts' },
+    lib: [{ format: 'mf', plugins: [pluginModuleFederation({ name: 'designKit', exposes: { '.': './index.ts' } })] }],
+  };`,
+  );
+  fs.writeFileSync(path.join(folder, "index.ts"), "export const value = 1;");
+  const roots = [{ name: "root", path: launchFolder }];
+  const cache = createAppParseCache();
+  const load = () =>
+    loadKnownApps(roots, { designKit: { path: "." } }, "development", [], cache)[0];
+  assert.equal(load()?.generateTypes, false);
+  fs.writeFileSync(path.join(folder, "tsconfig.json"), "{}");
+  const app = load();
+  assert.equal(app?.folder, folder);
+  assert.equal(app.launchFolder, launchFolder);
+  assert.equal(app.port, 9200);
+  assert.equal(app.generateTypes, true);
+  assert.equal(app.consumeTypes, true);
+  assert.equal(app.generatedZipPath, path.join(folder, "artifacts/@mf-types.zip"));
+  installGeneratorFixture(
+    launchFolder,
+    `
+if (fs.realpathSync(dtsManagerOptions.remote.context) !== fs.realpathSync(process.cwd()) ||
+    !fs.existsSync("index.ts") || process.env.PORT !== "9200") {
+  throw new Error("unexpected Rslib project root or env");
+}
+fs.mkdirSync("artifacts", { recursive: true });
+fs.writeFileSync("artifacts/@mf-types.zip", Buffer.from([0x50, 0x4b, 3, 4, 1]));
+  `,
+  );
+  const report = await rebuildAllTypes(f.context([app]), {
+    ...unused,
+    generateLocalFederatedTypes,
+  });
+  assert.deepEqual(report.failed, []);
+  assert.deepEqual(report.rebuilt, ["designKit"]);
+  assert.ok(fs.existsSync(path.join(folder, "artifacts/@mf-types.zip")));
+});
+
+test("Rebuild All includes the Rslib target package manifest in its generation inputs", async (t) => {
+  const f = fixture(t);
+  const { folder: launcher } = f.app("launcher", 4380);
+  const folder = path.join(launcher, "project");
+  fs.mkdirSync(folder);
+  fs.writeFileSync(
+    path.join(launcher, "package.json"),
+    '{"scripts":{"dev":"rslib mf-dev --root project"}}',
+  );
+  const manifest = path.join(folder, "package.json");
+  fs.writeFileSync(manifest, '{"type":"module"}');
+  fs.writeFileSync(path.join(folder, "tsconfig.json"), '{"files":["index.ts"]}');
+  fs.writeFileSync(path.join(folder, "index.ts"), "export const value = 1;");
+  fs.writeFileSync(
+    path.join(folder, "rslib.config.ts"),
+    `export default { lib: [{ format: 'mf', plugins: [pluginModuleFederation({
+      name: 'widget', exposes: { '.': './index.ts' }
+    })] }] };`,
+  );
+  const load = () => {
+    const app = scanWorkspace(launcher).widget;
+    assert.equal(app?.folder, folder);
+    assert.ok(app.generateTypes);
+    return app;
+  };
+  const run = (write: (appDir: string) => LocalGeneratedZip) =>
+    rebuildAllTypes(f.context([load()]), {
+      ...unused,
+      generateLocalFederatedTypes: mockGeneration(write),
+    });
+  const write = (appDir: string) =>
+    writeZip(path.join(appDir, "dist", "@mf-types.zip"), "declarations");
+  assert.deepEqual((await run(write)).rebuilt, ["widget"]);
+  assert.deepEqual((await run(write)).current, ["widget"]);
+  fs.writeFileSync(manifest, '{"type":"commonjs"}');
+  assert.deepEqual((await run(write)).rebuilt, ["widget"]);
+  fs.unlinkSync(manifest);
+  const report = await run((appDir) => {
+    fs.writeFileSync(manifest, '{"type":"module"}');
+    return write(appDir);
+  });
+  assert.deepEqual(report.rebuilt, []);
+  assert.match(
+    report.failed[0]?.reason ?? "",
+    /build configuration changed during type generation/,
+  );
+});
+
+test("Rebuild All detects changes to root dotenv used by dynamic DTS configs", async (t) => {
+  const f = fixture(t);
+  const { folder } = f.app("widget", 4380);
+  fs.writeFileSync(path.join(folder, "package.json"), '{"scripts":{"dev":"rsbuild dev"}}');
+  fs.writeFileSync(
+    path.join(folder, "rsbuild.config.ts"),
+    `
+    export default { plugins: [pluginModuleFederation({
+      name: 'widget', exposes: { '.': './index.ts' }, dts: true
+    })] };
+  `,
+  );
+  const envFile = path.join(folder, ".env");
+  fs.writeFileSync(envFile, "VALUE=first");
+  const app = readAppFolder(folder, "development");
+  assert.ok(app?.generateTypes);
+  const report = await rebuildAllTypes(f.context([app]), {
+    ...unused,
+    generateLocalFederatedTypes: mockGeneration((appDir) => {
+      fs.writeFileSync(envFile, "VALUE=second");
+      return writeZip(path.join(appDir, "dist", "@mf-types.zip"), "type references the old value");
+    }),
+  });
+  assert.deepEqual(report.rebuilt, []);
+  assert.match(
+    report.failed[0]?.reason ?? "",
+    /build configuration changed during type generation/,
+  );
+  assert.equal(f.confirmations.generation(app.name), null);
+});
+
+test("Rebuild All fingerprints an in-package manifest symlink and refuses outside targets", (t) => {
+  const f = fixture(t);
+  const { folder: launcher } = f.app("launcher", 4380);
+  const project = path.join(launcher, "project");
+  fs.mkdirSync(project);
+  fs.writeFileSync(
+    path.join(launcher, "package.json"),
+    '{"scripts":{"dev":"rslib mf-dev --root project"}}',
+  );
+  fs.writeFileSync(path.join(project, "tsconfig.json"), "{}");
+  fs.writeFileSync(path.join(project, "index.ts"), "export const value = 1;");
+  fs.writeFileSync(
+    path.join(project, "rslib.config.ts"),
+    `export default { lib: [{ format: 'mf', plugins: [pluginModuleFederation({ name: 'widget', exposes: { '.': './index.ts' } })] }] };`,
+  );
+  const manifest = path.join(project, "package.json");
+  const metadata = path.join(project, "package-meta.json");
+  fs.writeFileSync(metadata, '{"type":"module"}');
+  fs.symlinkSync("package-meta.json", manifest, "file");
+  const app = scanWorkspace(launcher).widget;
+  assert.equal(app?.folder, project);
+  const fingerprint = () => inputsFingerprint(app, f.context([app]), null, "fixture", []);
+  const before = fingerprint();
+  fs.writeFileSync(metadata, '{"type":"commonjs"}');
+  assert.notEqual(fingerprint(), before);
+
+  const outside = path.join(launcher, "outside.json");
+  fs.writeFileSync(outside, '{"type":"module"}');
+  fs.unlinkSync(manifest);
+  fs.symlinkSync(outside, manifest, "file");
+  const open = t.mock.method(fs, "openSync");
+  const refused = fingerprint();
+  fs.writeFileSync(outside, '{"type":"commonjs"}');
+  open.mock.resetCalls();
+  assert.equal(fingerprint(), refused);
+  assert.ok(
+    !open.mock.calls.some(({ arguments: [file] }) => file === fs.realpathSync.native(outside)),
+  );
+});
+
+test("Rebuild All rejects dotenv edits and new priority configs after planning", async (t) => {
+  const f = fixture(t);
+  const { folder: first } = f.app("first", 4380);
+  const { folder: second } = f.app("second", 4381);
+  const root = path.dirname(first);
+  const entry = path.join(second, ".env");
+  for (const [name, folder] of [
+    ["first", first],
+    ["second", second],
+  ]) {
+    fs.writeFileSync(path.join(folder, "package.json"), '{"scripts":{"dev":"rslib mf-dev"}}');
+    fs.writeFileSync(path.join(folder, ".env"), "FIXTURE_ENTRY=./index.ts\n");
+    fs.writeFileSync(path.join(folder, "tsconfig.json"), '{"files":["index.ts","other.ts"]}');
+    fs.writeFileSync(path.join(folder, "other.ts"), "export const other = 1;");
+    fs.writeFileSync(
+      path.join(folder, "rslib.config.ts"),
+      `export default { lib: [{ format: 'mf', plugins: [pluginModuleFederation({ name: '${name}', exposes: { '.': process.env.FIXTURE_ENTRY } })] }] };`,
+    );
+  }
+  const load = () =>
+    resolveRebuildApps(
+      [{ name: "root", path: root }],
+      {
+        apps: { first: { path: "first" }, second: { path: "second" } },
+        envMode: "development",
+        ignorePaths: [],
+        structure: "tree",
+        extraManifestUrls: [],
+      },
+      noLog,
+    ).apps;
+  const generated: string[] = [];
+  const run = (apps: LocalApp[], editDuringBuild?: () => void) =>
+    rebuildAllTypes(f.context(apps), {
+      ...unused,
+      generateLocalFederatedTypes: mockGeneration((folder) => {
+        generated.push(path.basename(folder));
+        if (folder === first) editDuringBuild?.();
+        return writeZip(path.join(folder, "dist", "@mf-types.zip"), "declarations");
+      }),
+    });
+  const { first: a, second: b } = scanWorkspace(root);
+  const report = await run([a, b], () => fs.writeFileSync(entry, "FIXTURE_ENTRY=./other.ts\n"));
+  assert.deepEqual(generated, ["first"]);
+  assert.deepEqual(report.rebuilt, ["first"]);
+  assert.match(
+    report.failed.find(({ app }) => app === "second")?.reason ?? "",
+    /build configuration changed/,
+  );
+  assert.equal(f.confirmations.generation("second"), null);
+  const stale = load();
+  fs.writeFileSync(entry, "FIXTURE_ENTRY=./index.ts\n");
+  assert.match(
+    (await run(stale)).failed.find(({ app }) => app === "second")?.reason ?? "",
+    /build configuration changed/,
+  );
+  assert.deepEqual((await run(load())).rebuilt, ["second"]);
+
+  fs.writeFileSync(path.join(first, "index.ts"), "export const changed = 1;");
+  fs.writeFileSync(path.join(second, "index.ts"), "export const changed = 2;");
+  const preferredConfig = path.join(second, "rslib.config.mjs");
+  const planned = load();
+  assert.equal(
+    planned.find(({ name }) => name === "second")?.configFile,
+    path.join(second, "rslib.config.ts"),
+  );
+  const afterConfigAppeared = await run(planned, () => {
+    fs.writeFileSync(
+      preferredConfig,
+      `export default {lib:[{format:'mf',plugins:[pluginModuleFederation({
+        name:'second', exposes:{'.':'./other.ts'}
+      })]}]};`,
+    );
+  });
+  assert.deepEqual(afterConfigAppeared.rebuilt, ["first"]);
+  assert.match(
+    afterConfigAppeared.failed.find(({ app }) => app === "second")?.reason ?? "",
+    /build configuration changed/,
+  );
+  const refreshed = load();
+  assert.equal(refreshed.find(({ name }) => name === "second")?.configFile, preferredConfig);
+  assert.deepEqual((await run(refreshed)).rebuilt, ["second"]);
+
+  fs.unlinkSync(preferredConfig);
+  fs.writeFileSync(path.join(second, "package.json"), '{"scripts":{"dev":"node server.js"}}');
+  fs.writeFileSync(path.join(first, "index.ts"), "export const changed = 3;");
+  const fallbackPlan = load();
+  assert.equal(
+    fallbackPlan.find(({ name }) => name === "second")?.configFile,
+    path.join(second, "rslib.config.ts"),
+  );
+  const afterFallbackChanged = await run(fallbackPlan, () => {
+    fs.writeFileSync(
+      preferredConfig,
+      `export default {lib:[{format:'mf',plugins:[pluginModuleFederation({
+      name:'second', exposes:{'.':'./other.ts'}
+    })]}]};`,
+    );
+  });
+  assert.deepEqual(afterFallbackChanged.rebuilt, ["first"]);
+  assert.match(afterFallbackChanged.failed[0]?.reason ?? "", /build configuration changed/);
+  assert.equal(load().find(({ name }) => name === "second")?.configFile, preferredConfig);
+});
+
+test("Rebuild All rejects its old Rsbuild plan when the first Rslib config appears", async (t) => {
+  const f = fixture(t);
+  const { folder } = f.app("widget", 4380);
+  const rsbuild = path.join(folder, "rsbuild.config.ts");
+  const rslib = path.join(folder, "rslib.config.mjs");
+  fs.writeFileSync(path.join(folder, "package.json"), '{"scripts":{"dev":"node server.js"}}');
+  fs.writeFileSync(path.join(folder, "tsconfig.json"), '{"files":["index.ts"]}');
+  fs.writeFileSync(
+    rsbuild,
+    `export default { plugins: [pluginModuleFederation({
+      name: 'widget', dts: true, exposes: { '.': './index.ts' }
+    })] };`,
+  );
+  const load = () =>
+    resolveRebuildApps(
+      [{ name: "root", path: folder }],
+      {
+        apps: { widget: { path: "." } },
+        envMode: "development",
+        ignorePaths: [],
+        extraManifestUrls: [],
+        structure: "tree",
+      },
+      noLog,
+    ).apps[0];
+  const planned = load();
+  assert.equal(planned.configFile, rsbuild);
+  fs.writeFileSync(
+    rslib,
+    `export default { lib: [{ format: 'mf', plugins: [pluginModuleFederation({
+      name: 'widget', dts: true, exposes: { '.': './index.ts' }
+    })] }] };`,
+  );
+  const generatedConfigs: string[] = [];
+  const generate = mockGeneration((appDir) =>
+    writeZip(path.join(appDir, "dist/@mf-types.zip"), "declarations"),
+  );
+  const run = (app: LocalApp) =>
+    rebuildAllTypes(f.context([app]), {
+      ...unused,
+      generateLocalFederatedTypes(input) {
+        generatedConfigs.push(input.configFile);
+        return generate(input);
+      },
+    });
+  const stale = await run(planned);
+  assert.deepEqual(stale.rebuilt, []);
+  assert.match(stale.failed[0]?.reason ?? "", /build configuration changed/);
+  assert.deepEqual(generatedConfigs, []);
+  assert.equal(f.confirmations.generation("widget"), null);
+
+  const refreshed = load();
+  assert.equal(refreshed.configFile, rslib);
+  assert.deepEqual((await run(refreshed)).rebuilt, ["widget"]);
+  assert.deepEqual(generatedConfigs, [rslib]);
+});
+
+test("Rebuild All validates the planned env directory by identity", async (t) => {
+  const f = fixture(t);
+  const { folder } = f.app("widget", 4380);
+  const selected = path.join(folder, "selected-env");
+  const writeScript = (envDir: string) =>
+    fs.writeFileSync(
+      path.join(folder, "package.json"),
+      JSON.stringify({ scripts: { dev: `rslib mf-dev --env-dir ${envDir}` } }),
+    );
+  writeScript("selected-env");
+  fs.writeFileSync(path.join(folder, "tsconfig.json"), "{}");
+  fs.writeFileSync(
+    path.join(folder, "rslib.config.ts"),
+    `export default {
+    server: {port: process.env.PORT},
+    lib: [{format:'mf', plugins:[pluginModuleFederation({name:'widget', exposes:{'.':'./index.ts'}})]}]
+  };`,
+  );
+  const load = () =>
+    resolveRebuildApps(
+      [{ name: "root", path: folder }],
+      {
+        apps: { widget: { path: "." } },
+        envMode: "development",
+        ignorePaths: [],
+        extraManifestUrls: [],
+        structure: "tree",
+      },
+      noLog,
+    ).apps[0];
+  const generate = t.mock.fn(
+    mockGeneration((root) => writeZip(path.join(root, "dist/@mf-types.zip"), "declarations")),
+  );
+  const run = (app: LocalApp) =>
+    rebuildAllTypes(f.context([app]), { ...unused, generateLocalFederatedTypes: generate });
+  const missing = load();
+  assert.equal(missing.port, 3000);
+  fs.mkdirSync(selected);
+  fs.writeFileSync(path.join(selected, ".env"), "PORT=3002\n");
+  assert.match((await run(missing)).failed[0]?.reason ?? "", /build configuration changed/);
+  assert.equal(generate.mock.callCount(), 0);
+  assert.equal(load().port, 3002);
+
+  fs.renameSync(selected, path.join(folder, "first-env"));
+  fs.mkdirSync(path.join(folder, "second-env"));
+  fs.writeFileSync(path.join(folder, "second-env", ".env"), "PORT=3003\n");
+  fs.symlinkSync(path.join(folder, "first-env"), selected, "junction");
+  const linked = load();
+  assert.equal(linked.port, 3002);
+  fs.unlinkSync(selected);
+  fs.symlinkSync(path.join(folder, "second-env"), selected, "junction");
+  assert.match((await run(linked)).failed[0]?.reason ?? "", /build configuration changed/);
+  assert.equal(generate.mock.callCount(), 0);
+  assert.equal(load().port, 3003);
+
+  writeScript(".");
+  assert.deepEqual((await run(load())).rebuilt, ["widget"]);
+});
+
+test("Rebuild All detects a rejected dotenv candidate becoming a file during generation", async (t) => {
+  for (const kind of ["symlink", "directory"]) {
+    await t.test(kind, async (t) => {
+      const f = fixture(t);
+      const { folder } = f.app("widget", 4380);
+      fs.writeFileSync(path.join(folder, "package.json"), '{"scripts":{"dev":"rslib mf-dev"}}');
+      fs.writeFileSync(path.join(folder, "tsconfig.json"), "{}");
+      fs.writeFileSync(path.join(folder, "other.ts"), "export const other = 1;");
+      fs.writeFileSync(
+        path.join(folder, "rslib.config.ts"),
+        `export default { lib: [{ format: 'mf', plugins: [pluginModuleFederation({
+          name: 'widget', exposes: { '.': process.env.FIXTURE_ENTRY ?? './index.ts' }
+        })] }] };`,
+      );
+      const envFile = path.join(folder, ".env");
+      if (kind === "symlink") {
+        const denied = path.join(path.dirname(folder), "denied.env");
+        fs.writeFileSync(denied, "FIXTURE_ENTRY=./outside.ts\n");
+        fs.symlinkSync(denied, envFile, "file");
+      } else {
+        fs.mkdirSync(envFile);
+      }
+      const app = readAppFolder(folder, "development");
+      assert.ok(app?.generateTypes);
+      assert.equal(app.launchEnvironment?.env.FIXTURE_ENTRY, undefined);
+      const report = await rebuildAllTypes(f.context([app]), {
+        ...unused,
+        generateLocalFederatedTypes: mockGeneration((appDir) => {
+          fs.rmSync(envFile, { recursive: true });
+          fs.writeFileSync(envFile, "FIXTURE_ENTRY=./other.ts\n");
+          return writeZip(path.join(appDir, "dist", "@mf-types.zip"), "old config");
+        }),
+      });
+      assert.equal(
+        readAppFolder(folder, "development")?.launchEnvironment?.env.FIXTURE_ENTRY,
+        "./other.ts",
+      );
+      assert.deepEqual(report.rebuilt, []);
+      assert.match(
+        report.failed[0]?.reason ?? "",
+        /build configuration changed during type generation/,
+      );
+      assert.equal(f.confirmations.generation(app.name), null);
+    });
+  }
+});
+
+test("Rebuild All notices when a higher-priority config helper becomes available", async (t) => {
+  const f = fixture(t);
+  const { folder } = f.app("widget", 4380);
+  fs.writeFileSync(path.join(folder, "tsconfig.json"), '{"files":["index.ts"]}');
+  fs.writeFileSync(path.join(folder, "settings.js"), "export const port = 4380;");
+  fs.writeFileSync(
+    path.join(folder, "rslib.config.ts"),
+    `
+    import { port } from "./settings";
+    export default {
+      server: { port },
+      lib: [{ format: "mf", plugins: [pluginModuleFederation({
+        name: "widget", exposes: { ".": "./index.ts" }
+      })] }]
+    };
+  `,
+  );
+  const app = readAppFolder(folder, "development");
+  assert.equal(app?.port, 4380);
+  const report = await rebuildAllTypes(f.context([app]), {
+    ...unused,
+    generateLocalFederatedTypes: mockGeneration((appDir) => {
+      fs.writeFileSync(path.join(folder, "settings.ts"), "export const port = 4381;");
+      return writeZip(path.join(appDir, "dist", "@mf-types.zip"), "old config");
+    }),
+  });
+  assert.equal(readAppFolder(folder, "development")?.port, 4381);
+  assert.deepEqual(report.rebuilt, []);
+  assert.match(
+    report.failed[0]?.reason ?? "",
+    /build configuration changed during type generation/,
+  );
+  assert.equal(f.confirmations.generation(app.name), null);
+});
+
+test("Rebuild All detects mode dotenv changes even when the dev script disables dotenv", async (t) => {
+  const f = fixture(t);
+  const { folder } = f.app("widget", 4380);
+  fs.writeFileSync(
+    path.join(folder, "package.json"),
+    '{"scripts":{"dev":"rsbuild dev --env-mode staging --no-env"}}',
+  );
+  fs.writeFileSync(
+    path.join(folder, "rsbuild.config.ts"),
+    `
+    export default { plugins: [pluginModuleFederation({
+      name: 'widget', exposes: { '.': './index.ts' }, dts: true
+    })] };
+  `,
+  );
+  const envFile = path.join(folder, ".env.staging.local");
+  fs.writeFileSync(envFile, "FIXTURE_DTS_MODE=first");
+  const app = readAppFolder(folder, "development");
+  assert.equal(app?.launchEnvironment?.envMode, "staging");
+  assert.equal(app.launchEnvironment.env.FIXTURE_DTS_MODE, undefined);
+  const customZip = path.join(folder, "build", "@mf-types.zip");
+  const report = await rebuildAllTypes(
+    f.context([app], { rebuildCommand: "npm run build-types", zipPathOverride: () => customZip }),
+    {
+      ...unused,
+      generateLocalFederatedTypes,
+      async runRebuildCommand() {
+        fs.writeFileSync(envFile, "FIXTURE_DTS_MODE=second");
+        writeZip(customZip, "old config");
+      },
+    },
+  );
+  assert.deepEqual(report.rebuilt, []);
+  assert.match(
+    report.failed[0]?.reason ?? "",
+    /build configuration changed during type generation/,
+  );
+  assert.equal(f.confirmations.generation(app.name), null);
+});
+
+test("Rebuild All detects a package boundary changing how a config helper resolves", async (t) => {
+  const f = fixture(t);
+  const { folder } = f.app("widget", 4380);
+  fs.writeFileSync(path.join(folder, "package.json"), "{}");
+  fs.writeFileSync(path.join(folder, "tsconfig.json"), '{"files":["index.ts"]}');
+  fs.writeFileSync(path.join(folder, "settings.ts"), "export const port = 4380;");
+  fs.mkdirSync(path.join(folder, "config"));
+  fs.writeFileSync(path.join(folder, "config", "helper.ts"), 'export { port } from "../settings";');
+  fs.writeFileSync(
+    path.join(folder, "rslib.config.ts"),
+    `
+    import { port } from "./config/helper";
+    export default {
+      server: { port },
+      lib: [{ format: "mf", plugins: [pluginModuleFederation({
+        name: "widget", exposes: { ".": "./index.ts" }
+      })] }]
+    };
+  `,
+  );
+  const app = readAppFolder(folder, "development");
+  assert.equal(app?.port, 4380);
+  const report = await rebuildAllTypes(f.context([app]), {
+    ...unused,
+    generateLocalFederatedTypes: mockGeneration((appDir) => {
+      fs.writeFileSync(path.join(folder, "config", "package.json"), "{}");
+      return writeZip(path.join(appDir, "dist", "@mf-types.zip"), "old config");
+    }),
+  });
+  assert.equal(readAppFolder(folder, "development")?.port, 3000);
+  assert.deepEqual(report.rebuilt, []);
+  assert.match(
+    report.failed[0]?.reason ?? "",
+    /build configuration changed during type generation/,
+  );
+  assert.equal(f.confirmations.generation(app.name), null);
+});
+
+test("Rebuild All hashes only bounded config inputs admitted by Discover", (t) => {
+  const f = fixture(t);
+  const { folder: launcher } = f.app("launcher", 8999);
+  const { folder: project } = f.app("library", 9000);
+  fs.writeFileSync(
+    path.join(launcher, "package.json"),
+    '{"scripts":{"dev":"rslib mf-dev --root ../library --config ../launcher/custom.ts"}}',
+  );
+  fs.writeFileSync(path.join(project, "package.json"), "{}");
+  const deniedEnv = path.join(project, ".env.local");
+  const deniedImport = path.join(project, "data.json");
+  const allowedEnv = path.join(launcher, ".env.local");
+  fs.writeFileSync(deniedEnv, "PORT=9000");
+  fs.writeFileSync(allowedEnv, "PORT=8000");
+  fs.writeFileSync(deniedImport, '{"entry":"https://example.test/manifest.json"}');
+  const helperDir = path.join(launcher, "helpers");
+  const helper = path.join(helperDir, "routes.ts");
+  fs.mkdirSync(helperDir);
+  fs.writeFileSync(helper, 'export const route = "https://example.test/mf-manifest.json"');
+  const config = path.join(launcher, "custom.ts");
+  fs.writeFileSync(
+    config,
+    `import dotenv from 'dotenv';
+     import fs from 'node:fs';
+     import path from 'node:path';
+     import { route } from './helpers/routes';
+     import data from '../library/data.json';
+     const local = dotenv.parse(fs.readFileSync(path.join(__dirname, '.env.local'), 'utf8'));
+     export default { server: { port: local.PORT },
+       lib:[{format:'mf',plugins:[pluginModuleFederation({
+         name:'library', remotes: { local: route, denied: data.entry }
+       })]}] };`,
+  );
+  const app = loadKnownApps(
+    [{ name: "root", path: path.dirname(project) }],
+    { library: { path: "launcher" } },
+    "development",
+  )[0];
+  assert.equal(app?.folder, project);
+  assert.equal(app.port, 8000);
+  assert.ok(app.configDependencies?.includes(deniedImport));
+  assert.deepEqual(
+    app.remotes.map(({ url }) => url),
+    ["https://example.test/mf-manifest.json", null],
+  );
+  const context = f.context([app]);
+  const fingerprint = () => inputsFingerprint(app, context, null, "tsconfig", []);
+  const original = fingerprint();
+  fs.writeFileSync(deniedEnv, "PORT=9001");
+  fs.writeFileSync(deniedImport, "{}");
+  const open = t.mock.method(fs, "openSync");
+  const opened = () => open.mock.calls.map(({ arguments: [file] }) => String(file));
+  const canonical = (file: string) =>
+    path.join(fs.realpathSync(path.dirname(file)), path.basename(file));
+  assert.equal(fingerprint(), original);
+  assert.ok(
+    !opened().some((file) => file === canonical(deniedEnv) || file === canonical(deniedImport)),
+  );
+  assert.ok(app.configInputs?.some(({ file }) => file === allowedEnv));
+
+  fs.writeFileSync(allowedEnv, "PORT=8001");
+  assert.notEqual(fingerprint(), original);
+  fs.writeFileSync(allowedEnv, "PORT=8000");
+  fs.appendFileSync(config, "\n// changed");
+  const changed = fingerprint();
+  assert.notEqual(changed, original);
+
+  const originalHelper = canonical(helper);
+  fs.renameSync(helperDir, path.join(launcher, "original-helpers"));
+  const outsideHelper = path.join(project, "routes.ts");
+  fs.writeFileSync(outsideHelper, "export const route = 'private'");
+  fs.symlinkSync(project, helperDir, "dir");
+  open.mock.resetCalls();
+  assert.notEqual(fingerprint(), changed);
+  assert.ok(!opened().includes(originalHelper) && !opened().includes(canonical(outsideHelper)));
+});
+
+test("built-in Rslib DTS honors the Discover package boundary for dotenv", async (t) => {
+  const f = fixture(t);
+  const { folder: launcher } = f.app("launcher", 8999);
+  const { folder } = f.app("widget", 9000);
+  const workspaceRoot = path.dirname(folder);
+  fs.writeFileSync(
+    path.join(launcher, "package.json"),
+    '{"scripts":{"dev":"rslib mf-dev --root ../widget"}}',
+  );
+  fs.writeFileSync(path.join(folder, "package.json"), "{}");
+  fs.writeFileSync(path.join(folder, "tsconfig.json"), "{}");
+  const dotenv = path.join(folder, ".env.local");
+  fs.writeFileSync(dotenv, "FIXTURE_ENTRY=./index.ts\n");
+  const configFile = path.join(folder, "rslib.config.ts");
+  fs.writeFileSync(
+    configFile,
+    `import * as dotenv from 'dotenv';
+     import * as fs from 'node:fs';
+     import * as path from 'node:path';
+     const local = dotenv.parse(fs.readFileSync(path.join(__dirname,'.env.local'), 'utf8'));
+     export default { lib:[{format:'mf',plugins:[pluginModuleFederation({
+       name:'widget', exposes:{'.':local.FIXTURE_ENTRY},
+       dts:{generateTypes:true,consumeTypes:false},
+     })]}] };`,
+  );
+  installGeneratorFixture(
+    folder,
+    `
+if (dtsManagerOptions.remote.moduleFederationConfig.exposes['.'] !== './index.ts') {
+  throw new Error('unexpected exposed entry');
+}
+fs.mkdirSync('dist', { recursive: true });
+fs.writeFileSync('dist/@mf-types.zip', Buffer.from([0x50, 0x4b, 3, 4, 1]));
+    `,
+  );
+  const discovered = loadKnownApps(
+    [{ name: "root", path: workspaceRoot }],
+    { widget: { path: "launcher" } },
+    "development",
+  )[0];
+  assert.equal(discovered?.launchFolder, launcher);
+  assert.equal(discovered.launchEnvironment?.allowLocalEnv, false);
+  const context = f.context([discovered]);
+  const fingerprint = await inputsFingerprint(discovered, context, null, "tsconfig", []);
+  fs.writeFileSync(dotenv, "FIXTURE_ENTRY=./another.ts\n");
+  assert.equal(await inputsFingerprint(discovered, context, null, "tsconfig", []), fingerprint);
+  fs.writeFileSync(dotenv, "FIXTURE_ENTRY=./index.ts\n");
+
+  const runAll = (app: LocalApp) =>
+    rebuildAllTypes(f.context([app]), { ...unused, generateLocalFederatedTypes });
+  const rejected = /Could not resolve Module Federation\.exposes\.\. statically/;
+  const report = await runAll(discovered);
+  assert.deepEqual(report.rebuilt, []);
+  assert.equal(report.failed.length, 1);
+  assert.match(report.failed[0].reason, rejected);
+  t.mock.method(globalThis, "fetch", unused.installRemoteTypes);
+  await assert.rejects(
+    rebuildTypes(discovered.name, {
+      apps: [discovered],
+      book: createProbeBook(),
+      confirmations: f.confirmations,
+      published: new Map(),
+      settings: {
+        "mf-dashboard.scripts.start": "dev",
+        rebuildCommand: "",
+        envMode: "development",
+      },
+      refetchCommand: () => "",
+      persist() {},
+      rebuilt: () => assert.fail("denied dotenv must not produce a declaration archive"),
+    }),
+    rejected,
+  );
+  const zip = path.join(folder, "dist", "@mf-types.zip");
+  assert.equal(fs.existsSync(zip), false);
+
+  const local = readAppFolder(folder, "development");
+  assert.ok(local);
+  const allowed = await runAll(local);
+  assert.deepEqual(allowed.failed, []);
+  assert.deepEqual(allowed.rebuilt, ["widget"]);
+  assert.ok(fs.existsSync(zip));
+});
+
+test("built-in Rslib DTS rejects a config directory rebound after Discover", async (t) => {
+  const f = fixture(t);
+  const { folder } = f.app("library", 9000);
+  const configDir = path.join(folder, "config");
+  const replacement = path.join(path.dirname(folder), "replacement");
+  fs.writeFileSync(
+    path.join(folder, "package.json"),
+    '{"scripts":{"dev":"rslib mf-dev --config config/rslib.config.ts"}}',
+  );
+  fs.writeFileSync(path.join(folder, "tsconfig.json"), "{}");
+  const config = `import * as dotenv from 'dotenv';
+    import * as fs from 'node:fs';
+    import * as path from 'node:path';
+    const local = dotenv.parse(fs.readFileSync(path.join(__dirname,'.env.local'), 'utf8'));
+    export default { lib:[{format:'mf',plugins:[pluginModuleFederation({
+      name:'library', exposes:{'.':local.FIXTURE_ENTRY},
+      dts:{generateTypes:true,consumeTypes:false},
+    })]}] };`;
+  for (const dir of [configDir, replacement]) {
+    fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(dir, "rslib.config.ts"), config);
+    fs.writeFileSync(path.join(dir, ".env.local"), "FIXTURE_ENTRY=./index.ts\n");
+  }
+  fs.writeFileSync(path.join(replacement, "package.json"), "{}");
+  installGeneratorFixture(
+    folder,
+    `fs.mkdirSync('dist', { recursive: true });
+     fs.writeFileSync('dist/@mf-types.zip', Buffer.from([0x50, 0x4b, 3, 4, 1]));`,
+  );
+  const app = readAppFolder(folder, "development");
+  assert.ok(app);
+  const run = () => rebuildAllTypes(f.context([app]), { ...unused, generateLocalFederatedTypes });
+  const before = await run();
+  assert.deepEqual(before.failed, []);
+  assert.deepEqual(before.rebuilt, ["library"]);
+
+  fs.renameSync(configDir, path.join(folder, "previous-config"));
+  fs.symlinkSync(replacement, configDir, "dir");
+  const after = await run();
+  assert.deepEqual(after.rebuilt, []);
+  assert.equal(after.failed.length, 1);
+  assert.match(after.failed[0].reason, /Could not resolve the Rslib MF profile/);
+});
+
+test("Rslib generates local declarations with unresolved remotes when extraction is off", async (t) => {
+  const f = fixture(t);
+  const { folder } = f.app("designKit", 9000);
+  const configFile = path.join(folder, "rslib.config.ts");
+  const writeConfig = (extract: boolean, origin = "process.env.HOST_ORIGIN") =>
+    fs.writeFileSync(
+      configFile,
+      `export default { lib: [{ format: 'mf', plugins: [pluginModuleFederation({
+      name: 'designKit', exposes: { '.': './index.ts' },
+      remotes: { host: \`host@\${${origin}}/mf-manifest.json\` },
+      dts: { generateTypes: { extractRemoteTypes: ${extract} } },
+    })] }] };`,
+    );
+  installGeneratorFixture(
+    folder,
+    `
+const { extractRemoteTypes, moduleFederationConfig: { remotes } } = dtsManagerOptions.remote;
+if (extractRemoteTypes ? remotes.host !== "host@http://localhost:9001/mf-manifest.json" : remotes !== undefined) {
+  throw new Error("unexpected remotes passed to DTS");
+}
+fs.mkdirSync("dist", { recursive: true });
+fs.writeFileSync("dist/@mf-types.zip", Buffer.from([0x50, 0x4b, 3, 4, ...Buffer.from(String(extractRemoteTypes))]));
+  `,
+  );
+  const generate = () =>
+    generateLocalFederatedTypes({
+      appDir: folder,
+      configFile,
+      name: "designKit",
+      bundler: "rslib",
+      envMode: "development",
+      env: {},
+      workspaceFingerprint: "workspace",
+    });
+  writeConfig(false);
+  assert.equal(readAppFolder(folder, "development")?.remotes[0]?.url, null);
+  assert.ok(fs.existsSync((await generate()).zipPath));
+  writeConfig(true);
+  await assert.rejects(generate(), /Could not resolve Module Federation\.remotes\.host statically/);
+  writeConfig(true, JSON.stringify("http://localhost:9001"));
+  assert.ok(fs.existsSync((await generate()).zipPath));
+});
+
+test("Rslib DTS bounds shared objects and repeated text before calling the SDK", async (t) => {
+  const { folder } = fixture(t).app("widget", 9000);
+  const configFile = path.join(folder, "rslib.config.ts");
+  const writeConfig = (bindings: string, payload: string, expose = "'./index.ts'") =>
+    fs.writeFileSync(
+      configFile,
+      `export default ((${bindings}) => ({ lib: [{ format: 'mf', plugins: [pluginModuleFederation({
+        name: 'widget', exposes: { '.': ${expose} },
+        dts: { generateTypes: true, extraOptions: { payload: ${payload} } },
+      })] }] }))();`,
+    );
+  installGeneratorFixture(
+    folder,
+    `
+const payload = dtsManagerOptions.remote.moduleFederationConfig.dts.extraOptions.payload;
+if (JSON.stringify(payload) !== '["leaf","leaf"]') throw new Error('unexpected DTS payload');
+fs.mkdirSync("dist", { recursive: true });
+fs.writeFileSync("dist/@mf-types.zip", Buffer.from([0x50, 0x4b, 3, 4, 1]));
+`,
+  );
+  const generate = () =>
+    generateLocalFederatedTypes({
+      appDir: folder,
+      configFile,
+      name: "widget",
+      bundler: "rslib",
+      envMode: "development",
+      env: {},
+      workspaceFingerprint: "workspace",
+    });
+  const nested = Array.from({ length: 15 }, (_, i) => `p${i + 1}={a:p${i},b:p${i}}`);
+  writeConfig(["p0={}", ...nested].join(","), "p15");
+  const limit =
+    /Static Module Federation options exceed the DTS conversion limit.*Set mf-dashboard\.commands\.rebuildTypes/;
+  await assert.rejects(generate(), limit);
+
+  writeConfig(
+    `text=${JSON.stringify("x".repeat(32 * 1024))}`,
+    `[${Array(33).fill("text").join(",")}]`,
+  );
+  await assert.rejects(generate(), limit);
+
+  writeConfig(
+    `text='leaf', query=${JSON.stringify("x".repeat(65 * 1024))}`,
+    "[text,text]",
+    "'./index.ts?' + query",
+  );
+  await assert.rejects(generate(), /Could not resolve Module Federation\.exposes statically/);
+
+  writeConfig("text='leaf'", "[text,text]");
+  assert.ok(fs.existsSync((await generate()).zipPath));
+});
+
+test("Rslib rebuild uses an explicit DTS output even when the bundler output is unresolved", async (t) => {
+  const f = fixture(t);
+  const { folder } = f.app("designKit", 9000);
+  const configFile = path.join(folder, "rslib.config.ts");
+  const writeConfig = (generateTypes: boolean | { outputDir: string }) =>
+    fs.writeFileSync(
+      configFile,
+      `import { resolve } from 'node:path';
+      export default {
+        output: { distPath: { root: resolve('dist', 'js') } },
+        lib: [{ format: 'mf', plugins: [pluginModuleFederation({
+          name: 'designKit', exposes: { '.': './index.ts' },
+          dts: { generateTypes: ${JSON.stringify(generateTypes)} },
+        })] }],
+      };`,
+    );
+  installGeneratorFixture(
+    folder,
+    `
+const outputDir = dtsManagerOptions.remote.outputDir;
+if (outputDir !== 'artifacts') throw new Error('unexpected DTS output');
+fs.mkdirSync(outputDir, { recursive: true });
+fs.writeFileSync(outputDir + '/@mf-types.zip', Buffer.from([0x50, 0x4b, 3, 4, 1]));
+`,
+  );
+  const generate = () =>
+    generateLocalFederatedTypes({
+      appDir: folder,
+      configFile,
+      name: "designKit",
+      bundler: "rslib",
+      envMode: "development",
+      env: {},
+      workspaceFingerprint: "workspace",
+    });
+  writeConfig({ outputDir: "artifacts" });
+  const zipPath = path.join(folder, "artifacts", "@mf-types.zip");
+  assert.equal(readAppFolder(folder, "development")?.generatedZipPath, zipPath);
+  assert.equal((await generate()).zipPath, zipPath);
+  assert.ok(fs.existsSync(zipPath));
+  writeConfig(true);
+  await assert.rejects(generate(), /Could not resolve output\.distPath/);
+});
+
+test("an inactive Rslib profile does not publish its federation helper as an app", (t) => {
+  const f = fixture(t);
+  const { folder } = f.app("designKit", 9000);
+  fs.writeFileSync(
+    path.join(folder, "module-federation.config.ts"),
+    `export default { name: "designKit", dts: true, exposes: { ".": "./index.ts" } };`,
+  );
+  fs.writeFileSync(
+    path.join(folder, "rslib.config.ts"),
+    `
+import { defineConfig } from "@rslib/core";
+import { pluginModuleFederation } from "@module-federation/rsbuild-plugin";
+import federation from "./module-federation.config";
+export default defineConfig({ lib: process.env.NODE_ENV === "production"
+  ? [{ format: "esm" }]
+  : [{ format: "mf", plugins: [pluginModuleFederation(federation)] }]
+});`,
+  );
+  const pkg = path.join(folder, "package.json");
+  fs.writeFileSync(pkg, JSON.stringify({ scripts: { dev: "rslib mf-dev" } }));
+  assert.equal(readAppFolder(folder, "development")?.name, "designKit");
+  fs.writeFileSync(
+    pkg,
+    JSON.stringify({ scripts: { dev: "cross-env NODE_ENV=production rslib mf-dev" } }),
+  );
+  assert.equal(readAppFolder(folder, "development"), null);
+  assert.equal(
+    readAppFolder(folder, "development", undefined, undefined, undefined, "dev", "rslib.config.ts"),
+    null,
+  );
+  assert.deepEqual(Object.keys(scanWorkspace(folder)), []);
+});
+
+test("an explicitly selected Rslib factory receives the dev command and env mode", (t) => {
+  const f = fixture(t);
+  const { folder } = f.app("designKit", 9000);
+  fs.writeFileSync(
+    path.join(folder, "custom.config.ts"),
+    `
+import { defineConfig } from "@rslib/core";
+import { pluginModuleFederation } from "@module-federation/rsbuild-plugin";
+export default defineConfig(({ command, envMode }) => ({
+  lib: command === "mf-dev" && envMode === "testing" && process.env.NODE_ENV === "development"
+    ? [{ format: "mf", plugins: [pluginModuleFederation({ name: "designKit", dts: true })] }]
+    : [{ format: "esm" }],
+  server: { port: 9000 },
+}));`,
+  );
+  const app = readAppFolder(
+    folder,
+    "testing",
+    "designKit",
+    undefined,
+    undefined,
+    "dev",
+    "custom.config.ts",
+  );
+  assert.equal(app?.name, "designKit");
+  assert.equal(app?.port, 9000);
+});
+
+test("Rslib reads and tracks env files in priority order and honors --no-env", (t) => {
+  const f = fixture(t);
+  const { folder } = f.app("designKit", 9000);
+  const pkg = path.join(folder, "package.json");
+  const writeScript = (dev: string) => fs.writeFileSync(pkg, JSON.stringify({ scripts: { dev } }));
+  writeScript("rslib mf-dev --env-mode testing");
+  const values = {
+    ".env": "MF_NAME=designKit\nBASE_ONLY=base\nPORT=9001\n",
+    ".env.local": "LOCAL_ONLY=local\nPORT=9002\n",
+    ".env.testing": "PORT=9003\n",
+    ".env.testing.local": "PORT=9004\n",
+  };
+  for (const [name, value] of Object.entries(values))
+    fs.writeFileSync(path.join(folder, name), value);
+  fs.writeFileSync(
+    path.join(folder, "rslib.config.ts"),
+    `
+import { pluginModuleFederation } from "@module-federation/rsbuild-plugin";
+export default {
+  lib: [{ format: "mf", plugins: [pluginModuleFederation({ name: process.env.MF_NAME, dts: true })] }],
+  server: { port: process.env.PORT },
+};`,
+  );
+  const dependencies = new Set<string>();
+  const app = readAppFolder(folder, "development", undefined, dependencies);
+  assert.equal(app?.name, "designKit");
+  assert.equal(app?.port, 9004);
+  assert.equal(app?.launchEnvironment?.env.BASE_ONLY, "base");
+  assert.equal(app?.launchEnvironment?.env.LOCAL_ONLY, "local");
+  for (const name of Object.keys(values))
+    assert.ok(dependencies.has(path.join(folder, name)), name);
+
+  for (const [args, enabled] of [
+    ["mf-dev --env-mode testing --no-env", false],
+    ["mf-dev --env-mode testing --env=false", false],
+    ["mf-dev --env-mode testing --env false", false],
+    ["mf-dev --env-mode testing --env=true", true],
+    ["mf-dev --env-mode testing --no-env --env=true", true],
+    ["mf-dev --env-mode testing --env=true --no-env", false],
+    ["mf-dev --env-mode testing --env=false --env=false", true],
+    ["mf-dev --env-mode testing -- --env=false", true],
+    ["--env-mode testing --env mf-dev", true],
+    ["--env-mode testing --env false mf-dev", false],
+  ] as const) {
+    writeScript(`cross-env MF_NAME=designKit rslib ${args}`);
+    const found = readAppFolder(folder, "development");
+    assert.equal(found?.name, "designKit", args);
+    assert.equal(found?.port, enabled ? 9004 : 3000, args);
+    assert.equal(found.launchEnvironment?.env.BASE_ONLY, enabled ? "base" : undefined, args);
+  }
+});
+
+test("Rslib expands merged dotenv values with the selected launch environment", (t) => {
+  const f = fixture(t);
+  const { folder } = f.app("designKit", 9000);
+  fs.writeFileSync(
+    path.join(folder, "package.json"),
+    '{"scripts":{"dev":"cross-env PREFIX=remote rslib mf-dev --env-mode review"}}',
+  );
+  fs.writeFileSync(
+    path.join(folder, ".env"),
+    [
+      "PREFIX=base",
+      "SUFFIX=local",
+      "MF_NAME=${PREFIX}_$SUFFIX",
+      "PORT=${UNSET_PORT:-9002}",
+      "ALTERNATE=${PREFIX:+enabled}",
+      "LITERAL=\\$PREFIX",
+      "LITERAL_COPY=$LITERAL",
+    ].join("\n"),
+  );
+  fs.writeFileSync(path.join(folder, ".env.review"), "SUFFIX=dev\n");
+  fs.writeFileSync(
+    path.join(folder, "rslib.config.ts"),
+    `export default {
+    server: { port: process.env.PORT },
+    lib: [{ format: 'mf', plugins: [pluginModuleFederation({ name: process.env.MF_NAME })] }],
+  };`,
+  );
+  const { remote_dev: app } = scanWorkspace(folder);
+  assert.equal(app?.port, 9002);
+  assert.equal(app.launchEnvironment?.env.ALTERNATE, "enabled");
+  assert.equal(app.launchEnvironment?.env.LITERAL, "$PREFIX");
+  assert.equal(app.launchEnvironment?.env.LITERAL_COPY, "$PREFIX");
+  assert.equal(app.launchEnvironment?.env.PREFIX, "remote");
+});
+
+test("Rslib uses dotenv NODE_ENV for the profile and its factory mode without --env-mode", (t) => {
+  const f = fixture(t);
+  const { folder } = f.app("designKit", 9000);
+  const pkg = path.join(folder, "package.json");
+  fs.writeFileSync(
+    pkg,
+    '{"scripts":{"dev":"cross-env NODE_ENV=development LABEL=fromLaunch rslib mf-dev"}}',
+  );
+  fs.writeFileSync(path.join(folder, ".env.development"), "NODE_ENV=production\nLABEL=fromFile\n");
+  fs.writeFileSync(path.join(folder, ".env.production"), "NODE_ENV=test\n");
+  fs.writeFileSync(
+    path.join(folder, "rslib.config.ts"),
+    `
+    export default defineConfig(({ envMode }) => ({
+      lib: [{ format: 'mf', plugins: [pluginModuleFederation({
+        name: envMode + '-' + process.env.NODE_ENV + '-' + process.env.LABEL,
+      })] }],
+    }));`,
+  );
+  const app = readAppFolder(folder, "dashboard-mode");
+  assert.equal(app?.name, "production-production-fromLaunch");
+  assert.equal(app.launchEnvironment?.envMode, "production");
+});
+
+test("Rslib discovery honors the launch context and defaults DTS on for TypeScript", (t) => {
+  const f = fixture(t);
+  const { folder } = f.app("designKit", 9000);
+  const pkg = path.join(folder, "package.json");
+  const script = "cross-env MF_NAME=designKit rslib mf-dev --env-mode testing";
+  fs.writeFileSync(pkg, JSON.stringify({ scripts: { dev: script } }));
+  fs.writeFileSync(path.join(folder, "tsconfig.json"), "{}");
+  fs.writeFileSync(
+    path.join(folder, "rslib.config.ts"),
+    `
+import { defineConfig } from "@rsbuild/core";
+import { pluginModuleFederation } from "@module-federation/rsbuild-plugin";
+export default defineConfig(({ envMode }) => ({
+  lib: envMode === "testing" && process.env.NODE_ENV === "development"
+    ? [{ format: "mf", plugins: [pluginModuleFederation({ name: process.env.MF_NAME, exposes: { ".": "./index.ts" } })] }]
+    : [{ format: "esm" }],
+}));`,
+  );
+  const read = () =>
+    readAppFolder(
+      folder,
+      "development",
+      "designKit",
+      undefined,
+      undefined,
+      "dev",
+      "rslib.config.ts",
+    );
+  const app = read();
+  assert.equal(app?.name, "designKit");
+  assert.equal(app?.generateTypes, true);
+  assert.equal(app?.generatedZipPath, path.join(folder, "dist/@mf-types.zip"));
+  assert.equal(app?.launchEnvironment?.env.MF_NAME, "designKit");
+  fs.writeFileSync(
+    pkg,
+    JSON.stringify({
+      scripts: { dev: script.replace("cross-env", "cross-env NODE_ENV=production") },
+    }),
+  );
+  assert.equal(read(), null);
+});
+
 test("bulk rebuild uses the Rsbuild server route unless a manifest path is configured", async (t) => {
   const f = fixture(t);
   const seed = f.app("fixture-library", 53941);
@@ -192,7 +1435,7 @@ test("bulk rebuild uses the Rsbuild server route unless a manifest path is confi
     import { pluginModuleFederation } from "@module-federation/rsbuild-plugin";
     export default {
       server: { port: ${seed.port}, base: "/dev-fixture/" },
-      output: { assetPrefix: import.meta.env.ASSET_PREFIX },
+      output: { assetPrefix: import.meta.env.FIXTURE_PUBLIC_PATH },
       plugins: [pluginModuleFederation({ name: "${seed.name}",
         manifest: { fileName: "fixture-manifest.json" },
         exposes: { "./index": "./index.ts" }, dts: { generateTypes: true, consumeTypes: false }
@@ -200,7 +1443,10 @@ test("bulk rebuild uses the Rsbuild server route unless a manifest path is confi
     };
   `;
   fs.writeFileSync(seed.configFile, source);
-  fs.writeFileSync(path.join(seed.folder, ".env.development"), "ASSET_PREFIX=/public-fixture/\n");
+  fs.writeFileSync(
+    path.join(seed.folder, ".env.development"),
+    "FIXTURE_PUBLIC_PATH=/public-fixture/\n",
+  );
   const load = (manifestPath?: string) =>
     loadKnownApps(
       [{ name: "fixture-root", path: seed.folder }],
@@ -1014,8 +2260,7 @@ test("types verified against a staging manifest can be reused when staging is of
   const file = typeFile(shell, "catalog");
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, "staging types");
-  const archive = writeZip(path.join(shell.folder, "staging.zip"), "staging types");
-  const bytes = fs.readFileSync(archive.zipPath);
+  const bytes = zipFixture([{ file: "index.d.ts", text: "staging types" }]);
   const link = { consumer: shell.name, alias: "catalog", remoteName: catalog.name, url };
   const book = createProbeBook();
   putLinkResult(book, {
@@ -1023,7 +2268,7 @@ test("types verified against a staging manifest can be reused when staging is of
     manifestReachable: true,
     buildVersion: null,
     zipUrl,
-    zipHash: archive.zipHash,
+    zipHash: createHash("sha256").update(bytes).digest("hex"),
     zipMtime: null,
     exposes: [],
     shared: [],

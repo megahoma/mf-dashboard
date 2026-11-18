@@ -11,7 +11,7 @@ import {
   createProbeBook,
   linkProbeId,
   probeWorkspace,
-  scanWorkspace,
+  prepareWorkspaceScan,
   splitRemoteLinkKey,
   type LocalApp,
   type RemoteLink,
@@ -34,12 +34,12 @@ import { logDuration, safeError } from "../../../shared/lib/logging.ts";
 import { createSerialQueue } from "../../../shared/lib/queue.ts";
 import type { LogContext } from "../../../shared/models/logging.ts";
 import { savedFileKind } from "../lib/app-parse-cache.ts";
+import { KnownAppsWorker } from "../lib/known-apps-worker.mts";
 import { directoryStamp } from "../lib/directory-stamp.ts";
 import { loadKnownApps } from "../lib/known-apps.ts";
 import { linksOf, parseLinkId } from "../lib/links.ts";
 import { showConfigFile } from "../lib/open-config.ts";
 import { problemDiagnostics } from "../lib/problem-diagnostics.ts";
-import { resolveRebuildApps } from "../lib/rebuild-apps.ts";
 import { startRow } from "../lib/start-row.ts";
 import { appTypesDir, linkTypesDir } from "../lib/targets.ts";
 import {
@@ -62,6 +62,7 @@ export class MfDashboardProvider
   private publishedFiles: string[] = [];
   readonly session: DashboardSession;
   private readonly run = createSerialQueue();
+  private readonly knownAppsWorker = new KnownAppsWorker();
   private readonly termsOf: () => DashboardTerms;
   private readonly confirmations: ConfirmationStore;
   private readonly persistConfirmations: () => void | PromiseLike<void>;
@@ -98,8 +99,14 @@ export class MfDashboardProvider
       {
         readSettings: readWorkspaceSettings,
         writeApps: (apps) => writeWorkspaceApps(apps, this.log),
-        scan: scanWorkspace,
+        scan: prepareWorkspaceScan,
+        prepareDiscovery: (roots, settings, log) =>
+          this.knownAppsWorker.request("prepare", { roots, settings }, log),
+        planDiscovery: (roots, settings, previous, log) =>
+          this.knownAppsWorker.request("discover", { roots, settings, previous }, log),
         loadKnown: loadKnownApps,
+        loadKnownAsync: (roots, settings, log, discovery) =>
+          this.knownAppsWorker.load({ roots, settings, discovery }, log),
         probe: async (target, input) => {
           const checkTypes = this.canCheckTypes();
           if (this.requestedTypeNode)
@@ -188,6 +195,7 @@ export class MfDashboardProvider
   dispose(): void {
     this.disposed = true;
     disposeEvidenceWorker();
+    this.knownAppsWorker.dispose();
     if (this.timer) clearTimeout(this.timer);
     for (const timer of this.saveTimers.values()) clearTimeout(timer);
     this.saveTimers.clear();
@@ -340,6 +348,10 @@ export class MfDashboardProvider
 
   async fileSaved(file: string): Promise<void> {
     if (this.disposed) return;
+    if (this.session.ownershipSources.has(file)) {
+      await this.refresh("config");
+      return;
+    }
     const settings = readWorkspaceSettings();
     for (const app of this.session.loaded) {
       const kind = savedFileKind(app, file, settings.envMode);
@@ -499,7 +511,11 @@ export class MfDashboardProvider
   ): Promise<RebuildAllReport> {
     return this.enqueue("rebuild-all", async (log) => {
       const settings = readWorkspaceSettings();
-      const { apps, skipped, zipPaths } = resolveRebuildApps(settings, log);
+      const { apps, skipped, zipPaths } = await this.knownAppsWorker.request(
+        "rebuild",
+        { roots: workspaceRoots(), settings },
+        log,
+      );
       log.event("info", "types.rebuild.all.started", { apps: apps.length });
       const report = await rebuildAllTypes({
         apps,
@@ -508,6 +524,19 @@ export class MfDashboardProvider
         rebuildCommand: settings.rebuildCommand,
         refetchCommand: settings.refetchCommand,
         zipPathOverride: (app) => zipPaths.get(app.name),
+        rebuildConfigStamp: (app) => this.knownAppsWorker.request("rebuildConfigStamp", app, log),
+        fingerprintInputs: (app, zip, tsconfig, external) =>
+          this.knownAppsWorker.request(
+            "fingerprint",
+            [
+              app,
+              { envMode: settings.envMode, rebuildCommand: settings.rebuildCommand },
+              zip,
+              tsconfig,
+              external,
+            ],
+            log,
+          ),
         persist: this.persistConfirmations,
         progress,
         log,

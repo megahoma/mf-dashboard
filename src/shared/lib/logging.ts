@@ -69,6 +69,7 @@ export function safeError(error: unknown): LogFields {
 export function createLogger(sink: LogSink): LogContext {
   let next = 0;
   const context = (operation?: number, source?: string): LogContext => ({
+    enabled: (level) => sink.enabled(level),
     operation(nextSource) {
       return context(++next, nextSource);
     },

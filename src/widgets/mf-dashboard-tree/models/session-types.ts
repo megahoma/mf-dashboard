@@ -5,7 +5,9 @@ import type {
   ScanOptions,
 } from "../../../entities/microfrontend/index.ts";
 import type { AppConfig } from "../../../features/init-settings/index.ts";
-import type { LogContext } from "../../../shared/models/logging.ts";
+import type { inputsFingerprint } from "../../../features/rebuild-types/index.ts";
+import type { LogContext, LogFields, LogLevel } from "../../../shared/models/logging.ts";
+import type { resolveRebuildApps } from "../lib/rebuild-apps.ts";
 import type { DashboardStructure } from "./presentation.ts";
 
 export type AppSetting = AppConfig & {
@@ -17,6 +19,36 @@ export type WorkspaceRoot = {
   name: string;
   path: string;
 };
+
+export type KnownAppsTask = {
+  roots: readonly WorkspaceRoot[];
+  settings: DashboardSettings;
+  discovery?: DiscoveryCache;
+};
+
+export type KnownAppsResult = { apps: LocalApp[]; ownershipSources: Set<string> };
+
+type DiscoveryTask = Pick<KnownAppsTask, "roots" | "settings">;
+
+export type ConfigWorkerTasks = {
+  load: { input: KnownAppsTask; result: KnownAppsResult };
+  prepare: { input: DiscoveryTask; result: DiscoverySnapshot };
+  discover: {
+    input: DiscoveryTask & { previous?: DiscoverySnapshot };
+    result: DiscoveryPlan;
+  };
+  rebuild: { input: DiscoveryTask; result: ReturnType<typeof resolveRebuildApps> };
+  fingerprint: { input: Parameters<typeof inputsFingerprint>; result: string };
+  rebuildConfigStamp: { input: LocalApp; result: string };
+};
+
+export type ConfigWorkerTask = {
+  [K in keyof ConfigWorkerTasks]: { kind: K; input: ConfigWorkerTasks[K]["input"] };
+}[keyof ConfigWorkerTasks] & { logLevels: readonly LogLevel[] };
+
+export type ConfigWorkerReply = {
+  events: { level: LogLevel; event: string; fields?: LogFields }[];
+} & ({ result: ConfigWorkerTasks[keyof ConfigWorkerTasks]["result"] } | { error: string });
 
 export type DashboardSettings = {
   apps: Record<string, AppSetting> | undefined;
@@ -30,7 +62,22 @@ export type DashboardSettings = {
 export type DashboardPorts = {
   readSettings(): DashboardSettings;
   writeApps(apps: Record<string, AppSetting>): void | Promise<void>;
-  scan(root: string, options: ScanOptions): Record<string, LocalApp>;
+  scan(
+    root: string,
+    options: ScanOptions,
+    ownedFederationConfigs: Set<string>,
+  ): Record<string, LocalApp> | (() => Record<string, LocalApp>);
+  prepareDiscovery?(
+    roots: readonly WorkspaceRoot[],
+    settings: DashboardSettings,
+    log: LogContext,
+  ): Promise<DiscoverySnapshot>;
+  planDiscovery?(
+    roots: readonly WorkspaceRoot[],
+    settings: DashboardSettings,
+    previous: DiscoverySnapshot | undefined,
+    log: LogContext,
+  ): Promise<DiscoveryPlan>;
   loadKnown(
     roots: readonly WorkspaceRoot[],
     apps: Record<string, AppSetting>,
@@ -39,20 +86,50 @@ export type DashboardPorts = {
     cache?: AppParseCache,
     log?: LogContext,
     startScript?: string,
+    ownershipSources?: Set<string>,
   ): LocalApp[];
+  loadKnownAsync?(
+    roots: readonly WorkspaceRoot[],
+    settings: DashboardSettings,
+    log: LogContext,
+    discovery?: KnownAppsTask["discovery"],
+  ): Promise<KnownAppsResult>;
   probe(book: ProbeBook, input: ProbeCycleInput): Promise<void>;
   roots(): WorkspaceRoot[];
 };
 
+export type OwnershipSnapshot = {
+  files: ReadonlySet<string>;
+  sources: ReadonlySet<string>;
+  dependencies: readonly string[];
+  stamp: string;
+};
+
 export type AppParseCache = {
-  lookup(key: string, folder: string, envMode: string): LocalApp | null;
+  lookup(
+    key: string,
+    folder: string,
+    envMode: string,
+    ownershipUnchanged?: (snapshot: OwnershipSnapshot) => boolean,
+  ): LocalApp | null;
+  lookupResult(
+    key: string,
+    folder: string,
+    envMode: string,
+    ownershipUnchanged?: (snapshot: OwnershipSnapshot) => boolean,
+  ): LocalApp | null | undefined;
   store(
     key: string,
     folder: string,
     envMode: string,
-    app: LocalApp,
+    app: LocalApp | null,
     dependencies?: readonly string[],
+    ownership?: OwnershipSnapshot,
+    observations?: ReadonlyMap<string, string>,
   ): void;
+  lookupOwnership(key: string): OwnershipSnapshot | undefined;
+  storeOwnership(key: string, snapshot: OwnershipSnapshot): void;
+  ownershipIsCurrent(snapshot: OwnershipSnapshot): boolean;
 };
 
 export type DiscoverySnapshot = {
@@ -60,11 +137,15 @@ export type DiscoverySnapshot = {
   scans: {
     root: WorkspaceRoot;
     apps: Record<string, LocalApp>;
-    dependencies: readonly string[];
-    stamp: string;
   }[];
+  checks: { dependencies: readonly string[]; stamp: string }[];
   parsed: Map<string, { app: LocalApp; stamp: string }>;
 };
+
+type DiscoveryCache = Pick<DiscoverySnapshot, "parsed" | "checks">;
+
+export type DiscoveryPlan =
+  { cache: DiscoveryCache; apps?: Record<string, AppSetting> } | { duplicateName: string };
 
 export type WorkspaceSettings = DashboardSettings & {
   packageManager: string;

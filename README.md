@@ -52,11 +52,17 @@ The extension activates on startup and looks for these config files:
 | Webpack           | `webpack.config.*`           |
 | Rspack            | `rspack.config.*`            |
 | Rsbuild           | `rsbuild.config.*`           |
+| Rslib             | `rslib.config.*`             |
 | Vite              | `vite.config.*`              |
 
 Supported extensions are `.mjs`, `.cjs`, `.js`, `.mts`, `.cts`, `.ts`, `.jsx`, and `.tsx`. Discovery uses Babel to read source without executing the config. It recognizes `pluginModuleFederation`, `ModuleFederationPlugin`, and `createModuleFederationConfig`, constants, aliases, object spreads, static expressions, and synchronous helpers with statically known `if` and `switch` branches. Relative named/default/namespace imports, local JSON, and local re-exports are supported within the same package. The project's TypeScript version does not affect discovery. Async helpers, dynamic imports, package helpers, and tsconfig path aliases remain unresolved.
 
 Discovery uses the dev context for Rsbuild and Vite config functions. It reads literal environment assignments from a simple start script, including scripts prefixed with `cross-env`. It can statically read a selected `.env` file in the config directory through `dotenv.parse`.
+
+For Rslib, discovery reads one statically resolvable `format: 'mf'` profile, using `NODE_ENV=development` by default. It reads the profile's federation plugin and merges the relevant settings with the top-level config. When the plugin omits `dts`, types are enabled if the library has a `tsconfig.json`. Use `scripts.start` to select the project's `rslib mf-dev` script if it has a custom name.
+
+When discovery follows an Rslib launcher, it loads dotenv files from the selected config's package if that package contains the launcher or is a project below the launcher's directory.
+Reads tied to a verified config directory use a local helper. On Windows the helper uses Windows PowerShell. If system policy blocks the helper, the affected dotenv reads are skipped.
 
 A simple start script can select a config with `--config`. Discovery uses `mf-dashboard.scripts.start`, which new app entries inherit. Set `configFile` on an app entry to select a file explicitly. The path is relative to the app folder and takes precedence over the script.
 
@@ -82,7 +88,7 @@ Saving a producer's included `.ts` or `.tsx` source in VS Code refreshes the loc
 | `@module-federation/enhanced`       | `2.9.1` in the integration workspace used for verification. |
 | `@module-federation/rsbuild-plugin` | `2.9.1` in the integration workspace used for verification. |
 
-Built-in type generation uses the Module Federation 2.9.1 API through project-local `@module-federation/enhanced`, `@module-federation/cli`, and `@module-federation/dts-plugin`. It loads the config and captures Rsbuild plugin options. Config detection for other bundlers does not guarantee that their configs work with this generator.
+Built-in type generation uses the Module Federation API through project-local packages. For Rsbuild it loads the config and captures plugin options. For Rslib it reads the MF profile statically and passes its options to the same generator. Detection alone does not guarantee built-in type generation for other bundlers.
 
 Package versions are not checked against a semver matrix at runtime. Compatibility with other versions is not established. If built-in generation cannot use your config or plugin API, set `mf-dashboard.commands.rebuildTypes` to your project's generation command. Discovery itself does not require these packages to be loaded.
 
