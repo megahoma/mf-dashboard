@@ -1,9 +1,28 @@
 import { isLoopbackAtPort, parseHttpUrl } from "../../../shared/lib/urls.ts";
+import { MAX_CONFIG_LOCATION_LENGTH } from "../config/config.ts";
 import type { ConfigCandidate, Value } from "../models/config.ts";
 import { flag, object, string } from "./static-values.ts";
 
 export function joinManifestPath(prefix: string, file: string): string {
   return `/${prefix}/${file}`.replace(/\/{2,}/g, "/");
+}
+
+export function viteManifestBase(value: Value): string {
+  const input = string(value);
+  if (!input || input.length > MAX_CONFIG_LOCATION_LENGTH) return "/";
+  const base = input.trim();
+  if (!base || base.startsWith(".")) return "/";
+  try {
+    // Vite uses the pathname of the configured base on the local server.
+    const { pathname } = new URL(base, "http://localhost");
+    return pathname.startsWith("/") ? pathname : `/${pathname}`;
+  } catch {
+    return "/";
+  }
+}
+
+export function joinViteManifestPath(base: string, file: string): string {
+  return `${base.endsWith("/") ? base : `${base}/`}${file}`;
 }
 
 export function rsbuildDevManifestResolver(
@@ -16,7 +35,10 @@ export function rsbuildDevManifestResolver(
   if (server?.port !== undefined && portValue(server.port) === null) return undefined;
   const serverBase = server?.base;
   if (serverBase !== undefined && typeof serverBase !== "string") return undefined;
-  const configured = string(config.dev.assetPrefix)?.trim();
+  if (serverBase && serverBase.length > MAX_CONFIG_LOCATION_LENGTH) return undefined;
+  const assetPrefix = string(config.dev.assetPrefix);
+  if (!assetPrefix || assetPrefix.length > MAX_CONFIG_LOCATION_LENGTH) return undefined;
+  const configured = assetPrefix.trim();
   if (!configured || /[?#\\]/.test(configured)) return undefined;
   const prefix = port === null ? configured : configured.replaceAll("<port>", String(port));
   const schemeRelative = prefix.startsWith("//");
@@ -33,6 +55,7 @@ export function rsbuildDevManifestResolver(
 
   const base = serverBase?.endsWith("/") ? serverBase : `${serverBase ?? ""}/`;
   return (file) => {
+    if (url.pathname.length + file.length + 2 > MAX_CONFIG_LOCATION_LENGTH) return undefined;
     const route = joinManifestPath(url.pathname, file);
     const pathname = parseHttpUrl(origin + route)?.pathname;
     if (pathname?.startsWith(base) && !mayProxyManifest(server?.proxy, pathname)) return route;
@@ -44,7 +67,12 @@ function mayProxyManifest(proxy: Value, pathname: string): boolean {
   // Only plain path prefixes can rule out a proxy without running the config.
   if (!object(proxy)) return true;
   return Object.entries(proxy).some(([prefix, rule]) => {
-    if (!/^\/[\w./%~-]*$/.test(prefix) || pathname.startsWith(prefix)) return true;
+    if (
+      prefix.length > MAX_CONFIG_LOCATION_LENGTH ||
+      !/^\/[\w./%~-]*$/.test(prefix) ||
+      pathname.startsWith(prefix)
+    )
+      return true;
     if (typeof rule === "string") return false;
     return (
       !object(rule) || ["context", "pathFilter", "bypass"].some((key) => Object.hasOwn(rule, key))
@@ -56,7 +84,9 @@ export function portValue(value: Value): number | null {
   const port =
     typeof value === "number"
       ? value
-      : typeof value === "string" && /^\d+$/.test(value)
+      : typeof value === "string" &&
+          value.length <= MAX_CONFIG_LOCATION_LENGTH &&
+          /^\d+$/.test(value)
         ? Number(value)
         : NaN;
   return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null;

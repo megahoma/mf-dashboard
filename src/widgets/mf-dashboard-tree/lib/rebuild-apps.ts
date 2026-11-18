@@ -2,12 +2,14 @@ import type { LocalApp } from "../../../entities/microfrontend/index.ts";
 import type { RebuildAllReport } from "../../../features/rebuild-types/index.ts";
 import { safeError } from "../../../shared/lib/logging.ts";
 import type { LogContext } from "../../../shared/models/logging.ts";
-import type { WorkspaceSettings } from "../models/session-types.ts";
+import type { DashboardSettings, WorkspaceRoot } from "../models/session-types.ts";
 import { resolveKnownApps } from "./known-apps.ts";
-import { workspaceRoots } from "./workspace-settings.ts";
 
-export function resolveRebuildApps(settings: WorkspaceSettings, log: LogContext) {
-  const roots = workspaceRoots();
+export function resolveRebuildApps(
+  roots: readonly WorkspaceRoot[],
+  settings: DashboardSettings,
+  log: LogContext,
+) {
   const apps: LocalApp[] = [];
   const skipped: RebuildAllReport["skipped"] = [];
   const zipPaths = new Map<string, string>();
@@ -24,6 +26,9 @@ export function resolveRebuildApps(settings: WorkspaceSettings, log: LogContext)
       log.event("warn", "types.rebuild.all.config-failed", { app: name, ...safeError(error) });
     },
     settings.startScript,
+    settings.ignorePaths,
+    undefined,
+    true,
   );
   for (const [name, setting] of Object.entries(configured)) {
     const app = resolved.get(name);

@@ -678,9 +678,10 @@ test("an unreadable helper is safely skipped while other apps remain discoverabl
   );
   const helper = path.join(root, "options.ts");
   fs.writeFileSync(helper, "export default {name:'unreadable'};");
-  const original = fs.readFileSync;
-  t.mock.method(fs, "readFileSync", (...args: Parameters<typeof fs.readFileSync>) => {
-    if (args[0] === helper)
+  const canonicalHelper = fs.realpathSync(helper);
+  const original = fs.openSync;
+  t.mock.method(fs, "openSync", (...args: Parameters<typeof fs.openSync>) => {
+    if (args[0] === canonicalHelper)
       throw Object.assign(new Error("TOP_SECRET source and env must not be logged"), {
         code: "EACCES",
       });

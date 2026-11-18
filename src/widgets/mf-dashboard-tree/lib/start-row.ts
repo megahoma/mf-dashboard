@@ -31,9 +31,9 @@ export async function startRow(
     },
     app.settingsKey ?? app.name,
   );
-  const cwd = app.folder;
+  const cwd = app.launchFolder ?? app.folder;
   const invocation = startInvocation({
-    packageManager: resolvePackageManager(workspaceRootFor(app.folder), settings.packageManager),
+    packageManager: resolvePackageManager(workspaceRootFor(cwd), settings.packageManager),
     scriptKey,
     scriptBody: lookupScript(readScripts(cwd), scriptKey),
     cwd,

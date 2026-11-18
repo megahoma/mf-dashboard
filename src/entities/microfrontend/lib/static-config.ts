@@ -3,10 +3,13 @@ import type { Binding } from "@babel/traverse";
 import type * as t from "@babel/types";
 import { noLog } from "../../../shared/config/logging.ts";
 import { DEFAULT_ENV_MODE } from "../../../shared/config/project.ts";
+import { sha256 } from "../../../shared/lib/fingerprint.ts";
 import type { LogContext } from "../../../shared/models/logging.ts";
 import {
   CONTROLS,
   FEDERATION_OPTION_KEYS,
+  MAX_EVALUATED_STRING_LENGTH,
+  MAX_EVALUATED_STRING_WORK,
   MAX_EVALUATION_DEPTH,
   MAX_EVALUATION_STEPS,
   MAX_SPREAD_ITEMS,
@@ -20,6 +23,7 @@ import type {
   ConfigBundler,
   ConfigContext,
   ConfigOrigin,
+  FederationOwnership,
   FunctionValue,
   ObjectValue,
   Value,
@@ -29,16 +33,20 @@ import type { AstPath, Program } from "../models/syntax.ts";
 import { isConfigApi } from "./config-api.ts";
 import type { ConfigImports } from "./config-imports.ts";
 import { evaluateExpression } from "./static-expression.ts";
-import { object, primitive } from "./static-values.ts";
+import { object, primitive, string } from "./static-values.ts";
 import { hasMemberWrites } from "./syntax.ts";
 
 export class StaticConfig {
   readonly imports: ConfigImports;
   readonly origins = new WeakMap<object, string>();
-  readonly plugins = new Set<Value>();
+  private readonly federationNameOrigins = new WeakMap<object, string>();
+  private readonly federationNameSources = new WeakMap<object, ReadonlySet<string>>();
+  private readonly callSites = new WeakMap<Map<Binding, Value>, string>();
+  readonly plugins = new Map<Value, string | undefined>();
   private readonly active = new Set<t.Node>();
   private remainingSteps = MAX_EVALUATION_STEPS;
   private remainingSpreadItems = MAX_SPREAD_ITEMS;
+  private remainingStringWork = MAX_EVALUATED_STRING_WORK;
   private evaluationCutoffs = 0;
   // A snapshot belongs to one helper invocation and one source position.
   private readonly objectSnapshots = new WeakMap<Map<Binding, Value>, Map<t.Node, ObjectValue>>();
@@ -67,13 +75,26 @@ export class StaticConfig {
       imports,
       configOrigins: this.configOrigins,
       origins: this.origins,
+      federationNameOrigins: this.federationNameOrigins,
+      federationNameSources: this.federationNameSources,
       plugins: this.plugins,
       evaluate: (p, frame, depth, inChain) => this.evaluate(p, frame, depth, inChain),
       exported: (program, name, frame, depth) => this.exported(program, name, frame, depth),
       localObject: (binding, p, frame, depth) => this.localObject(binding, p, frame, depth),
-      call: (fn, args, depth) => this.call(fn, args, depth),
+      call: (fn, args, depth, site, frame) =>
+        this.call(fn, args, depth, false, this.constructionSite(site, frame)),
+      constructionSite: (site, frame) => this.constructionSite(site, frame),
       unknown: (p, reason) => this.unknown(p, reason),
       appendArraySpread: (target, value, p) => this.appendArraySpread(target, value, p),
+      reserveString: (length, site) => {
+        if (length > MAX_EVALUATED_STRING_LENGTH || length > this.remainingStringWork) {
+          this.evaluationCutoffs++;
+          this.unknown(site, "string-evaluation-budget");
+          return false;
+        }
+        this.remainingStringWork -= length;
+        return true;
+      },
       readEnv: (name, fromProcess) => {
         const environment = fromProcess ? (context.processEnv ?? env) : env;
         if (Object.hasOwn(environment, name)) return environment[name];
@@ -90,6 +111,7 @@ export class StaticConfig {
     return this.bundlerFor(this.configResult?.origin);
   }
   private bundlerFor(origin: ConfigOrigin | undefined): string | undefined {
+    if (this.context.bundler === "rslib") return "rslib";
     if (this.context.preferImportedBundler && origin?.direct) return origin.bundler;
     return this.context.bundler ?? origin?.bundler;
   }
@@ -149,9 +171,43 @@ export class StaticConfig {
     depth = 0,
   ): Value {
     const exported = this.imports.exported(program, name);
-    if (!exported || !("object" in exported)) return this.evaluate(exported, frame, depth);
-    const value = this.evaluate(exported.object, frame, depth);
-    return object(value) ? value[exported.imported] : UNKNOWN;
+    if (!exported) return undefined;
+    const { value, files } = exported;
+    let result: Value;
+    if ("object" in value) {
+      const container = this.evaluate(value.object, frame, depth);
+      result = object(container) ? container[value.imported] : UNKNOWN;
+    } else {
+      result = this.evaluate(value, frame, depth);
+    }
+    if (object(result) && Object.hasOwn(result, "name")) {
+      const previous = this.federationNameSources.get(result);
+      if (!previous || files.some((file) => !previous.has(file))) {
+        this.federationNameSources.set(result, new Set([...(previous ?? []), ...files]));
+      }
+    }
+    return result;
+  }
+
+  federationOwnership(options: ObjectValue | null): FederationOwnership | undefined {
+    if (!options || !this.plugins.has(options)) return;
+    const sources = this.federationNameSources.get(options);
+    const name = string(options.name);
+    const origin = this.federationNameOrigin(options);
+    if (!sources || !name || !origin) return;
+    const files = this.imports.federationFiles(sources);
+    if (files.length) return { name, origin, files };
+  }
+  federationNameOrigin(options: ObjectValue): string | undefined {
+    return this.federationNameOrigins.get(options);
+  }
+  private constructionSite(site: AstPath, frame: Map<Binding, Value>): string | undefined {
+    if (!this.context.trackRslibOwnership) return;
+    const position = this.imports.sourcePosition(site);
+    if (!position) return;
+    // A module-level initializer keeps its identity when read from a config factory.
+    const invocation = site.getFunctionParent() && this.callSites.get(frame);
+    return invocation ? `${position}\0${invocation}` : position;
   }
   private localObject(
     binding: Binding,
@@ -280,7 +336,14 @@ export class StaticConfig {
           ? member.node.property.name
           : UNKNOWN;
       if (!primitive(key)) return this.unknown(member, "unresolved-property-key");
-      result[String(key)] = this.evaluate(write.get("right"), frame, depth);
+      const name = String(key);
+      result[name] = this.evaluate(write.get("right"), frame, depth);
+      if (name === "name") {
+        const position = this.constructionSite(write, frame);
+        if (position) this.federationNameOrigins.set(result, position);
+        else this.federationNameOrigins.delete(result);
+        this.federationNameSources.delete(result);
+      }
     }
     // Cutoff values depend on the caller's depth/stack, so they cannot be reused.
     if (this.evaluationCutoffs === cutoffs) snapshots.set(reference.node, result);
@@ -295,12 +358,22 @@ export class StaticConfig {
           isConfigApi(p.get("callee") as AstPath, PLUGINS)))
     );
   }
-  private call(fn: FunctionValue, args: Value[], depth: number, factory = false): Value {
+  private call(
+    fn: FunctionValue,
+    args: Value[],
+    depth: number,
+    factory = false,
+    site?: string,
+  ): Value {
     const p = fn.path;
     if (!p.isFunction() || p.node.async || p.node.generator)
       return this.unknown(p, "async-or-generator-helper");
     const frame = new Map(fn.frame);
     if (factory) this.factoryFrames.add(frame);
+    const origin =
+      site ?? (factory && this.context.trackRslibOwnership && this.imports.sourcePosition(p));
+    // A digest keeps the identity of nested invocations bounded.
+    if (origin) this.callSites.set(frame, sha256(origin));
     const bind = (param: AstPath, value: Value): void => {
       if (param.isAssignmentPattern()) {
         bind(
@@ -446,6 +519,14 @@ export class StaticConfig {
           envMode: mode,
         },
       ];
+    if (bundler === "rslib")
+      return [
+        {
+          command: "mf-dev",
+          env: this.context.processEnv?.NODE_ENV ?? DEFAULT_ENV_MODE,
+          envMode: mode,
+        },
+      ];
     return [];
   }
   configForDevRoutes(): Value {
@@ -454,14 +535,10 @@ export class StaticConfig {
     // Rsbuild or the shell may supply variables absent from discovery's env files.
     return new StaticConfig(this.imports, this.env, noLog, this.context, UNKNOWN).config();
   }
-  options(): ObjectValue | null {
-    const config = this.config(); // Only values retained in the exported config participate.
+  options(config = this.config()): ObjectValue | null {
     if (object(config) && this.plugins.has(config)) return config;
     if (object(config) && Object.hasOwn(config, "plugins")) {
-      if (Array.isArray(config.plugins))
-        for (const plugin of config.plugins)
-          if (this.plugins.has(plugin) && object(plugin)) return plugin;
-      return null;
+      return Array.isArray(config.plugins) ? this.findPlugin(config.plugins) : null;
     }
     if (this.parsed.exports.has("default") && !object(config)) return null;
     for (const call of this.parsed.calls) {
@@ -482,6 +559,19 @@ export class StaticConfig {
         FEDERATION_OPTION_KEYS.some((key) => Object.hasOwn(config, key)))
     )
       return config;
+    return null;
+  }
+
+  private findPlugin(plugins: Value[], visited = new Set<Value[]>()): ObjectValue | null {
+    if (visited.has(plugins)) return null;
+    visited.add(plugins);
+    for (const plugin of plugins) {
+      if (this.plugins.has(plugin) && object(plugin)) return plugin;
+      if (this.bundler === "rslib" && Array.isArray(plugin)) {
+        const found = this.findPlugin(plugin, visited);
+        if (found) return found;
+      }
+    }
     return null;
   }
 }

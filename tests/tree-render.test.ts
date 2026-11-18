@@ -5,7 +5,7 @@ import test from "node:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { localApp } from "./support/app.ts";
+import { developmentFederationConfig, localApp } from "./support/app.ts";
 import { putAppResult } from "../src/entities/microfrontend/index.ts";
 import * as vscode from "./support/vscode.ts";
 import { terms, type DashboardTerms } from "../src/shared/config/index.ts";
@@ -232,6 +232,36 @@ test("the dashboard and Rebuild All accept the same unambiguous renamed app", as
   assert.deepEqual(report.skipped, [
     { app: "gallery", reason: "Could not read the microfrontend config" },
   ]);
+});
+
+test("saving an Rslib config can restore a hidden, configured federation helper", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-rslib-ownership-save-"));
+  fs.writeFileSync(path.join(root, "package.json"), "{}");
+  writeApp(path.join(root, "shared"), "legacy", "");
+  const library = path.join(root, "library");
+  fs.mkdirSync(library);
+  const config = path.join(library, "rslib.config.ts");
+  fs.writeFileSync(path.join(library, ".env"), "NODE_ENV=production\n");
+  const source = `export default { lib: [{ format: 'esm' }] };`;
+  fs.writeFileSync(config, source);
+  const restore = useWorkspace(root, { legacy: { path: "shared" } });
+  const provider = providerFor();
+  t.after(() => {
+    restore();
+    provider.dispose();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  await provider.refresh();
+  assert.equal(provider.session.loaded[0]?.name, "legacy");
+  fs.writeFileSync(config, `import '../shared/module-federation.config';\n${source}`);
+  await provider.fileSaved(config);
+  assert.equal(provider.session.loaded[0]?.name, "legacy");
+  fs.writeFileSync(config, developmentFederationConfig("../shared/module-federation.config"));
+  await provider.fileSaved(config);
+  assert.equal(provider.session.loaded.length, 0);
+  fs.writeFileSync(config, source);
+  await provider.fileSaved(config);
+  assert.equal(provider.session.loaded[0]?.name, "legacy");
 });
 
 test("a successful refresh builds the tree once for logs and later row requests", async (t) => {

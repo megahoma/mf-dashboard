@@ -14,6 +14,7 @@ export function readInstalledEvidence(
   destination: string | null,
   log: LogContext = noLog,
   fresh = false,
+  inspect?: Parameters<typeof treeFingerprint>[3],
 ): InstalledEvidence {
   let folderExists: boolean;
   try {
@@ -25,7 +26,10 @@ export function readInstalledEvidence(
   }
   if (!folderExists || destination == null) return { folderExists: false, filesFingerprint: null };
   try {
-    return { folderExists: true, filesFingerprint: treeFingerprint(destination, log, fresh) };
+    return {
+      folderExists: true,
+      filesFingerprint: treeFingerprint(destination, log, fresh, inspect),
+    };
   } catch (error) {
     log.event("debug", "types.installed.read-failed", { path: destination, ...safeError(error) });
     return { folderExists: true, filesFingerprint: "" };

@@ -9,6 +9,13 @@ export type RebuildAllContext = {
   rebuildCommand: string;
   refetchCommand: string;
   zipPathOverride(app: LocalApp): string | undefined;
+  rebuildConfigStamp?(app: LocalApp): Promise<string>;
+  fingerprintInputs?(
+    app: LocalApp,
+    customZipPath: string | null,
+    tsconfigFingerprint: string,
+    external: readonly [string, string, string][],
+  ): Promise<string>;
   persist(): void | PromiseLike<void>;
   progress?(name: string, index: number, total: number): void;
   log?: LogContext;

@@ -2,7 +2,14 @@ import path from "node:path";
 import type { Binding } from "@babel/traverse";
 import type * as t from "@babel/types";
 import { parse as parseEnv } from "dotenv";
-import { CONFIG_FACTORIES, OPTIONAL_MISS, PLUGINS, TAG, UNKNOWN } from "../config/config.ts";
+import {
+  CONFIG_FACTORIES,
+  MAX_CONFIG_LOCATION_LENGTH,
+  OPTIONAL_MISS,
+  PLUGINS,
+  TAG,
+  UNKNOWN,
+} from "../config/config.ts";
 import type { ObjectValue, Value } from "../models/config.ts";
 import type { ExpressionContext } from "../models/static-expression.ts";
 import type { AstPath } from "../models/syntax.ts";
@@ -39,18 +46,25 @@ export function evaluateExpression(
     if (frame.has(binding)) return frame.get(binding);
     const declaration = binding.path;
     if (declaration.isImportSpecifier() || declaration.isImportDefaultSpecifier()) {
-      const source = (declaration.parent as t.ImportDeclaration).source.value;
-      if (source.endsWith(".json")) {
-        if (!declaration.isImportDefaultSpecifier()) return UNKNOWN;
-        const value = context.imports.readJson(declaration, source);
-        return value === undefined ? UNKNOWN : value;
-      }
-      const target = context.imports.resolve(declaration, source);
+      const statement = declaration.parent as t.ImportDeclaration;
+      if (
+        statement.importKind === "type" ||
+        (declaration.isImportSpecifier() && declaration.node.importKind === "type")
+      )
+        return UNKNOWN;
+      const source = statement.source.value;
       const imported = declaration.isImportDefaultSpecifier()
         ? "default"
         : declaration.node.imported.type === "Identifier"
           ? declaration.node.imported.name
           : declaration.node.imported.value;
+      if (source.endsWith(".json")) {
+        const value = context.imports.readJson(declaration, source);
+        if (value === undefined) return UNKNOWN;
+        if (imported === "default") return value;
+        return object(value) && Object.hasOwn(value, imported) ? value[imported] : UNKNOWN;
+      }
+      const target = context.imports.resolve(declaration, source);
       return target ? context.exported(target, imported, frame, depth) : UNKNOWN;
     }
     if (declaration.isFunctionDeclaration()) return ev(declaration);
@@ -102,6 +116,14 @@ export function evaluateExpression(
         const spread = ev(prop.get("argument"));
         if (!object(spread)) return context.unknown(prop, "unresolved-spread");
         Object.assign(result, spread);
+        if (Object.hasOwn(spread, "name")) {
+          const origin = context.federationNameOrigins.get(spread);
+          if (origin) context.federationNameOrigins.set(result, origin);
+          else context.federationNameOrigins.delete(result);
+          const files = context.federationNameSources.get(spread);
+          if (files) context.federationNameSources.set(result, files);
+          else context.federationNameSources.delete(result);
+        }
         const origin = context.configOrigins.get(spread);
         if (origin !== undefined) {
           const previous = context.configOrigins.get(result);
@@ -122,7 +144,14 @@ export function evaluateExpression(
               ? prop.node.key.value
               : UNKNOWN;
         if (!primitive(key)) return context.unknown(prop, "unresolved-property-key");
-        result[String(key)] = prop.isObjectProperty() ? ev(prop.get("value")) : UNKNOWN;
+        const name = String(key);
+        result[name] = prop.isObjectProperty() ? ev(prop.get("value")) : UNKNOWN;
+        if (name === "name") {
+          const position = context.constructionSite(prop, frame);
+          if (position) context.federationNameOrigins.set(result, position);
+          else context.federationNameOrigins.delete(result);
+          context.federationNameSources.delete(result);
+        }
       }
     }
     context.origins.set(result, context.imports.fileOf(p));
@@ -156,12 +185,11 @@ export function evaluateExpression(
     if (owner.isIdentifier()) {
       const binding = owner.scope.getBinding(owner.node.name);
       if (binding?.path.isImportNamespaceSpecifier()) {
+        const statement = binding.path.parent as t.ImportDeclaration;
+        if (statement.importKind === "type") return UNKNOWN;
         if (!binding.constant || hasMemberWrites(binding))
           return context.unknown(owner, "unsupported-write");
-        const target = context.imports.resolve(
-          binding.path,
-          (binding.path.parent as t.ImportDeclaration).source.value,
-        );
+        const target = context.imports.resolve(binding.path, statement.source.value);
         return target ? context.exported(target, String(key), frame, depth) : UNKNOWN;
       }
     }
@@ -172,20 +200,22 @@ export function evaluateExpression(
   }
   if (p.isTemplateLiteral()) {
     let text = p.node.quasis[0].value.cooked ?? "";
-    let knownPrefix = text;
     let missing = false;
+    if (!context.reserveString(text.length, p)) return UNKNOWN;
     for (const [index, expression] of p.get("expressions").entries()) {
       const value = ev(expression);
       if (!primitive(value) || value == null) missing = true;
-      if (!missing) text += String(value);
-      text += p.node.quasis[index + 1].value.cooked ?? "";
-      if (!missing) knownPrefix = text;
+      if (missing) continue;
+      const next = String(value);
+      const suffix = p.node.quasis[index + 1].value.cooked ?? "";
+      if (!context.reserveString(text.length + next.length + suffix.length, p)) return UNKNOWN;
+      text = text + next + suffix;
     }
     if (!missing) return text;
-    const separator = remoteNameSeparator(knownPrefix);
+    const separator = text.length <= MAX_CONFIG_LOCATION_LENGTH ? remoteNameSeparator(text) : -1;
     return {
       [TAG]: "missing-template",
-      name: separator > 0 ? knownPrefix.slice(0, separator) : null,
+      name: separator > 0 ? text.slice(0, separator) : null,
     };
   }
   if (p.isBinaryExpression() || p.isLogicalExpression()) {
@@ -197,8 +227,11 @@ export function evaluateExpression(
     if (op === "&&") return left ? ev(p.get("right") as AstPath) : left;
     const right = ev(p.get("right") as AstPath);
     if (!primitive(right)) return UNKNOWN;
-    if (op === "+" && (typeof left === "string" || typeof right === "string"))
-      return String(left) + String(right);
+    if (op === "+" && (typeof left === "string" || typeof right === "string")) {
+      const prefix = String(left);
+      const suffix = String(right);
+      return context.reserveString(prefix.length + suffix.length, p) ? prefix + suffix : UNKNOWN;
+    }
     if (typeof left === "number" && typeof right === "number") {
       if (op === "+") return left + right;
       if (op === "-") return left - right;
@@ -245,7 +278,7 @@ export function evaluateExpression(
     }
     if (isConfigApi(callee, PLUGINS)) {
       const options = ev((args[0] as AstPath) ?? null);
-      context.plugins.add(options);
+      context.plugins.set(options, apiReference(callee)?.source);
       return options;
     }
     if (isConfigApi(callee, CONFIG_FACTORIES)) {
@@ -254,6 +287,8 @@ export function evaluateExpression(
         const source = apiReference(callee)?.source;
         if (source === "@rsbuild/core")
           context.configOrigins.set(config, { bundler: "rsbuild", direct: true });
+        if (source === "@rslib/core")
+          context.configOrigins.set(config, { bundler: "rslib", direct: true });
         if (source === "vite") context.configOrigins.set(config, { bundler: "vite", direct: true });
       }
       return config;
@@ -293,6 +328,8 @@ export function evaluateExpression(
     ) {
       const parts = args.map(ev);
       if (parts.every((part) => typeof part === "string")) {
+        const length = parts.reduce((size, part) => size + part.length + 1, 0);
+        if (!context.reserveString(length, p)) return UNKNOWN;
         if (method === "join") return path.join(...parts);
         if (parts.some((part) => path.isAbsolute(part))) return path.resolve(...parts);
       }
@@ -319,7 +356,7 @@ export function evaluateExpression(
       if (!arg.isSpreadElement()) values.push(ev(arg));
       else if (!context.appendArraySpread(values, ev(arg.get("argument")), arg)) return UNKNOWN;
     }
-    return context.call(fn, values, depth);
+    return context.call(fn, values, depth, p, frame);
   }
   return context.unknown(p);
 }

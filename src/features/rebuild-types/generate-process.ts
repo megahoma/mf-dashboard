@@ -8,7 +8,8 @@ process.once("disconnect", () => process.exit(1));
 process.once("message", async (input: GenerationRequest) => {
   let reply: GenerationReply;
   try {
-    if (input.env) Object.assign(process.env, input.env);
+    // Rslib resolves the fixed dotenv helper before applying project environment variables.
+    if (input.bundler !== "rslib" && input.env) Object.assign(process.env, input.env);
     reply = { result: await generateTypesOnDisk(input) };
   } catch (error) {
     reply = {

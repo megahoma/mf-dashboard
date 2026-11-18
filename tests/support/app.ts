@@ -22,3 +22,10 @@ export function localApp(
     ...overrides,
   };
 }
+
+export function developmentFederationConfig(specifier: string): string {
+  return `import federation from ${JSON.stringify(specifier)};
+    export default { lib: process.env.NODE_ENV === 'production'
+      ? [{ format: 'esm' }]
+      : [{ format: 'mf', plugins: [pluginModuleFederation(federation)] }] };`;
+}

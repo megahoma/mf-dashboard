@@ -1,3 +1,4 @@
+import type { ConfigDirectory } from "../../../entities/microfrontend/index.ts";
 import type { DiagnosticDetails } from "../../../shared/models/diagnostic-error-types.ts";
 import { cliDefaults } from "../config/generate.ts";
 import type { CompilerRemoteOptions } from "./compiler-inputs.ts";
@@ -9,6 +10,7 @@ type GeneratedDts = {
   compilerInstance?: string;
   abortOnError?: boolean;
   compileInChildProcess?: boolean;
+  extractRemoteTypes?: boolean;
   afterGenerate?: (info: unknown) => void;
 };
 
@@ -70,12 +72,14 @@ export type GenerationInput = {
   appDir: string;
   name: string;
   configFile: string;
+  bundler?: "rslib";
   envMode: string;
   env?: Readonly<Record<string, string>>;
+  allowLocalEnv?: boolean;
+  configDirectory?: ConfigDirectory;
 };
 
 export type LocalGenerationInput = GenerationInput & {
-  env: Readonly<Record<string, string>>;
   workspaceFingerprint: string;
   confirmed?: LocalGeneratedZip & { inputsFingerprint: string };
 };

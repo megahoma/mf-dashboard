@@ -10,3 +10,4 @@ export { collectProducerEvidence, collectProducerEvidenceAsync } from "./lib/evi
 export { rebuildTypes } from "./lib/workflow.ts";
 export type { RebuildAllReport } from "./models/all.ts";
 export type { ProducerSnapshot } from "./models/evidence.ts";
+export { inputsFingerprint, rebuildConfigFingerprint } from "./lib/inputs-fingerprint.ts";

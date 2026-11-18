@@ -15,9 +15,15 @@ import {
   type InstalledEvidence,
 } from "../src/entities/federated-types/index.ts";
 import {
+  indexComparisonArchive,
+  matchesArchiveFiles,
+} from "../src/entities/federated-types/lib/comparison-archive.ts";
+import { readTree } from "../src/entities/federated-types/lib/types-tree.ts";
+import {
   createProbeBook,
   linkProbeId,
   putLinkResult,
+  readAppFolder,
 } from "../src/entities/microfrontend/index.ts";
 import { verifyTypeInstalls } from "../src/features/observe-types/lib/verify.ts";
 import type { InstallCheck } from "../src/features/observe-types/models/verify.ts";
@@ -25,6 +31,7 @@ import { diagnosticFields } from "../src/shared/models/diagnostic-error.ts";
 import { createLogger } from "../src/shared/lib/logging.ts";
 import type { LogContext } from "../src/shared/models/logging.ts";
 import { localApp } from "./support/app.ts";
+import { zipFixture } from "./support/zip.ts";
 
 after(disposeEvidenceWorker);
 
@@ -42,30 +49,11 @@ function fixture(t: TestContext) {
 
 function archiveFixture(t: TestContext) {
   const f = fixture(t);
-  const extracted = path.join(f.root, "extractions.log");
-  f.write("package.json", "{}");
-  // A small archive adapter makes validation/extraction counts observable across the worker boundary.
-  f.write(
-    "node_modules/adm-zip/index.js",
-    `
-    const fs=require('node:fs'), path=require('node:path');
-    module.exports=class {
-      constructor(bytes){this.records=JSON.parse(bytes.subarray(4).toString());}
-      getEntries(){return this.records.map(r=>({entryName:r.file,isDirectory:false,header:{attr:r.attr||0}}));}
-      extractAllTo(folder){
-        fs.appendFileSync(${JSON.stringify(extracted)}, 'extract\\n');
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,30);
-        for(const r of this.records){const file=path.join(folder,r.file);fs.mkdirSync(path.dirname(file),{recursive:true});
-          if(r.symlink)fs.symlinkSync(r.symlink,file);else fs.writeFileSync(file,r.text);}
-      }
-    };
-  `,
-  );
   const archive = (
-    records: { file: string; text: string; attr?: number; symlink?: string }[] = [
-      { file: "index.d.ts", text: "export type Value = 1;" },
+    records: Parameters<typeof zipFixture>[0] = [
+      { file: "index.d.ts", text: "export type Value = 1;", deflate: true },
     ],
-  ) => Buffer.concat([Buffer.from([0x50, 0x4b, 3, 4]), Buffer.from(JSON.stringify(records))]);
+  ) => zipFixture(records);
   const bytes = archive();
   const hash = (value: Uint8Array) => createHash("sha256").update(value).digest("hex");
   let downloads = 0;
@@ -88,8 +76,6 @@ function archiveFixture(t: TestContext) {
     hash,
     archive,
     downloads: () => downloads,
-    extractions: () =>
-      fs.existsSync(extracted) ? fs.readFileSync(extracted, "utf8").trim().split("\n").length : 0,
   };
 }
 
@@ -171,9 +157,19 @@ test("installed worker evidence detects preserved-mtime external edits and refus
   assert.equal((await readInstalledEvidenceAsync(path.dirname(file))).filesFingerprint, "");
 });
 
-test("one batch downloads and extracts each URL/hash once but compares every destination independently", async (t) => {
+test("one batch decodes each URL/hash once and compares every destination independently", async (t) => {
   const f = archiveFixture(t);
-  const compare = createArchiveComparisonBatch();
+  const tasks: string[] = [];
+  const log = createLogger({
+    enabled: () => true,
+    write: (_level, message) => tasks.push(message),
+  });
+  const compare = createArchiveComparisonBatch(log.operation("manual"));
+  const decodes = () =>
+    tasks.filter(
+      (message) =>
+        message.startsWith("evidence.task.finished") && message.includes("task=archive-comparison"),
+    ).length;
   let timerRan = false;
   const timer = setTimeout(() => {
     timerRan = true;
@@ -189,17 +185,16 @@ test("one batch downloads and extracts each URL/hash once but compares every des
   f.write("one/index.d.ts", "export type Value = 3;");
   assert.equal((await compare(f.input)).matches, false);
   assert.equal(f.downloads(), 1);
-  assert.equal(f.extractions(), 1);
+  assert.equal(decodes(), 1);
   await compare({ ...f.input, url: "https://example.test/other.zip" });
   assert.equal(f.downloads(), 2, "URL changes cannot reuse unrelated archive evidence");
-  assert.equal(f.extractions(), 2);
+  assert.equal(decodes(), 2);
 });
 
 test("archive batch retains failures and a new batch permits retry", async (t) => {
   const f = archiveFixture(t);
   const compare = createArchiveComparisonBatch();
   await assert.rejects(compare({ ...f.input, expectedZipHash: "old-hash" }), /archive changed/);
-  assert.equal(f.extractions(), 0);
   for (const file of ["../escape.d.ts", "/absolute.d.ts", "C:\\escape.d.ts"]) {
     const bytes = f.archive([{ file, text: "unsafe" }]);
     await assert.rejects(
@@ -225,7 +220,6 @@ test("archive batch retains failures and a new batch permits retry", async (t) =
     }),
     /symlink/,
   );
-  assert.equal(f.extractions(), 0);
   let fail = true;
   const retryInput = {
     ...f.input,
@@ -246,7 +240,239 @@ test("archive batch retains failures and a new batch permits retry", async (t) =
   );
 });
 
-test("verification logs archive extraction and internal installed reads in the same operation", async (t) => {
+test("archive comparison rejects corrupt entries and oversized expansion", async (t) => {
+  const f = archiveFixture(t);
+  const compare = createArchiveComparisonBatch();
+  const verify = (bytes: Buffer<ArrayBuffer>) =>
+    compare({
+      ...f.input,
+      expectedZipHash: f.hash(bytes),
+      fetchImpl: async () => new Response(bytes),
+    });
+  await assert.rejects(
+    verify(f.archive([{ file: "index.d.ts", text: "abc", crc: 1 }])),
+    /invalid CRC/,
+  );
+  const withDescriptor = f.archive([
+    { file: "index.d.ts", text: "export type Value = 1;", deflate: true, descriptor: true },
+  ]);
+  assert.equal((await verify(withDescriptor)).matches, true);
+  for (const deflate of [false, true]) {
+    const invalid = f.archive([{ file: "index.d.ts", text: "export type Value = 1;", deflate }]);
+    invalid.writeUInt32LE(1, 14);
+    await assert.rejects(verify(invalid), /inconsistent ZIP CRC/);
+  }
+  await assert.rejects(
+    verify(
+      f.archive([{ file: "index.d.ts", text: "abc", deflate: true, size: 129 * 1024 * 1024 }]),
+    ),
+    /expanded size limit/,
+  );
+  await assert.rejects(
+    verify(
+      f.archive([
+        { file: "index.d.ts", text: "one" },
+        { file: "./index.d.ts", text: "two" },
+      ]),
+    ),
+    /duplicate ZIP entry/,
+  );
+  await assert.rejects(
+    verify(
+      f.archive([
+        { file: "types", text: "file" },
+        { file: "types-extra/index.d.ts", text: "other" },
+        { file: "types/index.d.ts", text: "conflict" },
+      ]),
+    ),
+    /file conflicts with a directory/,
+  );
+  await assert.rejects(
+    verify(
+      f.archive([
+        { file: "first.d.ts", text: "first", deflate: true },
+        { file: "alias.d.ts", text: "first", deflate: true, localOffset: 0 },
+      ]),
+    ),
+    /overlapping ZIP records/,
+  );
+});
+
+test("archive comparison bounds the total number of ZIP extra fields", async (t) => {
+  const f = archiveFixture(t);
+  const compare = createArchiveComparisonBatch();
+  const verify = (bytes: Buffer<ArrayBuffer>) =>
+    compare({
+      ...f.input,
+      expectedZipHash: f.hash(bytes),
+      fetchImpl: async () => new Response(bytes),
+    });
+  const fields = (count: number) => {
+    const extra = Buffer.alloc(count * 4);
+    for (let offset = 0; offset < extra.length; offset += 4) extra.writeUInt16LE(0xffff, offset);
+    return extra;
+  };
+  const record = { file: "index.d.ts", text: "export type Value = 1;", deflate: true };
+  assert.equal((await verify(f.archive([{ ...record, extraFields: fields(2) }]))).matches, true);
+
+  const extraFields = fields(16_000);
+  const directories = Array.from({ length: 13 }, (_, i) => ({
+    file: `folder-${i}/`,
+    text: "",
+    extraFields,
+  }));
+  await assert.rejects(
+    verify(f.archive([record, ...directories])),
+    /ZIP exceeds extra field limit/,
+  );
+});
+
+test("archive comparison checks the same central filename as installation", async (t) => {
+  const f = archiveFixture(t);
+  const compare = createArchiveComparisonBatch();
+  const verify = (file: string) => {
+    const bytes = f.archive([{ file, text: "export type Value = 1;", unicodePath: "index.d.ts" }]);
+    return compare({
+      ...f.input,
+      expectedZipHash: f.hash(bytes),
+      fetchImpl: async () => new Response(bytes),
+    });
+  };
+  assert.equal((await verify("index.d.ts")).matches, true);
+  assert.equal((await verify("different.d.ts")).matches, false);
+  await assert.rejects(verify("../outside.d.ts"), /traversal/);
+});
+
+test("archive comparison uses the destination's aliases for differently cased paths", async (t) => {
+  const f = archiveFixture(t);
+  const destination = path.join(f.root, "mixed");
+  const first = f.write("mixed/Types/a.d.ts", "type A = 1;");
+  const second = f.write("mixed/Types/b.d.ts", "type B = 2;");
+  const caseInsensitive = fs.existsSync(path.join(destination, "types", "b.d.ts"));
+  const compare = createArchiveComparisonBatch();
+  const verify = (records: Parameters<typeof zipFixture>[0]) => {
+    const bytes = f.archive(records);
+    return compare({
+      ...f.input,
+      destination,
+      expectedZipHash: f.hash(bytes),
+      fetchImpl: async () => new Response(bytes),
+    });
+  };
+  const records = [
+    { file: "Types/a.d.ts", text: "type A = 1;" },
+    { file: "types/b.d.ts", text: "type B = 2;" },
+  ];
+
+  const result = await verify(records);
+  assert.equal(result.matches, caseInsensitive);
+  assert.equal(
+    result.filesFingerprint,
+    (await readInstalledEvidenceAsync(destination)).filesFingerprint,
+  );
+  fs.writeFileSync(second, "type B = 3;");
+  assert.equal((await verify(records)).matches, false);
+  fs.writeFileSync(second, records[1].text);
+  assert.equal(
+    (await verify([records[0], { file: "types/A.d.ts", text: records[0].text }])).matches,
+    false,
+  );
+  if (!caseInsensitive) {
+    fs.unlinkSync(second);
+    f.write("mixed/types/b.d.ts", records[1].text);
+    assert.equal((await verify(records)).matches, true);
+  }
+  fs.unlinkSync(first);
+  assert.equal((await verify(records)).matches, false);
+});
+
+test("archive comparison rejects directory entries that alias a file on the destination volume", async (t) => {
+  const f = archiveFixture(t);
+  const compare = createArchiveComparisonBatch();
+  const expectCollision = fs.existsSync(path.join(f.input.destination, "INDEX.d.ts"));
+  for (const [directory, matches] of [
+    ["empty/folder/", true],
+    ["INDEX.d.ts/", !expectCollision],
+    ["INDEX.d.ts/nested/", !expectCollision],
+  ] as const) {
+    const bytes = f.archive([
+      { file: "index.d.ts", text: "export type Value = 1;" },
+      { file: directory, text: "" },
+    ]);
+    const result = await compare({
+      ...f.input,
+      expectedZipHash: f.hash(bytes),
+      fetchImpl: async () => new Response(bytes),
+    });
+    assert.equal(result.matches, matches, directory);
+  }
+});
+
+test("archive comparison follows Unicode aliases defined by the destination volume", async (t) => {
+  const f = archiveFixture(t);
+  const compare = createArchiveComparisonBatch();
+  const spellings = [
+    ["Straße", "STRAẞE"],
+    ["CAFÉ", "cafe\u0301"],
+    ["shortK", "shortk"],
+  ];
+  for (const [index, [actual, alias]] of spellings.entries()) {
+    const folder = `unicode-${index}`;
+    const destination = path.join(f.root, folder);
+    f.write(`${folder}/${actual}/a.d.ts`, "type A = 1;");
+    f.write(`${folder}/${actual}/b.d.ts`, "type B = 2;");
+    const bytes = f.archive([
+      { file: `${actual}/a.d.ts`, text: "type A = 1;" },
+      { file: `${alias}/b.d.ts`, text: "type B = 2;" },
+    ]);
+    const result = await compare({
+      ...f.input,
+      destination,
+      expectedZipHash: f.hash(bytes),
+      fetchImpl: async () => new Response(bytes),
+    });
+    assert.equal(result.matches, fs.existsSync(path.join(destination, alias, "b.d.ts")), alias);
+  }
+});
+
+test("archive comparison resolves aliases on volumes that preserve lookup spellings", async (t) => {
+  const f = fixture(t);
+  f.write("Types/Nested/a.d.ts", "type A = 1;");
+  f.write("Types/Nested/b.d.ts", "type B = 2;");
+  const archive = await indexComparisonArchive(
+    zipFixture([
+      { file: "types/Nested/a.d.ts", text: "type A = 1;" },
+      { file: "types/nested/b.d.ts", text: "type B = 2;" },
+    ]),
+  );
+  const caseInsensitive = fs.existsSync(path.join(f.root, "types", "nested", "b.d.ts"));
+  const root = fs.realpathSync.native(f.root);
+  t.mock.method(fs.realpathSync, "native", (file: string) => {
+    fs.statSync(file);
+    return file;
+  });
+  assert.equal(matchesArchiveFiles(root, readTree(root), archive), caseInsensitive);
+});
+
+test("archive comparison requires matching file names and bytes even with NUL delimiters in files", async (t) => {
+  const f = archiveFixture(t);
+  const destination = path.join(f.root, "framing");
+  f.write("framing/a.d.ts", "one");
+  f.write("framing/b.d.ts", "two\0c.d.ts\0three");
+  const bytes = f.archive([
+    { file: "a.d.ts", text: "one\0b.d.ts\0two" },
+    { file: "c.d.ts", text: "three" },
+  ]);
+  const result = await createArchiveComparisonBatch()({
+    ...f.input,
+    destination,
+    expectedZipHash: f.hash(bytes),
+    fetchImpl: async () => new Response(bytes),
+  });
+  assert.equal(result.matches, false);
+});
+
+test("verification logs archive decoding and internal installed reads in the same operation", async (t) => {
   const f = archiveFixture(t);
   f.write("@mf-types/widget/index.d.ts", "export type Value = 1;");
   const app = localApp("shell", f.root, { consumeTypes: true });
@@ -276,14 +502,13 @@ test("verification logs archive extraction and internal installed reads in the s
   const confirmations = createConfirmationStore();
   assert.equal(await verifyTypeInstalls([app], [link], book, confirmations, new Map(), log), true);
   const tasks = messages.filter((message) => message.startsWith("evidence.task.finished"));
-  assert.equal(tasks.filter((message) => message.includes("task=archive")).length, 1);
+  assert.equal(tasks.filter((message) => message.includes("task=archive-comparison")).length, 1);
   assert.equal(tasks.filter((message) => message.includes("task=installed")).length, 3);
   for (const message of tasks) {
     assert.match(message, /operation=1 source=manual/);
     assert.match(message, /durationMs=\d+/);
   }
   assert.equal(fetch.mock.callCount(), 1);
-  assert.equal(f.extractions(), 1);
   assert.equal(confirmations.install(link)?.zipHash, f.input.expectedZipHash);
 });
 
@@ -342,15 +567,31 @@ test("verification downloads a rejected shared archive once per refresh across f
   }
 });
 
-test("a consumer without a decoder does not suppress shared archive verification for a valid peer", async (t) => {
+test("automatic Rslib verification shares a bundled decoder without loading a project substitute", async (t) => {
   const missing = fixture(t);
   const valid = archiveFixture(t);
+  const marker = path.join(valid.root, "decoder-loaded");
+  valid.write(
+    "node_modules/adm-zip/index.js",
+    `
+    require("node:fs").writeFileSync(${JSON.stringify(marker)}, "loaded");
+    throw new Error("project decoder must not run");
+  `,
+  );
+  valid.write("tsconfig.json", "{}");
+  valid.write(
+    "rslib.config.ts",
+    `
+    export default {
+      lib: [{ format: 'mf', plugins: [pluginModuleFederation({ name: 'implicit' })] }],
+    };
+  `,
+  );
+  const implicit = readAppFolder(valid.root, "development");
+  assert.ok(implicit?.consumeTypes);
   missing.write("@mf-types/widget/index.d.ts", "export type Value = 1;");
   valid.write("@mf-types/widget/index.d.ts", "export type Value = 1;");
-  const apps = [
-    localApp("missing-sdk", missing.root, { consumeTypes: true }),
-    localApp("valid-sdk", valid.root, { consumeTypes: true }),
-  ];
+  const apps = [localApp("missing-sdk", missing.root, { consumeTypes: true }), implicit];
   const links = apps.map((app) => ({
     consumer: app.name,
     alias: "widget",
@@ -377,31 +618,16 @@ test("a consumer without a decoder does not suppress shared archive verification
   const confirmations = createConfirmationStore();
   const checks = new Map<string, InstallCheck>();
   assert.equal(await verifyTypeInstalls(apps, links, book, confirmations, checks), true);
-  assert.equal(confirmations.install(links[0]), null);
-  assert.equal(confirmations.install(links[1])?.zipHash, valid.input.expectedZipHash);
+  for (const link of links)
+    assert.equal(confirmations.install(link)?.zipHash, valid.input.expectedZipHash);
   assert.equal(downloads, 1);
-  assert.equal(valid.extractions(), 1);
-  // With cached valid evidence available, the decoder-free consumer can use that same proof next time.
-  const compare = createArchiveComparisonBatch();
-  const first = await compare(valid.input);
-  assert.equal(
-    (
-      await compare({
-        ...valid.input,
-        appDir: missing.root,
-        destination: path.join(missing.root, "@mf-types/widget"),
-      })
-    ).matches,
-    true,
-  );
-  assert.equal(first.matches, true);
-  assert.equal(valid.extractions(), 2, "a successful batch never decodes the same ZIP again");
+  assert.equal(fs.existsSync(marker), false);
 });
 
-test("post-extraction and installed symlink guards remain active with shared archive fingerprints", async (t) => {
+test("archives and installed trees with symlinks cannot be confirmed", async (t) => {
   const f = archiveFixture(t);
   const bytes = f.archive([
-    { file: "linked.d.ts", text: "", symlink: path.join(f.root, "one/index.d.ts") },
+    { file: "linked.d.ts", text: "index.d.ts", attr: (0o120777 << 16) >>> 0 },
   ]);
   await assert.rejects(
     createArchiveComparisonBatch()({

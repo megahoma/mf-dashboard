@@ -27,8 +27,18 @@ export const CONTROLS = new Set([
 export const MAX_EVALUATION_STEPS = 50_000;
 export const MAX_EVALUATION_DEPTH = 64;
 export const MAX_SPREAD_ITEMS = 1_000_000;
+export const MAX_CONFIG_LOCATION_LENGTH = 32 * 1024;
+export const MAX_REMOTE_LOCATION_WORK = 1024 * 1024;
+export const MAX_EVALUATED_STRING_LENGTH = 256 * 1024;
+export const MAX_EVALUATED_STRING_WORK = 8 * 1024 * 1024;
 export const CONFIG_FACTORIES = new Set(["defineConfig"]);
-export const CONFIG_API_PACKAGES = new Set(["@rsbuild/core", "@rspack/core", "webpack", "vite"]);
+export const CONFIG_API_PACKAGES = new Set([
+  "@rsbuild/core",
+  "@rslib/core",
+  "@rspack/core",
+  "webpack",
+  "vite",
+]);
 export const CONTAINER_PACKAGES = new Set(["webpack", "@rspack/core"]);
 export const MF_PACKAGE = /^@module-federation\//;
 export const FEDERATION_OPTION_KEYS = ["name", "remotes", "exposes", "dts", "manifest", "filename"];

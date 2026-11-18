@@ -339,7 +339,7 @@
     "lint": "rslint --type-check .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "compile": "esbuild src/app/extension.ts src/entities/federated-types/evidence-worker.ts src/features/rebuild-types/generate-process.ts --bundle --platform=node --format=cjs --main-fields=module,main --alias:tinyglobby=./node_modules/tinyglobby/dist/index.cjs --outdir=dist --outbase=src --entry-names=[name] --external:vscode --define:import.meta.url=undefined",
+    "compile": "esbuild src/app/extension.ts src/entities/federated-types/evidence-worker.ts src/features/rebuild-types/generate-process.ts src/widgets/mf-dashboard-tree/known-apps-worker.ts --bundle --platform=node --format=cjs --main-fields=module,main --alias:tinyglobby=./node_modules/tinyglobby/dist/index.cjs --outdir=dist --outbase=src --entry-names=[name] --external:vscode --define:import.meta.url=undefined",
     "package": "vsce package",
     "vscode:prepublish": "npm run compile",
     "prepare": "husky"
@@ -367,10 +367,12 @@
   "dependencies": {
     "@babel/parser": "7.29.9",
     "@babel/traverse": "7.29.8",
+    "buffer-crc32": "0.2.13",
     "dotenv": "18.0.5",
     "get-tsconfig": "4.14.3",
     "jsonc-parser": "3.3.1",
     "picomatch": "4.0.7",
-    "tinyglobby": "0.2.17"
+    "tinyglobby": "0.2.17",
+    "yauzl": "3.4.0"
   }
 }

@@ -8,6 +8,7 @@ export type LogSink = {
 };
 
 export type LogContext = {
+  enabled?(level: LogLevel): boolean;
   event(level: LogLevel, event: string, fields?: LogFields | (() => LogFields)): void;
   operation(source: string): LogContext;
 };

@@ -8,27 +8,32 @@ import {
   type RemoteLink,
 } from "../../../entities/microfrontend/index.ts";
 import type { ProblemDraft, StatusInput } from "../../../entities/status/index.ts";
-import { mergeMissingApps } from "../../../features/init-settings/index.ts";
 import { terms, type DashboardTerms } from "../../../shared/config/index.ts";
 import { noLog } from "../../../shared/config/logging.ts";
-import { DEFAULT_START_SCRIPT } from "../../../shared/config/project.ts";
 import { logDuration, resolveLogFields, safeError } from "../../../shared/lib/logging.ts";
 import type { LogContext, LogFields } from "../../../shared/models/logging.ts";
-import { appConfigStamp, configFilesStamp, createAppParseCache } from "../lib/app-parse-cache.ts";
-import { appParseKey, workspaceRelative } from "../lib/known-apps.ts";
+import { createAppParseCache, withDiscoveryCache } from "../lib/app-parse-cache.ts";
+import {
+  discoveredNames,
+  discoveryFilesAreCurrent,
+  discoveryKey,
+  planDiscovery,
+  prepareDiscoverySnapshot,
+} from "../lib/discovery.ts";
 import { beginRefetch, endRefetch, linksOf } from "../lib/links.ts";
 import { dashboardNodes, dashboardProblemDrafts } from "../lib/presentation.ts";
 import { resolveRowAction } from "../lib/targets.ts";
 import type { DashboardNode, DashboardStructure } from "./presentation.ts";
 import type {
   AppParseCache,
-  AppSetting,
   DashboardPorts,
   DiscoverySnapshot,
+  KnownAppsTask,
 } from "./session-types.ts";
 
 export class DashboardSession {
   loaded: LocalApp[] = [];
+  ownershipSources: ReadonlySet<string> = new Set();
   extraUrls: string[] = [];
   structure: DashboardStructure = "tree";
   terms: DashboardTerms = terms;
@@ -70,11 +75,12 @@ export class DashboardSession {
   async refresh(
     source = "manual",
     log = this.log.operation(source),
-    cache = this.appCache,
+    discovery?: KnownAppsTask["discovery"],
   ): Promise<void> {
     this.activeLog = log;
     const seenWarnings = new Set<string>();
     const loadLog: LogContext = {
+      enabled: (level) => log.enabled?.(level) ?? true,
       operation: (source) => log.operation(source),
       event: (level, event, fields) => {
         if (level === "warn" && event === "config.path.invalid") {
@@ -99,18 +105,29 @@ export class DashboardSession {
       // A flat/tree toggle during the probe updates this.structure in place.
       this.structure = current.structure === "flat" ? "flat" : "tree";
       structureAtProbe = this.structure;
-      const loaded =
-        roots.length === 0 || current.apps === undefined
-          ? []
-          : this.ports.loadKnown(
-              roots,
-              current.apps,
-              current.envMode,
-              current.ignorePaths,
-              cache,
-              loadLog,
-              current.startScript,
-            );
+      let ownershipSources = new Set<string>();
+      let loaded: LocalApp[] = [];
+      if (roots.length && current.apps) {
+        if (this.ports.loadKnownAsync && Object.keys(current.apps).length) {
+          ({ apps: loaded, ownershipSources } = await this.ports.loadKnownAsync(
+            roots,
+            current,
+            loadLog,
+            discovery,
+          ));
+        } else {
+          loaded = this.ports.loadKnown(
+            roots,
+            current.apps,
+            current.envMode,
+            current.ignorePaths,
+            withDiscoveryCache(this.appCache, discovery),
+            loadLog,
+            current.startScript,
+            ownershipSources,
+          );
+        }
+      }
       logDuration(log, "config.loaded", started, {
         configured: Object.keys(current.apps ?? {}).length,
         loaded: loaded.length,
@@ -140,6 +157,10 @@ export class DashboardSession {
         extraUrls,
         structure: this.structure,
       });
+      for (const sources of new Set(loaded.map((app) => app.ownershipSources))) {
+        if (sources) for (const file of sources) ownershipSources.add(file);
+      }
+      this.ownershipSources = ownershipSources;
       this.book.zips.clear();
       for (const [url, fact] of staged.zips) this.book.zips.set(url, fact);
     } catch (error) {
@@ -179,51 +200,17 @@ export class DashboardSession {
     );
   }
 
-  prepareDiscovery(log = this.log.operation("startup")): string[] {
-    const started = Date.now();
+  prepareDiscovery(log = this.log.operation("startup")): string[] | Promise<string[]> {
     this.preparedDiscovery = undefined;
     const current = this.ports.readSettings();
     const roots = this.ports.roots();
-    const startScript = current.startScript ?? DEFAULT_START_SCRIPT;
-    const scans = roots.map((root) => {
-      const dependencies = new Set<string>();
-      const apps = this.ports.scan(root.path, {
-        envMode: current.envMode,
-        ignorePaths: current.ignorePaths,
-        startScript,
-        dependencies,
-        log,
-      });
-      return {
-        root,
-        apps,
-        dependencies: [...dependencies],
-        stamp: configFilesStamp([...dependencies]),
-      };
-    });
-    const parsed: DiscoverySnapshot["parsed"] = new Map();
-    for (const { root, apps } of scans) {
-      for (const [name, app] of Object.entries(apps)) {
-        const key = appParseKey(root.path, app.folder, current.envMode, name, startScript);
-        parsed.set(key, {
-          app,
-          stamp: appConfigStamp(app.folder, current.envMode, app.configFile),
-        });
-      }
-    }
-    this.preparedDiscovery = {
-      key: JSON.stringify([roots, current.envMode, current.ignorePaths, startScript]),
-      scans,
-      parsed,
+    const accept = (snapshot: DiscoverySnapshot) => {
+      this.preparedDiscovery = snapshot;
+      return discoveredNames(snapshot);
     };
-    logDuration(
-      log,
-      "discovery.prepare.completed",
-      started,
-      { roots: roots.length, apps: parsed.size },
-      "info",
-    );
-    return scans.flatMap(({ apps }) => Object.keys(apps));
+    return this.ports.prepareDiscovery
+      ? this.ports.prepareDiscovery(roots, current, log).then(accept)
+      : accept(prepareDiscoverySnapshot(roots, current, this.ports.scan, log));
   }
 
   async discover(log = this.log.operation("discovery")): Promise<void> {
@@ -237,61 +224,22 @@ export class DashboardSession {
         failureFields = { reason: "duplicate-workspace-folder-name" };
         throw new Error("workspace folder names must be unique");
       }
-      const key = JSON.stringify([
-        roots,
-        current.envMode,
-        current.ignorePaths,
-        current.startScript ?? DEFAULT_START_SCRIPT,
-      ]);
-      if (
-        this.preparedDiscovery?.key !== key ||
-        this.preparedDiscovery.scans.some(
-          ({ dependencies, stamp }) => stamp !== configFilesStamp(dependencies),
-        ) ||
-        [...this.preparedDiscovery.parsed.values()].some(
-          ({ app, stamp }) => stamp !== appConfigStamp(app.folder, current.envMode, app.configFile),
-        )
-      )
-        this.prepareDiscovery(log);
-      const discovered = this.preparedDiscovery!;
+      const prepared = this.preparedDiscovery;
       this.preparedDiscovery = undefined;
-      if (roots.length > 0) {
-        const foundApps: Record<string, AppSetting> = Object.create(null);
-        for (const { root, apps: found } of discovered.scans) {
-          for (const [name, foundApp] of Object.entries(found)) {
-            if (Object.hasOwn(foundApps, name)) {
-              failureFields = { reason: "duplicate-federation-name", app: name };
-              throw new Error(`duplicate federation name: ${name}`);
-            }
-            foundApps[name] = {
-              path: workspaceRelative(root.path, foundApp.folder),
-              ...(roots.length > 1 ? { workspaceFolder: root.name } : {}),
-            };
-          }
-        }
-        const apps = mergeMissingApps(current.apps, foundApps);
-        const changed = Object.keys(foundApps).some(
-          (name) => !Object.hasOwn(current.apps ?? {}, name),
-        );
-        if (changed) await this.ports.writeApps(apps);
+      const key = discoveryKey(roots, current);
+      const plan = this.ports.planDiscovery
+        ? await this.ports.planDiscovery(roots, current, prepared, log)
+        : planDiscovery(roots, current, prepared, this.ports.scan, log);
+      if ("duplicateName" in plan) {
+        failureFields = { reason: "duplicate-federation-name", app: plan.duplicateName };
+        throw new Error(`duplicate federation name: ${plan.duplicateName}`);
       }
-      const importsUnchanged = discovered.scans.every(
-        ({ dependencies, stamp }) => stamp === configFilesStamp(dependencies),
-      );
-      // Scan results are reused once; later refreshes track imported dependencies normally.
-      await this.refresh("discovery", log, {
-        lookup: (key, folder, envMode) => {
-          const hit = discovered.parsed.get(key);
-          if (
-            importsUnchanged &&
-            hit &&
-            hit.stamp === appConfigStamp(folder, envMode, hit.app.configFile)
-          )
-            return hit.app;
-          return this.appCache.lookup(key, folder, envMode);
-        },
-        store: (...args) => this.appCache.store(...args),
-      });
+      if (key !== discoveryKey(this.ports.roots(), this.ports.readSettings()))
+        throw new Error("Workspace settings changed during Discover");
+      if (plan.apps && !discoveryFilesAreCurrent(plan.cache))
+        throw new Error("Workspace config files changed during Discover");
+      if (plan.apps) await this.ports.writeApps(plan.apps);
+      await this.refresh("discovery", log, plan.cache);
       log.event("info", "discovery.completed", {
         apps: this.loaded.length,
         durationMs: Date.now() - started,

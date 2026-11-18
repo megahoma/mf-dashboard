@@ -7,16 +7,22 @@ import { readTree } from "./types-tree.ts";
 
 const cache = new Map<string, { stamp: string; fingerprint: string }>();
 
-export function treeFingerprint(dir: string, log: LogContext = noLog, fresh = false): string {
+export function treeFingerprint(
+  dir: string,
+  log: LogContext = noLog,
+  fresh = false,
+  inspect?: (files: ReturnType<typeof readTree>) => void,
+): string {
   const root = path.resolve(dir);
   const stamp = treeStamp(root);
   const hit = cache.get(root);
-  if (!fresh && hit?.stamp === stamp) {
+  if (!fresh && !inspect && hit?.stamp === stamp) {
     log.event("debug", "fingerprint.types.hit", { path: root, scans: 1, reads: 0 });
     return hit.fingerprint;
   }
   const files = readTree(root);
   const fingerprint = filesFingerprint(files);
+  inspect?.(files);
   log.event("debug", "fingerprint.types.miss", { path: root, scans: 1, reads: files.length });
   cache.set(root, { stamp, fingerprint });
   return fingerprint;

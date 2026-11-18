@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { readAppFolder, scanWorkspace } from "../src/entities/microfrontend/lib/discover.ts";
 import { createAppParseCache } from "../src/widgets/mf-dashboard-tree/lib/app-parse-cache.ts";
 import { loadKnownApps } from "../src/widgets/mf-dashboard-tree/lib/known-apps.ts";
+import { developmentFederationConfig } from "./support/app.ts";
 
 function fixture(t: { after(fn: () => void): void }) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-known-app-"));
@@ -43,6 +44,94 @@ test("known app read ignores nested configs and never walks child directories", 
   assert.equal(found?.name, "widget");
   assert.equal(found?.folder, app);
   assert.deepEqual(visited, [app]);
+});
+
+test("Rslib discovers a configured package and dotenv directory through filesystem case aliases", (t) => {
+  const { root, roots } = fixture(t);
+  const folder = path.join(root, "DesignSystem");
+  const profiles = path.join(folder, "Profiles");
+  fs.mkdirSync(profiles, { recursive: true });
+  rewrite(
+    path.join(folder, "package.json"),
+    '{"scripts":{"dev":"rslib mf-dev --env-dir Profiles"}}',
+  );
+  rewrite(path.join(profiles, ".env"), "FIXTURE_MF_NAME=designSystem\nFIXTURE_PORT=4651\n");
+  rewrite(
+    path.join(folder, "rslib.config.ts"),
+    `export default { server: { port: process.env.FIXTURE_PORT },
+      lib: [{ format: 'mf', plugins: [pluginModuleFederation({ name: process.env.FIXTURE_MF_NAME })] }]
+    };`,
+  );
+  const load = (location: string) =>
+    loadKnownApps(roots, { designSystem: { path: location } }, "development");
+  assert.equal(load("DesignSystem")[0]?.port, 4651);
+  if (fs.existsSync(path.join(root, "designsystem", "profiles"))) {
+    rewrite(
+      path.join(folder, "package.json"),
+      '{"scripts":{"dev":"rslib mf-dev --env-dir profiles"}}',
+    );
+    const [app] = load("designsystem");
+    assert.equal(app?.name, "designSystem");
+    assert.equal(app.port, 4651);
+    assert.equal(app.launchEnvironment?.configDirectory?.path, fs.realpathSync.native(folder));
+  } else {
+    assert.deepEqual(load("designsystem"), []);
+  }
+});
+
+test("Discover recognizes the canonical name of an explicitly configured Rslib file", (t) => {
+  const { app, config, roots, settings, cache } = fixture(t);
+  fs.unlinkSync(config);
+  const actual = path.join(app, "rslib.config.ts");
+  rewrite(
+    actual,
+    `export default {lib:[{format:'mf',plugins:[pluginModuleFederation({name:'widget'})]}]};`,
+  );
+  const load = (configFile: string) =>
+    loadKnownApps(
+      roots,
+      { widget: { ...settings.widget, configFile } },
+      "development",
+      [],
+      cache,
+    )[0];
+  assert.equal(load("rslib.config.ts")?.rslibConfigFile, actual);
+  for (const alias of ["RSLIB.config.ts", "RSLIB.CONFIG.TS"]) {
+    if (fs.existsSync(path.join(app, alias))) {
+      const found = load(alias);
+      assert.equal(found?.name, "widget");
+      assert.equal(found.rslibConfigFile, actual);
+    } else {
+      assert.equal(load(alias), undefined);
+    }
+  }
+});
+
+test("Discover invalidates inherited dotenv when a dangling package marker appears", (t) => {
+  const { app, config, roots, settings, cache } = fixture(t);
+  fs.unlinkSync(config);
+  const folder = path.join(app, "config");
+  fs.mkdirSync(folder);
+  rewrite(
+    path.join(app, "package.json"),
+    '{"scripts":{"dev":"rslib mf-dev --config config/rslib.config.ts"}}',
+  );
+  rewrite(path.join(app, ".env.local"), "FIXTURE_PORT=4310\n");
+  rewrite(
+    path.join(folder, "rslib.config.ts"),
+    `export default {lib:[{format:'mf',plugins:[pluginModuleFederation({name:'widget',
+      remotes:{ library: \`library@http://localhost:\${process.env.FIXTURE_PORT}/mf-manifest.json\` }
+    })]}]};`,
+  );
+  const load = (appCache = cache) => loadKnownApps(roots, settings, "development", [], appCache)[0];
+  const url = "http://localhost:4310/mf-manifest.json";
+  assert.equal(load()?.remotes[0]?.url, url);
+  const marker = path.join(folder, "package.json");
+  fs.symlinkSync("missing.json", marker, "file");
+  assert.equal(load(createAppParseCache())?.remotes[0]?.url, null);
+  assert.equal(load()?.remotes[0]?.url, null);
+  fs.unlinkSync(marker);
+  assert.equal(load()?.remotes[0]?.url, url);
 });
 
 test("launch config and explicit override use the app root and track local JSON", (t) => {
@@ -276,6 +365,291 @@ test("unchanged known app reuses parsed config without reading bytes", (t) => {
   assert.deepEqual(loadKnownApps(roots, settings, "development", [], cache), first);
   assert.equal(reads, 0);
 });
+
+test("a custom Vite config remains selectable when the start script runs Rslib", (t) => {
+  const { app, roots, settings } = fixture(t);
+  fs.writeFileSync(path.join(app, "package.json"), '{"scripts":{"dev":"rslib mf-dev"}}');
+  const custom = path.join(app, "custom.ts");
+  fs.writeFileSync(
+    custom,
+    `
+    import { defineConfig } from 'vite';
+    export default defineConfig(({ command }) => ({
+      server: { port: command === 'serve' ? 4500 : 9000 },
+      plugins: [pluginModuleFederation({ name: 'widget' })],
+    }));
+  `,
+  );
+  const [found] = loadKnownApps(
+    roots,
+    { widget: { ...settings.widget, configFile: "custom.ts" } },
+    "development",
+  );
+  assert.equal(found?.configFile, custom);
+  assert.equal(found.port, 4500);
+  rewrite(path.join(app, "package.json"), '{"scripts":{"dev":"rslib mf-dev --root missing"}}');
+  const [withMissingRoot] = loadKnownApps(
+    roots,
+    { widget: { ...settings.widget, configFile: "custom.ts" } },
+    "development",
+  );
+  assert.equal(withMissingRoot?.configFile, custom);
+  assert.equal(withMissingRoot.port, 4500);
+});
+
+test("explicitly selecting the script's custom config preserves its Rslib context", (t) => {
+  const { app, roots, settings, cache } = fixture(t);
+  rewrite(
+    path.join(app, "package.json"),
+    '{"scripts":{"dev":"cross-env PROFILE=mf rslib mf-dev -c custom.ts --env-mode review"}}',
+  );
+  rewrite(path.join(app, "tsconfig.json"), "{}");
+  const config = path.join(app, "custom.ts");
+  rewrite(
+    config,
+    `export default {
+      plugins: [pluginModuleFederation({ name: 'widget', exposes: { '.': './index.ts' } })],
+      lib: [{ format: process.env.PROFILE ?? 'esm' }],
+    };`,
+  );
+  const [automatic] = loadKnownApps(roots, settings, "development", [], cache);
+  const override = { widget: { ...settings.widget, configFile: "./custom.ts" } };
+  const [explicit] = loadKnownApps(roots, override, "development", [], cache);
+  assert.deepEqual(explicit, automatic);
+  assert.equal(explicit?.bundler, "rslib");
+  assert.equal(explicit.port, 3000);
+  assert.equal(explicit.manifest, true);
+  assert.equal(explicit.generateTypes, true);
+  assert.equal(explicit.buildConfigFile, config);
+  assert.equal(explicit.launchEnvironment?.envMode, "review");
+  rewrite(
+    path.join(app, "package.json"),
+    '{"scripts":{"dev":"cross-env PROFILE=mf rslib mf-dev --env-mode review"}}',
+  );
+  const [withDefaultScript] = loadKnownApps(roots, override, "development", [], cache);
+  assert.equal(withDefaultScript?.bundler, explicit.bundler);
+  assert.equal(withDefaultScript.port, explicit.port);
+  assert.equal(withDefaultScript.generateTypes, explicit.generateTypes);
+  assert.equal(withDefaultScript.manifest, explicit.manifest);
+  assert.deepEqual(withDefaultScript.launchEnvironment, explicit.launchEnvironment);
+});
+
+test("configured helper ownership follows the final root after a fallback", (t) => {
+  const { root, cache } = fixture(t);
+  const roots = ["first", "second"].map((name) => ({ name, path: path.join(root, name) }));
+  for (const { path: workspace } of roots) {
+    fs.mkdirSync(workspace);
+    fs.writeFileSync(path.join(workspace, "package.json"), "{}");
+  }
+  const [first, second] = roots.map(({ path }) => path);
+  for (const [name, next] of [["a", "b"], ["b", "c"], ["c", "d"], ["d"]]) {
+    const folder = path.join(first, name);
+    fs.mkdirSync(folder);
+    fs.writeFileSync(
+      path.join(folder, "module-federation.config.ts"),
+      `export default {name:'${name}'}`,
+    );
+    if (!next) continue;
+    fs.writeFileSync(path.join(folder, ".env"), "NODE_ENV=production\n");
+    fs.writeFileSync(path.join(folder, "vite.config.ts"), "export default {};");
+    fs.writeFileSync(
+      path.join(folder, "rslib.config.ts"),
+      developmentFederationConfig(`../${next}/module-federation.config`),
+    );
+    fs.mkdirSync(path.join(second, name));
+    fs.writeFileSync(
+      path.join(second, name, "vite.config.ts"),
+      `export default {plugins:[pluginModuleFederation({name:'${name}'})]};`,
+    );
+  }
+  const a = { path: "a", configFile: "vite.config.ts" };
+  const b = { path: "b", configFile: "vite.config.ts" };
+  const c = { path: "c", workspaceFolder: "first" };
+  for (const apps of [
+    { a, b, c },
+    { b, a, c },
+  ]) {
+    const loaded = loadKnownApps(roots, apps, "development", ["a", "b"], cache);
+    assert.deepEqual(
+      Object.fromEntries(loaded.map(({ name, folder }) => [name, path.relative(root, folder)])),
+      {
+        a: path.join("first", "a"),
+        b: path.join("second", "b"),
+        c: path.join("first", "c"),
+      },
+    );
+  }
+  fs.writeFileSync(
+    path.join(first, "b", "rslib.config.ts"),
+    developmentFederationConfig("../a/module-federation.config"),
+  );
+  const explicitC = { path: "c", configFile: "vite.config.ts" };
+  const d = { path: "d", workspaceFolder: "first" };
+  const cyclicCases: Parameters<typeof loadKnownApps>[1][] = [
+    { c: explicitC, d },
+    { a, b, c: explicitC, d },
+  ];
+  for (const apps of cyclicCases) {
+    const loaded = loadKnownApps(roots, apps, "development", ["a", "b", "c"], cache);
+    assert.equal(loaded.find(({ name }) => name === "c")?.folder, path.join(first, "c"));
+    assert.ok(!loaded.some(({ name }) => name === "d"));
+  }
+  fs.writeFileSync(
+    path.join(first, "a", "module-federation.config.js"),
+    `export default { name: 'a' };`,
+  );
+  const after = loadKnownApps(roots, { a, b }, "development", ["a", "b"], cache);
+  assert.deepEqual(
+    after.map(({ folder }) => folder),
+    [path.join(first, "a"), path.join(second, "b")],
+  );
+});
+
+test("a root without a matching app cannot create an ownership cycle", (t) => {
+  const { root, cache } = fixture(t);
+  const roots = ["first", "second"].map((name) => ({ name, path: path.join(root, name) }));
+  rewrite(path.join(root, "package.json"), "{}");
+  const [first, second] = roots.map(({ path }) => path);
+  for (const name of ["a", "b"]) {
+    const app = path.join(first, name);
+    fs.mkdirSync(app, { recursive: true });
+    rewrite(path.join(app, "module-federation.config.ts"), `export default { name: '${name}' };`);
+    rewrite(path.join(app, "vite.config.ts"), "export default {};");
+  }
+  rewrite(
+    path.join(first, "a", "rslib.config.ts"),
+    developmentFederationConfig("../b/module-federation.config"),
+  );
+  const alternative = path.join(second, "b");
+  fs.mkdirSync(alternative, { recursive: true });
+  rewrite(path.join(alternative, "vite.config.ts"), "export default {};");
+  const apps = {
+    a: { path: "a", configFile: "vite.config.ts" },
+    b: { path: "b", configFile: "vite.config.ts" },
+  };
+  const load = () =>
+    loadKnownApps(roots, apps, "development", ["a", "b"], cache).map(({ name }) => name);
+  assert.deepEqual(load(), ["a"]);
+  rewrite(
+    path.join(alternative, "rslib.config.ts"),
+    developmentFederationConfig("../../first/a/module-federation.config"),
+  );
+  assert.deepEqual(load(), ["a"]);
+});
+
+test("a later candidate cannot block claims from its own selected app", (t) => {
+  const { root, cache } = fixture(t);
+  const roots = ["first", "second"].map((name) => ({ name, path: path.join(root, name) }));
+  const [first, second] = roots.map(({ path }) => path);
+  rewrite(path.join(root, "package.json"), "{}");
+  for (const app of [path.join(first, "a"), path.join(first, "b"), path.join(second, "a")])
+    fs.mkdirSync(app, { recursive: true });
+  rewrite(path.join(first, "a", "vite.config.ts"), "export default {};");
+  rewrite(path.join(first, "a", "module-federation.config.ts"), "export default {name:'a'};");
+  rewrite(path.join(first, "b", "module-federation.config.ts"), "export default {name:'b'};");
+  rewrite(
+    path.join(first, "a", "rslib.config.ts"),
+    developmentFederationConfig("../b/module-federation.config"),
+  );
+  rewrite(
+    path.join(second, "a", "vite.config.ts"),
+    "export default {plugins:[pluginModuleFederation({name:'a'})]};",
+  );
+  const apps = {
+    a: { path: "a", configFile: "vite.config.ts" },
+    b: { path: "b", workspaceFolder: "first" },
+  };
+  const load = () =>
+    loadKnownApps(roots, apps, "development", ["a"], cache).map(({ folder }) => folder);
+  assert.deepEqual(load(), [path.join(first, "a")]);
+  rewrite(
+    path.join(second, "a", "rslib.config.ts"),
+    developmentFederationConfig("../../first/a/module-federation.config"),
+  );
+  assert.deepEqual(load(), [path.join(first, "a")]);
+});
+
+test("warm app refresh checks shared ownership inputs once per workspace", (t) => {
+  const { root, roots, cache } = fixture(t);
+  const workspacePackage = path.join(root, "package.json");
+  fs.writeFileSync(workspacePackage, "{}");
+  const workspaceOnly = path.join(root, "unrelated");
+  fs.mkdirSync(workspaceOnly);
+  const settings: Record<string, { path: string }> = {};
+  for (const name of ["first", "second", "third"]) {
+    const app = path.join(root, name);
+    fs.mkdirSync(app);
+    fs.writeFileSync(
+      path.join(app, "module-federation.config.ts"),
+      `export default { name: '${name}' };`,
+    );
+    settings[name] = { path: name };
+  }
+  const load = (apps = settings) => loadKnownApps(roots, apps, "development", [], cache);
+  assert.equal(load().length, 3);
+  const stat = t.mock.method(fs, "statSync");
+  const read = t.mock.method(fs, "readFileSync");
+  assert.equal(load().length, 3);
+  assert.equal(stat.mock.calls.filter(({ arguments: [file] }) => file === workspaceOnly).length, 1);
+  assert.equal(read.mock.callCount(), 0);
+  stat.mock.resetCalls();
+  assert.equal(load({ ...settings, widget: { path: "apps/widget" } }).length, 4);
+  assert.equal(stat.mock.calls.filter(({ arguments: [file] }) => file === workspaceOnly).length, 1);
+});
+
+test("warm multi-root selection caches occupied, missing and mismatched configs", (t) => {
+  const { root, cache } = fixture(t);
+  const roots = ["missing", "other", "matching"].map((name) => ({
+    name,
+    path: path.join(root, name),
+  }));
+  const file = (index: number) => path.join(roots[index].path, "widget", "custom.ts");
+  for (const candidate of roots.slice(1))
+    fs.mkdirSync(path.join(candidate.path, "widget"), { recursive: true });
+  rewrite(file(1), `export default { name: 'other' };`);
+  rewrite(file(2), `export default { name: 'widget' };`);
+  const load = () =>
+    loadKnownApps(
+      roots,
+      { widget: { path: "widget", configFile: "custom.ts" } },
+      "development",
+      [],
+      cache,
+    );
+  assert.equal(load()[0]?.configFile, file(2));
+  const open = t.mock.method(fs, "openSync");
+  assert.equal(load()[0]?.configFile, file(2));
+  assert.equal(
+    open.mock.calls.filter(({ arguments: [source] }) => String(source).endsWith("custom.ts"))
+      .length,
+    0,
+  );
+  fs.mkdirSync(path.dirname(file(0)), { recursive: true });
+  rewrite(file(0), `export default { name: 'widget' };`);
+  assert.equal(load()[0]?.configFile, file(0));
+});
+
+test(
+  "the known app cache detects recovery after config permissions change",
+  { skip: process.platform === "win32" || process.getuid?.() === 0 },
+  (t) => {
+    const { app, roots, cache, settings } = fixture(t);
+    const config = path.join(app, "custom.ts");
+    fs.writeFileSync(config, `export default { name: 'widget' };`);
+    fs.chmodSync(config, 0o000);
+    const load = () =>
+      loadKnownApps(
+        roots,
+        { widget: { ...settings.widget, configFile: "custom.ts" } },
+        "development",
+        [],
+        cache,
+      );
+    assert.deepEqual(load(), []);
+    fs.chmodSync(config, 0o600);
+    assert.equal(load()[0]?.configFile, config);
+  },
+);
 
 test("renamed config invalidates cache and keeps the single-root fallback", (t) => {
   const { roots, settings, cache, config } = fixture(t);
@@ -709,6 +1083,32 @@ test("known app paths cannot leave the workspace through traversal or symlinks",
     )[0]?.name,
     "widget",
   );
+});
+
+test("a change after reading config bytes does not cache the old config under the new stamp", (t) => {
+  const { roots, settings, config, cache } = fixture(t);
+  const openSync = fs.openSync;
+  const readSync = fs.readSync;
+  let configFd: number | undefined;
+  let changed = false;
+  t.mock.method(fs, "openSync", (...args: Parameters<typeof openSync>) => {
+    const fd: number = Reflect.apply(openSync, fs, args);
+    if (!changed && args[0] === config) configFd = fd;
+    return fd;
+  });
+  t.mock.method(fs, "readSync", (...args: Parameters<typeof readSync>) => {
+    const count: number = Reflect.apply(readSync, fs, args);
+    if (!changed && configFd === args[0] && count === 0) {
+      changed = true;
+      rewrite(config, 'export default { name: "updated", manifest: true, dts: false };\n');
+    }
+    return count;
+  });
+
+  const load = () => loadKnownApps(roots, settings, "development", [], cache)[0];
+  assert.equal(load()?.name, "widget");
+  assert.equal(changed, true);
+  assert.equal(load()?.name, "updated");
 });
 
 test("cache diagnostics observe changed reexports without reading unchanged bytes", (t) => {

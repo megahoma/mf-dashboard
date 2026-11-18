@@ -29,9 +29,9 @@ export async function ensureWorkspaceSettings(
   const apps = readConfiguredApps(mf);
   const config = vscode.workspace.getConfiguration();
   const keys = Object.keys(defaultWorkspaceSettings());
+  if (apps !== undefined && keys.every((key) => isConfigured(config.inspect(key)))) return;
+  const foundNames = apps === undefined ? await session.prepareDiscovery(log) : Object.keys(apps);
   const defined = keys.filter((key) => isConfigured(config.inspect(key)));
-  if (defined.length === keys.length && apps !== undefined) return;
-  const foundNames = apps === undefined ? session.prepareDiscovery(log) : Object.keys(apps);
   const seed = settingsSeed(foundNames, defined);
   const started = Date.now();
   for (const [key, value] of Object.entries(seed)) {
