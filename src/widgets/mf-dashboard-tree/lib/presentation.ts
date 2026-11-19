@@ -236,7 +236,7 @@ function linkNode(
   const nodePath = [...parentPath, linkId];
   const id = JSON.stringify(nodePath);
   const nested: DashboardNode[] = [];
-  if (producer !== undefined && producer.port !== null) {
+  if (producer !== undefined) {
     if (expanded.has(producer.name)) {
       row.tooltip += `\n${view.terms.treeReference}`;
     } else {

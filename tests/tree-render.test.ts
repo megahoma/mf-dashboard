@@ -42,6 +42,33 @@ function providerFor(events?: { level: string; text: string }[]): Provider {
   return provider;
 }
 
+test("a local intermediate app with an unknown port retains its dependency subtree", (t) => {
+  const provider = providerFor();
+  t.after(() => provider.dispose());
+  provider.session.loaded = [
+    localApp("entry", "/entry", { remotes: [{ alias: "middle", name: "middle", url: null }] }),
+    localApp("middle", "/middle", {
+      port: null,
+      remotes: [{ alias: "leaf", name: "leaf", url: null }],
+    }),
+    localApp("leaf", "/leaf", { remotes: [{ alias: "entry", name: "entry", url: null }] }),
+  ];
+  const root = provider.getChildren()[0];
+  assert.equal(root.name, "entry");
+  const middle = root.children[0];
+  assert.equal(middle.name, "middle");
+  assert.match(middle.description, new RegExp(terms.unknownPort));
+  const leaf = middle.children[0];
+  assert.equal(leaf?.name, "leaf");
+  assert.equal(leaf.children[0].name, "entry");
+  assert.equal(leaf.children[0].children.length, 0);
+  provider.setStructure("flat");
+  assert.deepEqual(
+    provider.getChildren().map((row) => row.name),
+    ["entry", "leaf", "middle"],
+  );
+});
+
 test("details follow the selected row through refreshes and escape manifest text", (t) => {
   const provider = providerFor();
   t.after(() => provider.dispose());

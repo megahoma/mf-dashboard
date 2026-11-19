@@ -40,6 +40,8 @@ A root app's status comes from its local port. A link also checks types and its 
 
 Stopped links also show their `@mf-types` state beside the port status. Missing or empty type directories are reported even offline. Files changed since their last verified install show “types changed; freshness unknown” until the published archive can be checked; unchanged local files alone do not prove remote freshness.
 
+Disabling a producer's `generateTypes` disables source-to-archive freshness checks and rebuilding. Missing, changed and verified consumer types are still reported. Fetch works while the consumer is stopped. Start, Rebuild and Fetch belong to a dashboard row and are available from that row, rather than the command palette.
+
 URL issues and unreachable external manifests appear as warnings in Problems. Types issues appear as information; listening, stopped, and reachable rows do not add diagnostics.
 
 ## Detection
@@ -82,11 +84,11 @@ Saving a producer's included `.ts` or `.tsx` source in VS Code refreshes the loc
 
 ## Supported package versions
 
-| Package                             | Version / scope                                             |
-| ----------------------------------- | ----------------------------------------------------------- |
-| VS Code                             | `^1.90.0`, required by the extension manifest.              |
-| `@module-federation/enhanced`       | `2.9.1` in the integration workspace used for verification. |
-| `@module-federation/rsbuild-plugin` | `2.9.1` in the integration workspace used for verification. |
+| Package                             | Version / scope                                |
+| ----------------------------------- | ---------------------------------------------- |
+| VS Code                             | `^1.90.0`, required by the extension manifest. |
+| `@module-federation/enhanced`       | `2.9.1`                                        |
+| `@module-federation/rsbuild-plugin` | `2.9.1`                                        |
 
 Built-in type generation uses the Module Federation API through project-local packages. For Rsbuild it loads the config and captures plugin options. For Rslib it reads the MF profile statically and passes its options to the same generator. Detection alone does not guarantee built-in type generation for other bundlers.
 
