@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { Socket } from "node:net";
 import { TOKENS } from "../config/shell.ts";
 import { DiagnosticError } from "../models/diagnostic-error.ts";
 
@@ -22,17 +23,28 @@ export function fillTemplate(
 }
 
 // Do not release the caller's queue while a timed-out generator can still write.
-export function runShell(command: string, cwd: string, timeoutMs: number): Promise<number> {
+export function runShell(
+  command: string,
+  cwd: string,
+  timeoutMs: number,
+  output?: (chunk: Buffer, stream: "stdout" | "stderr") => void,
+): Promise<number> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, {
       cwd,
       shell: true,
-      stdio: "ignore",
+      stdio: output ? ["ignore", "pipe", "pipe"] : "ignore",
       detached: process.platform !== "win32",
     });
     let timedOut = false;
+    let capture = output;
+    let drainTimer: ReturnType<typeof setTimeout> | undefined;
+    const streams = ["stdout", "stderr"] as const;
+    for (const stream of streams)
+      child[stream]?.on("data", (chunk: Buffer) => capture?.(chunk, stream));
     const timer = setTimeout(() => {
       timedOut = true;
+      capture = undefined;
       void stopProcessTree(child.pid).then(
         () =>
           reject(
@@ -50,9 +62,22 @@ export function runShell(command: string, cwd: string, timeoutMs: number): Promi
       clearTimeout(timer);
       if (!timedOut) reject(error);
     });
-    child.once("close", (code) => {
+    const finish = (code: number | null) => {
       clearTimeout(timer);
+      clearTimeout(drainTimer);
+      capture = undefined;
       if (!timedOut) resolve(code ?? 1);
+    };
+    child.once("close", finish);
+    child.once("exit", (code) => {
+      if (!output || timedOut) return;
+      clearTimeout(timer);
+      // Let inherited pipes drain without waiting for background jobs or breaking their writes.
+      for (const stream of streams) {
+        const pipe = child[stream];
+        if (pipe instanceof Socket) pipe.unref();
+      }
+      drainTimer = setTimeout(() => finish(code), 50);
     });
   });
 }

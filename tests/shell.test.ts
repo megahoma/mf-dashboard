@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import { fillTemplate, runShell } from "../src/shared/lib/shell.ts";
 import { safeError } from "../src/shared/lib/logging.ts";
 import { createSerialQueue } from "../src/shared/lib/queue.ts";
@@ -48,6 +49,34 @@ test(
 test("normal shell exit returns the actual exit code", async () => {
   assert.equal(await runShell(`"${process.execPath}" -e "process.exit(7)"`, tmpdir(), 5000), 7);
 });
+
+test(
+  "captured output returns on shell exit without preventing background writes",
+  {
+    skip: process.platform === "win32",
+  },
+  async (t) => {
+    const dir = mkdtempSync(path.join(tmpdir(), "mf-shell-output-"));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const child = `const fs = require("node:fs"); setTimeout(() => {
+    process.stdout.write("background", () => fs.writeFileSync("marker", "done"));
+  }, 1000);`;
+    writeFileSync(path.join(dir, "background.cjs"), child);
+    let output = "";
+    const status = await runShell(
+      `"${process.execPath}" background.cjs & printf 'compiler error' >&2; exit 7`,
+      dir,
+      500,
+      (chunk) => (output += chunk.toString()),
+    );
+    assert.equal(status, 7);
+    assert.equal(output, "compiler error");
+    assert.equal(existsSync(path.join(dir, "marker")), false);
+    for (let attempt = 0; attempt < 50 && !existsSync(path.join(dir, "marker")); attempt++)
+      await delay(50);
+    assert.equal(readFileSync(path.join(dir, "marker"), "utf8"), "done");
+  },
+);
 
 test(
   "timeout waits for SIGKILL when the generator or its descendant ignores SIGTERM",

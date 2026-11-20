@@ -506,6 +506,7 @@ export class MfDashboardProvider
 
   rebuildAll(
     progress: (name: string, index: number, total: number) => void,
+    status?: Parameters<typeof rebuildAllTypes>[0]["status"],
   ): Promise<RebuildAllReport> {
     return this.enqueue("rebuild-all", async (log) => {
       const settings = readWorkspaceSettings();
@@ -514,6 +515,7 @@ export class MfDashboardProvider
         { roots: workspaceRoots(), settings },
         log,
       );
+      status?.(skipped.map((issue) => ({ ...issue, status: "skipped" })));
       log.event("info", "types.rebuild.all.started", { apps: apps.length });
       const report = await rebuildAllTypes({
         apps,
@@ -537,6 +539,7 @@ export class MfDashboardProvider
           ),
         persist: this.persistConfirmations,
         progress,
+        status,
         log,
       });
       report.skipped.push(...skipped);

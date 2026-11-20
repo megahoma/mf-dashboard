@@ -20,6 +20,35 @@ import type { RebuildContext } from "../src/features/rebuild-types/models/workfl
 import { installRemoteTypes } from "../src/features/refetch-types/lib/remote.ts";
 import { loadKnownApps } from "../src/widgets/mf-dashboard-tree/lib/known-apps.ts";
 import { localApp } from "./support/app.ts";
+import { noLog } from "../src/shared/config/logging.ts";
+import { runRebuildCommand } from "../src/features/rebuild-types/lib/command.ts";
+import { LocatedError } from "../src/shared/models/source-problem.ts";
+
+test("a custom build keeps stdout progress separate from TypeScript errors in stderr", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-compiler-output-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const source = path.join(root, "value.ts");
+  fs.writeFileSync(source, '\nexport const value: number = "text";\n');
+  const runner = path.join(root, "compile.cjs");
+  fs.writeFileSync(
+    runner,
+    `
+const { spawnSync } = require('node:child_process');
+process.stdout.write('running compiler ... ');
+const result = spawnSync(process.execPath, [${JSON.stringify(path.resolve("node_modules/typescript/bin/tsc"))}, '--pretty', 'false', '--noEmit', 'value.ts']);
+process.stderr.write(result.stdout);
+process.exitCode = result.status;
+`,
+  );
+  await assert.rejects(
+    runRebuildCommand(localApp("app", root), `"${process.execPath}" compile.cjs`, noLog),
+    (error: unknown) =>
+      error instanceof LocatedError &&
+      error.problems.some(
+        ({ file, line, code }) => file === source && line === 2 && code === "TS2322",
+      ),
+  );
+});
 
 test("a dependency named __proto__ retains its published ZIP hash", () => {
   const child = localApp("__proto__", path.resolve("child"), { generateTypes: true });

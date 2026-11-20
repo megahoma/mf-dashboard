@@ -1634,6 +1634,134 @@ test("cycles, unresolved remotes and failed producers block only dependent chain
   assert.deepEqual(report.installed, []);
 });
 
+test("duplicate federation names skip both configurations and their local consumers", async (t) => {
+  const f = fixture(t);
+  const first = { ...f.app("first", 4601), name: "duplicate", settingsKey: "first" };
+  const second = { ...f.app("second", 4602), name: "duplicate", settingsKey: "second" };
+  const consumer = f.app("consumer", 4603, { consumeTypes: true, remotes: [remote(second)] });
+  const independent = f.app("independent", 4604);
+  const report = await rebuildAllTypes(f.context([first, second, consumer, independent]), {
+    ...unused,
+    generateLocalFederatedTypes: mockGeneration((folder) => {
+      assert.equal(folder, independent.folder);
+      return writeZip(path.join(folder, "dist", "@mf-types.zip"), "independent");
+    }),
+  });
+  assert.deepEqual(report.rebuilt, ["independent"]);
+  assert.deepEqual(
+    report.skipped.map(({ app }) => app),
+    ["first", "second", "consumer"],
+  );
+  assert.ok(report.skipped[0].reason.includes(first.configFile));
+  assert.ok(report.skipped[1].reason.includes(second.configFile));
+  assert.ok(report.skipped.slice(0, 2).every((item) => !item.problems?.length));
+  assert.match(report.skipped[2].reason, /Dependency duplicate/);
+});
+
+test("bulk rebuild reports compiler locations, isolates config errors and keeps independent apps running", async (t) => {
+  const f = fixture(t);
+  const root = path.dirname(f.app("healthy", 4601).folder);
+  const { folder: broken } = f.app("broken", 4602);
+  const { folder: invalid } = f.app("invalid", 4603);
+  const { folder: config } = f.app("bad-tsconfig", 4604);
+  for (const [app, port] of [
+    ["healthy", 4601],
+    ["broken", 4602],
+    ["bad-tsconfig", 4604],
+  ] as const) {
+    const folder = path.join(root, app);
+    fs.writeFileSync(
+      path.join(folder, "rsbuild.config.cjs"),
+      `
+const { pluginModuleFederation } = require('@module-federation/rsbuild-plugin');
+module.exports = { server: { port: ${port} }, plugins: [pluginModuleFederation({
+  name: '${app}', exposes: { './index': './index.ts' }, dts: true
+})] };`,
+    );
+    fs.writeFileSync(path.join(folder, "tsconfig.json"), '{"include":["index.ts"]}');
+  }
+  fs.writeFileSync(path.join(broken, "index.ts"), '\nexport const value: number = "text";');
+  fs.writeFileSync(path.join(invalid, "rsbuild.config.ts"), "// comment\nexport default }");
+  fs.writeFileSync(path.join(config, "broken.json"), '{\n  "compilerOptions": }\n');
+  fs.writeFileSync(path.join(config, "tsconfig.json"), '{"extends":"./broken.json"}');
+  installGeneratorFixture(
+    broken,
+    `
+const compile = require('node:util').promisify(require('node:child_process').execFile);
+try {
+  await compile(process.execPath, [${JSON.stringify(path.resolve("node_modules/typescript/bin/tsc"))}, '--pretty', 'false', '--noEmit', '--project', 'tsconfig.json'], { cwd: dtsManagerOptions.remote.context });
+} catch { throw new Error('SDK dropped compiler output'); }
+`,
+  );
+  installGeneratorFixture(
+    path.join(root, "healthy"),
+    `
+const fs = require('node:fs');
+fs.mkdirSync('dist', { recursive: true });
+fs.writeFileSync('dist/@mf-types.zip', Buffer.concat([Buffer.from([0x50,0x4b,3,4]), Buffer.from('ok')]));
+`,
+  );
+  const { apps, skipped } = resolveRebuildApps(
+    [{ name: "root", path: root }],
+    {
+      apps: Object.fromEntries(
+        ["healthy", "broken", "invalid", "bad-tsconfig"].map((name) => [name, { path: name }]),
+      ),
+      envMode: "development",
+      ignorePaths: [],
+      extraManifestUrls: [],
+      structure: "tree",
+    },
+    noLog,
+  );
+  assert.equal(skipped[0]?.app, "invalid");
+  assert.equal(skipped[0].problems?.[0].file, path.join(invalid, "rsbuild.config.ts"));
+  assert.equal(skipped[0].problems?.[0].line, 2);
+  const status = new Map<string, string>();
+  const report = await rebuildAllTypes(
+    f.context(apps, {
+      status: (updates) => updates.forEach(({ app, status: next }) => status.set(app, next)),
+    }),
+  );
+  const compiler = report.failed.find(({ app }) => app === "broken");
+  assert.equal(compiler?.reason, "SDK dropped compiler output");
+  assert.deepEqual(compiler?.problems, [
+    {
+      file: path.join(broken, "index.ts"),
+      line: 2,
+      column: 14,
+      code: "TS2322",
+      message: "Type 'string' is not assignable to type 'number'.",
+    },
+  ]);
+  const tsconfig = report.failed.find(({ app }) => app === "bad-tsconfig");
+  assert.equal(tsconfig?.problems?.[0].file, fs.realpathSync(path.join(config, "broken.json")));
+  assert.equal(tsconfig?.problems?.[0].line, 2);
+  assert.deepEqual(report.rebuilt, ["healthy"]);
+  assert.equal(status.get("broken"), "failed");
+  assert.equal(status.get("healthy"), "rebuilt");
+  fs.writeFileSync(path.join(config, "broken.json"), '{\n  "extends": "./missing.json"\n}');
+  const missing = await rebuildAllTypes(
+    f.context(apps.filter((app) => app.name === "bad-tsconfig")),
+  );
+  assert.equal(
+    missing.failed[0]?.problems?.[0].file,
+    fs.realpathSync(path.join(config, "broken.json")),
+  );
+  assert.equal(missing.failed[0]?.problems?.[0].line, 2);
+  const nested = path.join(config, "nested");
+  fs.mkdirSync(nested);
+  fs.writeFileSync(path.join(nested, "missing.json"), "{}");
+  fs.writeFileSync(path.join(nested, "base.json"), '{"extends":"./missing.json"}');
+  const rootConfig = path.join(config, "tsconfig.json");
+  fs.writeFileSync(rootConfig, '{\n\n  "extends": ["./missing.json", "./nested/base.json"]\n}');
+  const sameSpecifier = await rebuildAllTypes(
+    f.context(apps.filter((app) => app.name === "bad-tsconfig")),
+  );
+  assert.equal(sameSpecifier.failed[0]?.problems?.[0].file, fs.realpathSync(rootConfig));
+  assert.equal(sameSpecifier.failed[0]?.problems?.[0].line, 3);
+});
+
 for (const [mode, tsconfig] of [
   ["include", { include: ["src/**/*.ts"], exclude: ["contracts", "excluded"] }],
   ["files", { files: ["src/value.ts"] }],

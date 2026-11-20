@@ -41,6 +41,11 @@
           "name": "%view.details%",
           "type": "webview",
           "initialSize": 1
+        },
+        {
+          "id": "mf-dashboard.typesBuild",
+          "name": "%view.typesBuild%",
+          "initialSize": 1
         }
       ]
     },
@@ -48,6 +53,10 @@
       {
         "view": "mf-dashboard",
         "contents": "%viewsWelcome.contents%"
+      },
+      {
+        "view": "mf-dashboard.typesBuild",
+        "contents": "%viewsWelcome.typesBuild%"
       }
     ],
     "commands": [
@@ -86,6 +95,11 @@
         "command": "mf-dashboard.refetchTypes",
         "title": "%command.refetchTypes%",
         "icon": "$(sync)"
+      },
+      {
+        "command": "mf-dashboard.openTypesBuildReport",
+        "title": "%command.openTypesBuildReport%",
+        "icon": "$(output)"
       },
       {
         "command": "mf-dashboard.useFlat",
@@ -172,6 +186,16 @@
         {
           "command": "mf-dashboard.rebuildAllTypes",
           "when": "view == mf-dashboard",
+          "group": "navigation@2"
+        },
+        {
+          "command": "mf-dashboard.rebuildAllTypes",
+          "when": "view == mf-dashboard.typesBuild",
+          "group": "navigation@1"
+        },
+        {
+          "command": "mf-dashboard.openTypesBuildReport",
+          "when": "view == mf-dashboard.typesBuild",
           "group": "navigation@2"
         }
       ],

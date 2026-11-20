@@ -20,8 +20,10 @@ import { lookupScript } from "../../../features/start-app/index.ts";
 import { noLog } from "../../../shared/config/logging.ts";
 import { DEFAULT_START_SCRIPT } from "../../../shared/config/project.ts";
 import { sha256 } from "../../../shared/lib/fingerprint.ts";
+import { resolveLogFields } from "../../../shared/lib/logging.ts";
 import { canonicalPathIsInside, pathIsInside } from "../../../shared/lib/paths.ts";
 import type { LogContext } from "../../../shared/models/logging.ts";
+import { LocatedError, type SourceProblem } from "../../../shared/models/source-problem.ts";
 import type {
   AppParseCache,
   AppSetting,
@@ -147,6 +149,32 @@ export function resolveKnownApps(
       : roots;
     const script = typeof setting.scripts?.start === "string" ? setting.scripts.start : startScript;
     const configFile = typeof setting.configFile === "string" ? setting.configFile : undefined;
+    const problems: SourceProblem[] = [];
+    const configLog: LogContext = captureRebuildConfig
+      ? {
+          ...log,
+          event(level, event, fields) {
+            if (event === "discovery.skipped") {
+              const detail = resolveLogFields(fields);
+              if (
+                detail?.reason === "syntax-error" &&
+                typeof detail.file === "string" &&
+                typeof detail.line === "number"
+              ) {
+                const code = typeof detail.reasonCode === "string" ? detail.reasonCode : undefined;
+                problems.push({
+                  file: detail.file,
+                  line: detail.line,
+                  column: typeof detail.column === "number" ? detail.column + 1 : 1,
+                  message: code ? `Config syntax error (${code})` : "Config syntax error",
+                });
+              }
+            }
+            log.event(level, event, fields);
+          },
+        }
+      : log;
+    const before = entries.length;
     try {
       for (const root of candidates) {
         const confined = confinedAppPath(root.path, setting.path);
@@ -181,7 +209,7 @@ export function resolveKnownApps(
             envMode,
             name,
             dependencies,
-            log,
+            configLog,
             script,
             configFile,
             (file, name, origin) => {
@@ -227,6 +255,9 @@ export function resolveKnownApps(
     } catch (error) {
       if (!onError) throw error;
       onError(name, error);
+    }
+    if (entries.length === before && problems.length) {
+      onError?.(name, new LocatedError("Could not read the microfrontend config", problems));
     }
   }
   const launched = new Map(

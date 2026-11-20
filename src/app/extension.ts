@@ -12,7 +12,11 @@ import {
 } from "../widgets/mf-dashboard-tree/index.ts";
 import { CONFIRMATIONS } from "./config/extension.ts";
 import { openPanel } from "./lib/open-panel.ts";
-import { showRebuildReport } from "./lib/rebuild-report.ts";
+import {
+  TYPES_BUILD_VIEW,
+  TypesBuildView,
+  type TypesBuildSnapshot,
+} from "./lib/types-build-view.ts";
 import { readConfirmations, setStructure } from "./lib/workspace-settings.ts";
 
 const termsChanged = new vscode.EventEmitter<DashboardTerms>();
@@ -21,10 +25,25 @@ let russian: Readonly<Record<string, string>> = {};
 
 export const onDidChangeTerms = termsChanged.event;
 
+function selectedLanguage(): string {
+  return (
+    dashboardConfiguration().get<string>("language") ?? WORKSPACE_DEFAULTS["mf-dashboard.language"]
+  );
+}
+
 export function selectedTerms(): DashboardTerms {
-  const language =
-    dashboardConfiguration().get<string>("language") ?? WORKSPACE_DEFAULTS["mf-dashboard.language"];
-  return selectTerms(language, (message) => vscode.l10n.t(message), russian);
+  return selectTerms(selectedLanguage(), (message) => vscode.l10n.t(message), russian);
+}
+
+function buildTranslator() {
+  const language = selectedLanguage();
+  return (message: string, ...args: (string | number)[]) => {
+    if (language !== "en" && language !== "ru") return vscode.l10n.t(message, ...args);
+    const translation = language === "ru" ? (russian[message] ?? message) : message;
+    return translation.replace(/\{(\d+)\}/g, (match, index: string) =>
+      String(args[Number(index)] ?? match),
+    );
+  };
 }
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -63,13 +82,23 @@ export function activate(context: vscode.ExtensionContext): void {
   );
   const tree = vscode.window.createTreeView("mf-dashboard", { treeDataProvider: provider });
   const details = new DashboardDetails(tree, provider);
+  const lastBuildKey = "mf-dashboard.lastTypesBuild";
+  const typesBuild = new TypesBuildView(
+    context.workspaceState.get<TypesBuildSnapshot>(lastBuildKey),
+    buildTranslator(),
+  );
   let updatingTypes = false;
   context.subscriptions.push(
     provider,
     tree,
     details,
+    typesBuild,
+    vscode.window.createTreeView(TYPES_BUILD_VIEW, { treeDataProvider: typesBuild }),
     vscode.window.registerWebviewViewProvider("mf-dashboard.details", details),
-    onDidChangeTerms((next) => provider.relabel(next)),
+    onDidChangeTerms((next) => {
+      provider.relabel(next);
+      typesBuild.relabel(buildTranslator());
+    }),
     vscode.workspace.onDidSaveTextDocument((document) => {
       if (document.uri.scheme !== "file") return;
       void provider
@@ -125,30 +154,47 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("mf-dashboard.rebuildTypes", (node?: DashboardNode) =>
       provider.rebuild(node),
     ),
+    vscode.commands.registerCommand("mf-dashboard.openTypesBuildReport", () =>
+      typesBuild.openReport(),
+    ),
     vscode.commands.registerCommand("mf-dashboard.rebuildAllTypes", async () => {
       if (updatingTypes || !vscode.workspace.isTrusted) return;
       updatingTypes = true;
+      typesBuild.start();
+      void vscode.commands
+        .executeCommand(`${TYPES_BUILD_VIEW}.focus`)
+        .then(undefined, (error: unknown) =>
+          log.event("warn", "types.rebuild.all.view-failed", safeError(error)),
+        );
+      let failure: string | undefined;
       try {
-        const report = await vscode.window.withProgress(
+        await vscode.window.withProgress(
           {
-            location: vscode.ProgressLocation.Notification,
-            title: vscode.l10n.t("Updating @mf-types"),
+            location: { viewId: TYPES_BUILD_VIEW },
+            title: buildTranslator()("Updating @mf-types"),
           },
           (progress) =>
-            provider.rebuildAll((name, index, total) => {
-              progress.report({ message: vscode.l10n.t("{0} ({1}/{2})", name, index + 1, total) });
-            }),
+            provider.rebuildAll(
+              (name, index, total) => {
+                progress.report({
+                  message: buildTranslator()("{0} ({1}/{2})", name, index + 1, total),
+                });
+              },
+              (updates) => typesBuild.update(updates),
+            ),
         );
-        void showRebuildReport(report).catch((error: unknown) => {
-          log.event("error", "types.rebuild.all.report-failed", safeError(error));
-        });
       } catch (error) {
         log.event("error", "types.rebuild.all.command-failed", safeError(error));
-        void vscode.window.showErrorMessage(
-          vscode.l10n.t("Could not update @mf-types: {0}", String(error)),
-        );
+        failure = String(error);
       } finally {
-        updatingTypes = false;
+        const snapshot = typesBuild.finish(failure);
+        try {
+          await context.workspaceState.update(lastBuildKey, snapshot);
+        } catch (error) {
+          log.event("warn", "types.rebuild.all.report-save-failed", safeError(error));
+        } finally {
+          updatingTypes = false;
+        }
       }
     }),
     vscode.commands.registerCommand("mf-dashboard.refetchTypes", (node?: DashboardNode) => {

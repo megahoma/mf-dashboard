@@ -57,9 +57,12 @@ export class ThemeIcon {
 export const TreeItemCollapsibleState = { None: 0, Collapsed: 1, Expanded: 2 };
 
 export const languages = {
-  createDiagnosticCollection: () => ({ set(_entries: unknown) {}, dispose() {} }),
+  createDiagnosticCollection: () => ({ set(_entries: unknown) {}, clear() {}, dispose() {} }),
 };
 export const workspace = {
+  asRelativePath(file: string) {
+    return file;
+  },
   getConfiguration() {
     return {
       async update(_key: string, _value: unknown, _target: unknown) {},
@@ -138,10 +141,23 @@ export const commands = {
 };
 
 export class Range {
-  constructor(_a: number, _b: number, _c: number, _d: number) {}
+  readonly start: { line: number; character: number };
+  readonly end: { line: number; character: number };
+  constructor(a: number, b: number, c: number, d: number) {
+    this.start = { line: a, character: b };
+    this.end = { line: c, character: d };
+  }
 }
 export class Diagnostic {
   source?: string;
-  constructor(_range: Range, _message: string, _severity: number) {}
+  code?: string;
+  readonly range: Range;
+  readonly message: string;
+  readonly severity: number;
+  constructor(range: Range, message: string, severity: number) {
+    this.range = range;
+    this.message = message;
+    this.severity = severity;
+  }
 }
-export const DiagnosticSeverity = { Warning: 1, Information: 2 };
+export const DiagnosticSeverity = { Error: 0, Warning: 1, Information: 2 };

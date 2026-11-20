@@ -2,6 +2,7 @@ import { parentPort } from "node:worker_threads";
 import { errorMessage } from "../../shared/lib/errors.ts";
 import { resolveLogFields } from "../../shared/lib/logging.ts";
 import { DiagnosticError } from "../../shared/models/diagnostic-error.ts";
+import { LocatedError } from "../../shared/models/source-problem.ts";
 import type { LogContext } from "../../shared/models/logging.ts";
 import { fingerprintArchiveBytes } from "./lib/archive.ts";
 import { indexComparisonArchive, matchesArchiveFiles } from "./lib/comparison-archive.ts";
@@ -55,6 +56,7 @@ parentPort!.on("message", async (task: EvidenceTask) => {
           ? error.code
           : undefined,
       details: error instanceof DiagnosticError ? error.details : undefined,
+      problems: error instanceof LocatedError ? error.problems : undefined,
     };
   }
   parentPort!.postMessage(reply);
