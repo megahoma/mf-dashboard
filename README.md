@@ -42,6 +42,8 @@ Stopped links also show their `@mf-types` state beside the port status. Missing 
 
 Disabling a producer's `generateTypes` disables source-to-archive freshness checks and rebuilding. Missing, changed and verified consumer types are still reported. Fetch works while the consumer is stopped. Start, Rebuild and Fetch belong to a dashboard row and are available from that row, rather than the command palette.
 
+**Update all @mf-types** opens the **mt-types** view. It shows each project's progress and results. Select an error to open its source, or use **Show @mf-types Report** to open the latest report for this workspace. TypeScript and configuration errors with a known file appear in Problems. Independent projects continue when a build fails.
+
 URL issues and unreachable external manifests appear as warnings in Problems. Types issues appear as information; listening, stopped, and reachable rows do not add diagnostics.
 
 ## Detection

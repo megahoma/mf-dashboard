@@ -14,8 +14,9 @@ import {
 import { noLog } from "../../../shared/config/logging.ts";
 import { errorMessage } from "../../../shared/lib/errors.ts";
 import { safeError } from "../../../shared/lib/logging.ts";
+import { LocatedError } from "../../../shared/models/source-problem.ts";
 import { dependencyTypesTarget, installRemoteTypes } from "../../refetch-types/index.ts";
-import type { RebuildAllContext, RebuildAllReport } from "../models/all.ts";
+import type { RebuildAllContext, RebuildAllReport, RebuildAppStatus } from "../models/all.ts";
 import type { LocalGeneratedZip } from "../models/generate.ts";
 import { runRebuildCommand } from "./command.ts";
 import { generateLocalFederatedTypes } from "./generate.mts";
@@ -30,7 +31,17 @@ export async function rebuildAllTypes(
   context: RebuildAllContext,
   io: typeof operations = operations,
 ): Promise<RebuildAllReport> {
-  const { order, cycles } = workspaceTypesPlan(context.apps);
+  const { order, cycles, conflicts } = workspaceTypesPlan(context.apps);
+  const planned = new Set(order.map(({ app }) => app.name));
+  context.status?.(
+    context.apps
+      .filter(({ name }) => !conflicts.has(name))
+      .map(({ name, settingsKey }) => ({
+        app: name,
+        settingsKey,
+        status: planned.has(name) ? "queued" : "not-applicable",
+      })),
+  );
   const { confirmations } = context;
   const log = context.log ?? noLog;
   const report: RebuildAllReport = {
@@ -40,17 +51,34 @@ export async function rebuildAllTypes(
     skipped: [],
     failed: [],
   };
+  for (const [name, apps] of conflicts) {
+    const updates = apps.map((app) => ({
+      app: name,
+      settingsKey: app.settingsKey ?? app.folder,
+      status: "skipped" as const,
+      reason: `Duplicate Module Federation name: ${name} (${app.configFile})`,
+    }));
+    report.skipped.push(
+      ...updates.map(({ settingsKey, reason }) => ({ app: settingsKey, reason })),
+    );
+    context.status?.(updates);
+  }
   const localNames = new Set(
     context.apps.filter((app) => app.generateTypes && app.port != null).map((app) => app.name),
   );
   const zips = new Map<string, LocalGeneratedZip>();
   const configSnapshots = new Map<LocalApp, string>();
+  const configErrors = new Map<LocalApp, unknown>();
   for (const { app } of order) {
     if (app.configInputs?.length || app.configDependencies?.length) {
-      configSnapshots.set(
-        app,
-        app.rebuildConfigStamp ?? rebuildConfigFingerprint(app, undefined, true),
-      );
+      try {
+        configSnapshots.set(
+          app,
+          app.rebuildConfigStamp ?? rebuildConfigFingerprint(app, undefined, true),
+        );
+      } catch (error) {
+        configErrors.set(app, error);
+      }
     }
   }
   const verifyConfig = async (app: LocalApp) => {
@@ -63,6 +91,17 @@ export async function rebuildAllTypes(
   log.event("debug", "types.rebuild.all.plan", { apps: order.length, cycles: cycles.size });
   for (const [index, { app, generate, links, dependencies }] of order.entries()) {
     context.progress?.(app.name, index, order.length);
+    const installStart = report.installed.length;
+    const status = (
+      state: RebuildAppStatus["status"],
+      issue?: RebuildAllReport["failed"][number],
+    ) => {
+      if (!context.status) return;
+      const installed = report.installed.slice(installStart).map(({ alias }) => alias);
+      context.status([
+        { ...issue, app: app.name, settingsKey: app.settingsKey, status: state, installed },
+      ]);
+    };
     const missing = links.find(({ url }) => url === null);
     const blocked = dependencies.find((name) => !zips.has(name));
     const reason =
@@ -71,10 +110,13 @@ export async function rebuildAllTypes(
       (blocked ? `Dependency ${blocked} could not be updated` : undefined);
     if (reason !== undefined) {
       report.skipped.push({ app: app.name, reason });
+      status("skipped", { app: app.name, reason });
       log.event("warn", "types.rebuild.all.skipped", { app: app.name, reason });
       continue;
     }
     try {
+      status("running");
+      if (configErrors.has(app)) throw configErrors.get(app);
       await verifyConfig(app);
       const command = generate ? context.rebuildCommand.trim() : "";
       const override = command ? context.zipPathOverride(app)?.trim() : undefined;
@@ -154,7 +196,10 @@ export async function rebuildAllTypes(
         external.push([remote.alias, url.href, fingerprint]);
         installedInputs.set(destination, fingerprint);
       }
-      if (!generate) continue;
+      if (!generate) {
+        status(report.installed.length > installStart ? "installed" : "current");
+        continue;
+      }
       const sources = await sourceIdentityAsync(app.folder, app.tsconfig, app.typesFolder, log);
       const fingerprint = (tsconfig: string) =>
         context.fingerprintInputs?.(app, customZipPath, tsconfig, external) ??
@@ -212,6 +257,7 @@ export async function rebuildAllTypes(
       zips.set(app.name, zip);
       if (current) {
         report.current.push(app.name);
+        status("current");
         continue;
       }
       confirmations.saveGeneration(
@@ -224,12 +270,16 @@ export async function rebuildAllTypes(
           : undefined,
       );
       report.rebuilt.push(app.name);
+      status("rebuilt");
       dirty = true;
     } catch (error) {
-      report.failed.push({
+      const issue = {
         app: app.name,
         reason: errorMessage(error),
-      });
+        ...(error instanceof LocatedError && { problems: error.problems }),
+      };
+      report.failed.push(issue);
+      status("failed", issue);
       log.event("error", "types.rebuild.all.failed", { app: app.name, ...safeError(error) });
     }
   }

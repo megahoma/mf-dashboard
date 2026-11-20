@@ -102,7 +102,8 @@ async function start(
     stub.window,
     "createTreeView",
     (id: string, options: { treeDataProvider: unknown }) => {
-      session = (options.treeDataProvider as { session: DashboardSession }).session;
+      if (id === "mf-dashboard")
+        session = (options.treeDataProvider as { session: DashboardSession }).session;
       return createTreeView(id, options);
     },
   );

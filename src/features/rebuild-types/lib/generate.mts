@@ -6,6 +6,7 @@ import { createSerialQueue } from "../../../shared/lib/queue.ts";
 import { stopProcessTree } from "../../../shared/lib/shell.ts";
 import { localManifestUrl } from "../../../shared/lib/urls.ts";
 import { DiagnosticError } from "../../../shared/models/diagnostic-error.ts";
+import { LocatedError } from "../../../shared/models/source-problem.ts";
 import { REBUILD_TIMEOUT_MS } from "../config/command.ts";
 import { REBUILD_HINT } from "../config/generate.ts";
 import type {
@@ -72,9 +73,13 @@ function runGenerationProcess(
       clearTimeout(timer);
       if (timedOut) return;
       if (reply && "error" in reply) {
-        reject(
-          reply.details ? new DiagnosticError(reply.error, reply.details) : new Error(reply.error),
-        );
+        if (reply.problems?.length) reject(new LocatedError(reply.error, reply.problems));
+        else
+          reject(
+            reply.details
+              ? new DiagnosticError(reply.error, reply.details)
+              : new Error(reply.error),
+          );
       } else if (code === 0 && reply) resolve(reply.result);
       else reject(new Error(`Type generator exited (${signal ?? code})`));
     });

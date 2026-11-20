@@ -1,6 +1,7 @@
 import type { ConfirmationStore } from "../../../entities/federated-types/index.ts";
 import type { LocalApp } from "../../../entities/microfrontend/index.ts";
 import type { LogContext } from "../../../shared/models/logging.ts";
+import type { SourceProblem } from "../../../shared/models/source-problem.ts";
 
 export type RebuildAllContext = {
   apps: readonly LocalApp[];
@@ -18,12 +19,31 @@ export type RebuildAllContext = {
   ): Promise<string>;
   persist(): void | PromiseLike<void>;
   progress?(name: string, index: number, total: number): void;
+  status?(updates: readonly RebuildAppStatus[]): void;
   log?: LogContext;
 };
 
 type RebuildIssue = {
   app: string;
   reason: string;
+  problems?: readonly SourceProblem[];
+};
+
+export type RebuildAppStatus = {
+  app: string;
+  settingsKey?: string;
+  status:
+    | "queued"
+    | "running"
+    | "rebuilt"
+    | "current"
+    | "installed"
+    | "skipped"
+    | "failed"
+    | "not-applicable";
+  reason?: string;
+  problems?: readonly SourceProblem[];
+  installed?: readonly string[];
 };
 
 export type RebuildAllReport = {

@@ -1,4 +1,4 @@
-import { appsByName, type LocalApp } from "../../../entities/microfrontend/index.ts";
+import type { LocalApp } from "../../../entities/microfrontend/index.ts";
 import { isLoopbackAtPort, localManifestUrl, parseHttpUrl } from "../../../shared/lib/urls.ts";
 import type { WorkspaceTypesNode } from "../models/plan.ts";
 
@@ -17,14 +17,26 @@ function localProducer(url: URL | null, app: LocalApp | undefined): string | und
 }
 
 export function workspaceTypesPlan(apps: readonly LocalApp[]) {
-  const byName = appsByName(apps);
-  if (byName.size !== apps.length) throw new Error("Microfrontend names must be unique");
+  const groups = new Map<string, LocalApp[]>();
+  for (const app of apps) {
+    const group = groups.get(app.name) ?? [];
+    group.push(app);
+    groups.set(app.name, group);
+  }
+  const conflicts = new Map([...groups].filter(([, group]) => group.length > 1));
   const nodes = new Map<string, WorkspaceTypesNode>();
   for (const app of apps) {
+    if (conflicts.has(app.name)) continue;
     const generate = isProducer(app);
     const links = (app.consumeTypes ? app.remotes : []).map((remote) => {
       const url = parseHttpUrl(remote.url);
-      return { remote, url, producer: localProducer(url, byName.get(remote.name)) };
+      const ambiguous = conflicts.get(remote.name);
+      const producer = ambiguous
+        ? ambiguous
+            .map((candidate) => localProducer(url, candidate))
+            .find((name) => name !== undefined)
+        : localProducer(url, groups.get(remote.name)?.[0]);
+      return { remote, url, producer };
     });
     const dependencies = [
       ...new Set(links.map(({ producer }) => producer).filter((name) => name !== undefined)),
@@ -49,12 +61,14 @@ export function workspaceTypesPlan(apps: readonly LocalApp[]) {
     const node = nodes.get(name)!;
     visiting.set(name, stack.length);
     stack.push(name);
-    for (const dependency of node.dependencies) visit(dependency);
+    for (const dependency of node.dependencies) {
+      if (nodes.has(dependency)) visit(dependency);
+    }
     stack.pop();
     visiting.delete(name);
     complete.add(name);
     order.push(node);
   };
   for (const name of [...nodes.keys()].sort()) visit(name);
-  return { order, cycles };
+  return { order, cycles, conflicts };
 }

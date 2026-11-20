@@ -1,5 +1,6 @@
 import type { ConfigDirectory } from "../../../entities/microfrontend/index.ts";
 import type { DiagnosticDetails } from "../../../shared/models/diagnostic-error-types.ts";
+import type { SourceProblem } from "../../../shared/models/source-problem.ts";
 import { cliDefaults } from "../config/generate.ts";
 import type { CompilerRemoteOptions } from "./compiler-inputs.ts";
 
@@ -97,4 +98,9 @@ export type GenerationResult = {
 };
 
 export type GenerationReply =
-  { result: GenerationResult } | { error: string; details?: DiagnosticDetails };
+  | { result: GenerationResult }
+  | {
+      error: string;
+      details?: DiagnosticDetails;
+      problems?: readonly SourceProblem[];
+    };

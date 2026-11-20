@@ -1,4 +1,5 @@
 import type { DiagnosticDetails } from "../../../shared/models/diagnostic-error-types.ts";
+import type { SourceProblem } from "../../../shared/models/source-problem.ts";
 import type { LogContext, LogFields, LogLevel } from "../../../shared/models/logging.ts";
 import type { ComparisonArchive } from "./install.ts";
 
@@ -12,7 +13,12 @@ export type EvidenceTask =
 export type EvidenceReply = {
   value?: unknown;
   events: { level: LogLevel; event: string; fields?: LogFields }[];
-  error?: { message: string; code?: string; details?: DiagnosticDetails };
+  error?: {
+    message: string;
+    code?: string;
+    details?: DiagnosticDetails;
+    problems?: readonly SourceProblem[];
+  };
 };
 
 export type Pending = {

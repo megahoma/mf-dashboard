@@ -3,6 +3,7 @@ import { Worker } from "node:worker_threads";
 import { noLog } from "../../../shared/config/logging.ts";
 import { logDuration } from "../../../shared/lib/logging.ts";
 import { DiagnosticError } from "../../../shared/models/diagnostic-error.ts";
+import { LocatedError } from "../../../shared/models/source-problem.ts";
 import type { LogContext } from "../../../shared/models/logging.ts";
 import type { EvidenceReply, EvidenceTask, Pending } from "../models/evidence-worker-client.ts";
 import type { InstalledEvidence } from "../models/observe.ts";
@@ -52,9 +53,12 @@ function drain(): void {
         failed: reply.error != null,
       });
       if (reply.error) {
-        const error = reply.error.details
-          ? new DiagnosticError(reply.error.message, reply.error.details)
-          : new Error(reply.error.message);
+        const { message, details, problems } = reply.error;
+        const error = problems?.length
+          ? new LocatedError(message, problems)
+          : details
+            ? new DiagnosticError(message, details)
+            : new Error(message);
         if (reply.error.code) Object.assign(error, { code: reply.error.code });
         item.reject(error);
       } else item.resolve(reply.value);

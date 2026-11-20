@@ -1,7 +1,12 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { errorMessage } from "../../../shared/lib/errors.ts";
+import { pathIsInside } from "../../../shared/lib/paths.ts";
+import { LocatedError, type SourceProblem } from "../../../shared/models/source-problem.ts";
+import { captureCompilerProblems } from "./compiler-problems.mts";
 import type { StaticConfigValue } from "../../../entities/microfrontend/index.ts";
 import { DEFAULT_ENV_MODE, DEFAULT_TYPES_FOLDER } from "../../../shared/config/project.ts";
 import {
@@ -20,6 +25,50 @@ import type {
 import { generatedZip, zipRevision } from "./generated-zip.ts";
 
 export async function prepareGeneration(input: GenerationInput) {
+  try {
+    return await prepare(input);
+  } catch (error) {
+    const message = errorMessage(error);
+    const stack = error instanceof Error ? (error.stack ?? "") : "";
+    let upstream: SourceProblem | undefined;
+    for (const [, name, line, column] of stack.matchAll(
+      /^\s+at (?:.*? \()?(.+):(\d+):(\d+)\)?$/gm,
+    )) {
+      let file: string;
+      try {
+        file = name.startsWith("file:") ? fileURLToPath(name) : name;
+        if (!path.isAbsolute(file) || !statSync(file, { throwIfNoEntry: false })?.isFile())
+          continue;
+      } catch {
+        continue;
+      }
+      if (file !== input.configFile && file.split(path.sep).includes("node_modules")) continue;
+      const problem = { file, line: Number(line), column: Number(column), message };
+      const local = [input.appDir, path.dirname(input.configFile)].some((folder) =>
+        pathIsInside(folder, file),
+      );
+      if (file === input.configFile || local) {
+        throw new LocatedError(message, [upstream ?? problem], { cause: error });
+      }
+      // An imported workspace helper can be outside the app folder but above its config in the stack.
+      upstream ??= problem;
+    }
+    throw new LocatedError(
+      message,
+      [
+        {
+          file: input.configFile,
+          line: 1,
+          column: 1,
+          message,
+        },
+      ],
+      { cause: error },
+    );
+  }
+}
+
+async function prepare(input: GenerationInput) {
   const loaded =
     input.bundler === "rslib" ? await loadStaticProject(input) : await loadProject(input);
   const { dts, mfRequire } = loadDts(input.appDir);
@@ -69,11 +118,13 @@ export async function prepareGeneration(input: GenerationInput) {
     mfRequire,
     remote: dtsManagerOptions?.remote,
     compilerCwd: configuredDts?.cwd,
-    async generate() {
-      const before = zipRevision(zipPath);
-      // Same API as `mf dts` in @module-federation/cli@2.9.1, including afterGenerate.
-      await dts.generateTypesAPI({ dtsManagerOptions });
-      return generatedZip(zipPath, before, input.appDir);
+    generate() {
+      return captureCompilerProblems(async () => {
+        const before = zipRevision(zipPath);
+        // Same API as `mf dts` in @module-federation/cli@2.9.1, including afterGenerate.
+        await dts.generateTypesAPI({ dtsManagerOptions });
+        return generatedZip(zipPath, before, input.appDir);
+      });
     },
   };
 }
@@ -185,6 +236,7 @@ async function loadProject({ appDir, configFile, name, envMode }: GenerationInpu
   try {
     const jiti = createJiti(configFile, {
       interopDefault: true,
+      sourceMaps: true,
       fsCache: false,
       moduleCache: false,
       alias: { "@module-federation/rsbuild-plugin": capturePath },
