@@ -10,7 +10,8 @@ import type { RebuildContext } from "../models/workflow.ts";
 import { runRebuildCommand } from "./command.ts";
 import { collectProducerEvidence, dependencyEvidence } from "./evidence.ts";
 import { generateFederatedTypes } from "./generate.mts";
-import { rebuildPlan } from "./plan.ts";
+import { inputsFingerprint } from "./inputs-fingerprint.ts";
+import { chainDependencies, rebuildPlan } from "./plan.ts";
 
 export async function rebuildTypes(
   root: string,
@@ -33,9 +34,19 @@ export async function rebuildTypes(
       throw error;
     }
   };
-  const nodes = apps
-    .filter((app) => app.generateTypes)
-    .map((app) => operations.collectProducerEvidence(app, apps, book, confirmations, log));
+  const local = new Map(apps.filter((app) => app.generateTypes).map((app) => [app.name, app]));
+  const reachable = new Set<string>();
+  const visit = (name: string) => {
+    if (reachable.has(name)) return;
+    reachable.add(name);
+    const app = local.get(name);
+    if (!app) throw new Error(`missing local node: ${name}`);
+    for (const dependency of chainDependencies(app.remotes, local)) visit(dependency);
+  };
+  visit(root);
+  const nodes = [...reachable].map((name) =>
+    operations.collectProducerEvidence(local.get(name)!, apps, book, confirmations, log),
+  );
   const plan = rebuildPlan(root, nodes);
   log.event("debug", "types.rebuild.plan", () => ({
     order: plan.map((step) => step.name).join(" -> "),
@@ -91,6 +102,8 @@ export async function rebuildTypes(
       context.settings["mf-dashboard.apps"]?.[app.settingsKey ?? app.name]?.manifestPath,
       app.manifestPath,
     );
+    const sources = sourceIdentity(app.folder, app.tsconfig, app.typesFolder, log);
+    const inputs = inputsFingerprint(app, context.settings, null, sources.tsconfigFingerprint, []);
     let zipHash: string;
     if (context.settings.rebuildCommand.trim() !== "") {
       await runRebuildCommand(app, context.settings.rebuildCommand, log, operations.runShell);
@@ -117,9 +130,15 @@ export async function rebuildTypes(
         })
       ).zipHash;
     }
+    const after = sourceIdentity(app.folder, app.tsconfig, app.typesFolder, log);
+    if (
+      sources.fingerprint !== after.fingerprint ||
+      inputs !== inputsFingerprint(app, context.settings, null, after.tsconfigFingerprint, [])
+    ) {
+      throw new Error(`Sources or build configuration changed during type generation: ${app.name}`);
+    }
     log.event("debug", "types.generate.completed", { app: app.name });
     published.set(app.name, zipHash);
-    const sources = sourceIdentity(app.folder, app.tsconfig, app.typesFolder, log);
     const { dependencyZipHashes } = dependencyEvidence(app, apps, book, published);
     confirmations.saveGeneration(app.name, sources.fingerprint, zipHash, dependencyZipHashes);
     await persist();

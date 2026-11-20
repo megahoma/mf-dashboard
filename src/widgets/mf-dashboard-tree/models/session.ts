@@ -1,5 +1,6 @@
 import {
   createProbeBook,
+  remoteLinkKey,
   type ArtifactProbe,
   type LinkProbeResult,
   type LocalApp,
@@ -183,6 +184,7 @@ export class DashboardSession {
     }
     this.pathWarnings = seenWarnings;
     this.probeRunning = false;
+    this.pruneMessages(snapshot.loaded);
     const renderStarted = Date.now();
     this.beforeRefreshChange(log);
     this.onChange();
@@ -317,6 +319,38 @@ export class DashboardSession {
       extraUrls: [...this.extraUrls],
       structure: this.structure,
     };
+  }
+
+  private pruneMessages(previous: readonly LocalApp[]): void {
+    const identity = (app: LocalApp) =>
+      JSON.stringify([
+        app.folder,
+        app.configFile,
+        app.buildConfigFile,
+        app.launchFolder,
+        app.typesFolder,
+      ]);
+    const oldApps = new Map(previous.map((app) => [app.name, identity(app)]));
+    const retained = new Set(
+      this.loaded.filter((app) => oldApps.get(app.name) === identity(app)).map((app) => app.name),
+    );
+    for (const name of this.scriptGaps) if (!retained.has(name)) this.scriptGaps.delete(name);
+    for (const name of this.rebuildErrors.keys())
+      if (!retained.has(name)) this.rebuildErrors.delete(name);
+    const oldLinks = new Map(linksOf(previous).map((link) => [remoteLinkKey(link), link.url]));
+    const active = new Set(
+      linksOf(this.loaded)
+        .filter(
+          (link) =>
+            retained.has(link.consumer) &&
+            oldLinks.get(remoteLinkKey(link)) === link.url &&
+            (!oldApps.has(link.remoteName) || retained.has(link.remoteName)),
+        )
+        .map(remoteLinkKey),
+    );
+    for (const messages of [this.pending, this.refetchErrors]) {
+      for (const id of messages) if (!active.has(id)) messages.delete(id);
+    }
   }
 
   private applyRefreshState(snapshot: {

@@ -64,8 +64,16 @@ function welcomeContents(): string {
   return entry.contents;
 }
 
-test("row navigation commands stay out of the command palette", () => {
-  for (const name of ["openConfig", "openProducerConfig", "revealTypes", "openManifest"]) {
+test("commands requiring a row stay out of the command palette", () => {
+  for (const name of [
+    "openConfig",
+    "openProducerConfig",
+    "revealTypes",
+    "openManifest",
+    "start",
+    "rebuildTypes",
+    "refetchTypes",
+  ]) {
     assert.equal(
       pkg.contributes.menus?.commandPalette?.find((item) => item.command === `mf-dashboard.${name}`)
         ?.when,

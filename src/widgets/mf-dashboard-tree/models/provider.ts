@@ -7,7 +7,6 @@ import {
   type InstalledEvidence,
 } from "../../../entities/federated-types/index.ts";
 import {
-  appPortIsOpen,
   createProbeBook,
   linkProbeId,
   probeWorkspace,
@@ -430,8 +429,7 @@ export class MfDashboardProvider
     const remote = consumer?.remotes.find(
       (item) => item.alias === parsed?.alias && item.name === parsed.remoteName,
     );
-    const consumerOpen = consumer ? appPortIsOpen(this.session.book, consumer.name) : false;
-    if (!parsed || !consumer || !remote || !consumerOpen || remote.url == null) {
+    if (!parsed || !consumer?.consumeTypes || !remote || remote.url == null) {
       this.session.failRefetch(linkId);
       return;
     }

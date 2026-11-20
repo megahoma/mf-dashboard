@@ -158,6 +158,7 @@ test("refresh and Fetch confirm published types and keep offline type changes vi
     fs.mkdirSync(folder, { recursive: true });
   let text = "export type Pigment = 'blue';";
   let online = true;
+  let consumerOnline = true;
   let downloads = 0;
   fs.writeFileSync(path.join(consumer, "package.json"), "{}");
   fs.writeFileSync(
@@ -196,9 +197,15 @@ test("refresh and Fetch confirm published types and keep offline type changes vi
     get: <T>(key: string): T | undefined =>
       (key === "structure" ? "tree" : undefined) as T | undefined,
   }));
-  t.mock.method(net, "connect", () => {
+  t.mock.method(net, "connect", (options: net.NetConnectOpts) => {
     const socket = Object.assign(new EventEmitter(), { setTimeout() {}, destroy() {} });
-    queueMicrotask(() => socket.emit(online ? "connect" : "error", new Error("offline")));
+    const consumer = "port" in options && options.port === 4400;
+    queueMicrotask(() =>
+      socket.emit(
+        online && (!consumer || consumerOnline) ? "connect" : "error",
+        new Error("offline"),
+      ),
+    );
     return socket as unknown as net.Socket;
   });
   t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
@@ -252,6 +259,7 @@ test("refresh and Fetch confirm published types and keep offline type changes vi
   assert.equal(persisted.length, 2);
 
   online = true;
+  consumerOnline = false;
   await provider.refresh("timer");
   const linkId = row().linkId;
   assert.ok(linkId);

@@ -38,6 +38,114 @@ test("a dependency named __proto__ retains its published ZIP hash", () => {
   assert.equal(JSON.stringify(evidence.dependencyZipHashes), '{"__proto__":"hash"}');
 });
 
+for (const command of ["", "build {name}"]) {
+  for (const changed of ["source", "config", "tsconfig"]) {
+    test(`single rebuild rejects a moving ${changed} with ${command ? "a custom" : "the built-in"} generator`, async (t) => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-moving-rebuild-"));
+      t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+      const app = localApp("app", root);
+      const source = path.join(root, "app.ts");
+      const tsconfig = path.join(root, "tsconfig.json");
+      fs.writeFileSync(source, "export const value = 1;");
+      fs.writeFileSync(app.configFile, "export default {name:'app'};");
+      fs.writeFileSync(tsconfig, '{"include":["app.ts"]}');
+      const mutate = () => {
+        if (changed === "tsconfig") {
+          fs.writeFileSync(tsconfig, '{"include":["app.ts"],"compilerOptions":{"strict":true}}');
+          return;
+        }
+        const file =
+          changed === "source" ? source : changed === "config" ? app.configFile : tsconfig;
+        fs.appendFileSync(file, "\n/* edited during generation */\n");
+      };
+      const confirmations = createConfirmationStore();
+      const published = new Map<string, string>();
+      let completed = 0;
+      const context: RebuildContext = {
+        apps: [app],
+        book: createProbeBook(),
+        confirmations,
+        published,
+        settings: {
+          "mf-dashboard.scripts.start": "dev",
+          rebuildCommand: command,
+          envMode: "development",
+        },
+        refetchCommand: () => "",
+        persist() {},
+        rebuilt() {
+          completed++;
+        },
+      };
+      await assert.rejects(
+        rebuildTypes(app.name, context, {
+          collectProducerEvidence,
+          async installRemoteTypes() {
+            throw new Error("no dependencies");
+          },
+          async generateFederatedTypes() {
+            mutate();
+            return { zipHash: "old-source-zip", zipPath: "unused", zipUrl: "unused" };
+          },
+          async runShell() {
+            mutate();
+            return 0;
+          },
+          async hashManifestZip() {
+            return { zipHash: "old-source-zip", zipUrl: "unused" };
+          },
+        }),
+        /changed during type generation/,
+      );
+      assert.equal(confirmations.generation(app.name), null);
+      assert.equal(published.has(app.name), false);
+      assert.equal(completed, 0);
+    });
+  }
+}
+
+test("single rebuild ignores an unrelated broken project and still rejects a broken dependency", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-scoped-rebuild-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const selected = localApp("selected", path.join(root, "selected"));
+  const broken = localApp("broken", path.join(root, "broken"));
+  for (const app of [selected, broken]) fs.mkdirSync(app.folder);
+  fs.writeFileSync(path.join(selected.folder, "app.ts"), "export const value=1;");
+  fs.writeFileSync(path.join(broken.folder, "tsconfig.json"), "{ invalid");
+  let generated = 0;
+  const context: RebuildContext = {
+    apps: [selected, broken],
+    book: createProbeBook(),
+    confirmations: createConfirmationStore(),
+    published: new Map(),
+    settings: { "mf-dashboard.scripts.start": "dev", rebuildCommand: "", envMode: "development" },
+    refetchCommand: () => "",
+    persist() {},
+    rebuilt() {},
+  };
+  const operations: NonNullable<Parameters<typeof rebuildTypes>[2]> = {
+    collectProducerEvidence,
+    async generateFederatedTypes() {
+      generated++;
+      return { zipHash: "zip", zipPath: "unused", zipUrl: "unused" };
+    },
+    async installRemoteTypes() {
+      throw new Error("unexpected install");
+    },
+    async runShell() {
+      throw new Error("unexpected shell");
+    },
+    async hashManifestZip() {
+      throw new Error("unexpected hash");
+    },
+  };
+  await rebuildTypes(selected.name, context, operations);
+  assert.equal(generated, 1);
+  selected.remotes = [{ name: broken.name, alias: "broken", url: null }];
+  await assert.rejects(rebuildTypes(selected.name, context, operations));
+  assert.equal(generated, 1);
+});
+
 test("rebuild installs dependencies before generation and saves the newly built dependency hash", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-rebuild-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

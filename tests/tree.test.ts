@@ -67,6 +67,62 @@ test("a second refetch for the same link is rejected", () => {
   assert.equal(beginRefetch(pending, "a\0b\0b"), true);
 });
 
+test("refresh retains errors on failure but drops messages belonging to a replaced project", async () => {
+  const original = app({
+    name: "app",
+    folder: "/first",
+    configFile: "/first/rsbuild.config.ts",
+    remotes: [{ alias: "dep", name: "dep", url: "https://example.com/mf-manifest.json" }],
+  });
+  const stable = app({ name: "stable" });
+  let loaded = [original, stable];
+  let fail = false;
+  const session = new DashboardSession(
+    {
+      readSettings: () => settings({ apps: { app: { path: "." } } }),
+      writeApps() {},
+      scan: () => ({}),
+      loadKnown: () => loaded,
+      async probe() {
+        if (fail) throw new Error("probe failed");
+      },
+      roots: () => [{ name: "root", path: "/first" }],
+    },
+    createProbeBook(),
+  );
+  await session.refresh();
+  const linkId = "app\0dep\0dep";
+  session.noteRebuildError("app", "old project error");
+  session.noteRebuildError("stable", "stable error");
+  session.noteScriptMissing("app");
+  session.failRefetch(linkId);
+  loaded = [{ ...original, folder: "/second", configFile: "/second/rsbuild.config.ts" }, stable];
+  fail = true;
+  await assert.rejects(session.refresh(), /probe failed/);
+  assert.equal(session.rebuildErrors.get("app"), "old project error");
+  assert.equal(session.scriptGaps.has("app"), true);
+  assert.equal(session.refetchErrors.has(linkId), true);
+  fail = false;
+  await session.refresh();
+  assert.equal(session.rebuildErrors.has("app"), false);
+  assert.equal(session.scriptGaps.has("app"), false);
+  assert.equal(session.refetchErrors.has(linkId), false);
+  assert.equal(session.rebuildErrors.get("stable"), "stable error");
+  session.failRefetch(linkId);
+  loaded = [
+    {
+      ...loaded[0],
+      remotes: [{ alias: "dep", name: "dep", url: "https://other.example/mf-manifest.json" }],
+    },
+    stable,
+  ];
+  await session.refresh();
+  assert.equal(session.refetchErrors.has(linkId), false);
+  loaded = [];
+  await session.refresh();
+  assert.equal(session.rebuildErrors.size, 0);
+});
+
 test("an empty app list stays empty and does not scan", async () => {
   let scans = 0;
   const session = new DashboardSession(

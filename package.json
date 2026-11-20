@@ -121,6 +121,18 @@
     "menus": {
       "commandPalette": [
         {
+          "command": "mf-dashboard.start",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.rebuildTypes",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.refetchTypes",
+          "when": "false"
+        },
+        {
           "command": "mf-dashboard.checkTypes",
           "when": "config.mf-dashboard.types.autoCheck == false"
         },

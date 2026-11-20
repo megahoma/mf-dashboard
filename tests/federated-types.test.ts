@@ -155,6 +155,46 @@ test("link classification uses provided evidence, settle time and install confir
   assert.equal(describeLink({ ...input, producerZipMtime: null, generationConfirmed: true }), "ok");
 });
 
+test("disabled producer generation still reports missing, changed and confirmed consumer types", () => {
+  const input = {
+    consumeTypes: true,
+    producer: { generateTypes: false, sourceSavedAt: 2000 },
+    producerZipMtime: 1000,
+    linkZipHash: "zip",
+    linkZipReachable: true,
+    linkUrl: "https://example.com/mf-manifest.json",
+    generationConfirmed: false,
+    installConfirmation: {
+      zipHash: "zip",
+      filesFingerprint: "files",
+      url: "https://example.com/mf-manifest.json",
+    },
+    checkedAt: 3000,
+    typesSettleMs: 100,
+    installed: { folderExists: true, filesFingerprint: "files" },
+  };
+  assert.equal(describeLink(input), "ok");
+  assert.equal(
+    describeLink({ ...input, installed: { folderExists: false, filesFingerprint: null } }),
+    "unfetched",
+  );
+  assert.equal(
+    describeLink({ ...input, installed: { folderExists: true, filesFingerprint: "changed" } }),
+    "unfetched",
+  );
+  assert.equal(
+    describeLink({
+      ...input,
+      linkZipReachable: false,
+      linkZipHash: null,
+      installed: { folderExists: true, filesFingerprint: "changed" },
+    }),
+    "changed",
+  );
+  assert.equal(describeLink({ ...input, installConfirmation: null }), "manual");
+  assert.equal(describeLink({ ...input, consumeTypes: false }), "none");
+});
+
 test("relative excludes follow TypeScript semantics inside the app", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-relative-exclude-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
