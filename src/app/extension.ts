@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import * as vscode from "vscode";
 import { createConfirmationStore } from "../entities/federated-types/index.ts";
-import { WORKSPACE_DEFAULTS } from "../features/init-settings/index.ts";
+import { readConfiguredApps, WORKSPACE_DEFAULTS } from "../features/init-settings/index.ts";
 import { selectTerms, type DashboardTerms } from "../shared/config/index.ts";
 import { createLogger, safeError } from "../shared/lib/logging.ts";
 import { dashboardConfiguration } from "../shared/lib/workspace.ts";
@@ -87,12 +87,77 @@ export function activate(context: vscode.ExtensionContext): void {
     context.workspaceState.get<TypesBuildSnapshot>(lastBuildKey),
     buildTranslator(),
   );
+  let discovering = false;
   let updatingTypes = false;
+  let buildEnabled: boolean | undefined;
+  const canUpdateTypes = () =>
+    !discovering &&
+    !updatingTypes &&
+    provider.session.hasConfiguredApps &&
+    !!vscode.workspace.workspaceFolders?.length &&
+    Object.keys(readConfiguredApps(dashboardConfiguration()) ?? {}).length > 0;
+  const syncBuildView = () => {
+    const enabled = canUpdateTypes();
+    if (enabled !== buildEnabled) {
+      buildEnabled = enabled;
+      void vscode.commands.executeCommand("setContext", "mf-dashboard.canUpdateTypes", enabled);
+    }
+    const flat = dashboardConfiguration().get<string>("types.structure") === "flat";
+    typesBuild.setWorkspace(provider.session.typesApps, flat ? "flat" : "tree");
+  };
+  async function runBuild(target?: ReturnType<TypesBuildView["targetFor"]>): Promise<void> {
+    if (!canUpdateTypes() || !vscode.workspace.isTrusted) return;
+    updatingTypes = true;
+    syncBuildView();
+    void vscode.commands
+      .executeCommand(`${TYPES_BUILD_VIEW}.focus`)
+      .then(undefined, (error: unknown) =>
+        log.event("warn", "types.rebuild.all.view-failed", safeError(error)),
+      );
+    let failure: string | undefined;
+    let started = false;
+    try {
+      await vscode.window.withProgress(
+        {
+          location: { viewId: TYPES_BUILD_VIEW },
+          title: buildTranslator()("Updating @mf-types"),
+        },
+        (progress) =>
+          provider.rebuildAll(
+            (name, index, total) => {
+              progress.report({
+                message: buildTranslator()("{0} ({1}/{2})", name, index + 1, total),
+              });
+            },
+            (updates) => typesBuild.update(updates),
+            target,
+            () => {
+              started = true;
+              typesBuild.start(target);
+            },
+          ),
+      );
+    } catch (error) {
+      log.event("error", "types.rebuild.all.command-failed", safeError(error));
+      failure = String(error);
+    } finally {
+      try {
+        if (started) await context.workspaceState.update(lastBuildKey, typesBuild.finish(failure));
+      } catch (error) {
+        log.event("warn", "types.rebuild.all.report-save-failed", safeError(error));
+      } finally {
+        updatingTypes = false;
+        syncBuildView();
+      }
+    }
+  }
+  syncBuildView();
   context.subscriptions.push(
     provider,
     tree,
     details,
     typesBuild,
+    provider.onDidChangeTreeData(syncBuildView),
     vscode.window.createTreeView(TYPES_BUILD_VIEW, { treeDataProvider: typesBuild }),
     vscode.window.registerWebviewViewProvider("mf-dashboard.details", details),
     onDidChangeTerms((next) => {
@@ -106,6 +171,7 @@ export function activate(context: vscode.ExtensionContext): void {
         .catch((error: unknown) => log.event("error", "save.refresh.failed", safeError(error)));
     }),
     vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      syncBuildView();
       void provider
         .discover()
         .catch((error: unknown) =>
@@ -114,6 +180,9 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration("mf-dashboard.language")) termsChanged.fire(selectedTerms());
+      const appsChanged = event.affectsConfiguration("mf-dashboard.apps");
+      if (appsChanged || event.affectsConfiguration("mf-dashboard.types.structure"))
+        syncBuildView();
       if (event.affectsConfiguration("mf-dashboard.structure")) {
         const structure = dashboardConfiguration().get<string>("structure");
         provider.setStructure(structure === "flat" ? "flat" : "tree");
@@ -122,7 +191,7 @@ export function activate(context: vscode.ExtensionContext): void {
       const typesAutoCheckChanged = event.affectsConfiguration("mf-dashboard.types.autoCheck");
       if (typesAutoCheckChanged) provider.typesSettingsChanged();
       if (
-        event.affectsConfiguration("mf-dashboard.apps") ||
+        appsChanged ||
         event.affectsConfiguration("mf-dashboard.envMode") ||
         event.affectsConfiguration("mf-dashboard.scripts.start") ||
         event.affectsConfiguration("mf-dashboard.ignorePaths") ||
@@ -142,12 +211,31 @@ export function activate(context: vscode.ExtensionContext): void {
       provider.checkTypes(node),
     ),
     vscode.commands.registerCommand("mf-dashboard.discover", async () => {
-      await provider.discover();
+      if (discovering) return;
+      discovering = true;
+      syncBuildView();
+      const title = buildTranslator()("Finding microfrontends…");
+      tree.message = title;
+      try {
+        await vscode.window.withProgress({ location: { viewId: "mf-dashboard" }, title }, () =>
+          provider.discover(),
+        );
+      } finally {
+        tree.message = undefined;
+        discovering = false;
+        syncBuildView();
+      }
       if (provider.session.loaded.length === 0)
         await vscode.window.showInformationMessage(selectedTerms().empty);
     }),
     vscode.commands.registerCommand("mf-dashboard.useFlat", () => setStructure("flat")),
     vscode.commands.registerCommand("mf-dashboard.useTree", () => setStructure("tree")),
+    vscode.commands.registerCommand("mf-dashboard.typesUseFlat", () =>
+      setStructure("flat", "types.structure"),
+    ),
+    vscode.commands.registerCommand("mf-dashboard.typesUseTree", () =>
+      setStructure("tree", "types.structure"),
+    ),
     vscode.commands.registerCommand("mf-dashboard.start", (node?: DashboardNode) =>
       provider.start(node),
     ),
@@ -157,46 +245,14 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("mf-dashboard.openTypesBuildReport", () =>
       typesBuild.openReport(),
     ),
-    vscode.commands.registerCommand("mf-dashboard.rebuildAllTypes", async () => {
-      if (updatingTypes || !vscode.workspace.isTrusted) return;
-      updatingTypes = true;
-      typesBuild.start();
-      void vscode.commands
-        .executeCommand(`${TYPES_BUILD_VIEW}.focus`)
-        .then(undefined, (error: unknown) =>
-          log.event("warn", "types.rebuild.all.view-failed", safeError(error)),
-        );
-      let failure: string | undefined;
-      try {
-        await vscode.window.withProgress(
-          {
-            location: { viewId: TYPES_BUILD_VIEW },
-            title: buildTranslator()("Updating @mf-types"),
-          },
-          (progress) =>
-            provider.rebuildAll(
-              (name, index, total) => {
-                progress.report({
-                  message: buildTranslator()("{0} ({1}/{2})", name, index + 1, total),
-                });
-              },
-              (updates) => typesBuild.update(updates),
-            ),
-        );
-      } catch (error) {
-        log.event("error", "types.rebuild.all.command-failed", safeError(error));
-        failure = String(error);
-      } finally {
-        const snapshot = typesBuild.finish(failure);
-        try {
-          await context.workspaceState.update(lastBuildKey, snapshot);
-        } catch (error) {
-          log.event("warn", "types.rebuild.all.report-save-failed", safeError(error));
-        } finally {
-          updatingTypes = false;
-        }
-      }
-    }),
+    vscode.commands.registerCommand("mf-dashboard.rebuildAllTypes", () => runBuild()),
+    vscode.commands.registerCommand(
+      "mf-dashboard.rebuildAppTypes",
+      (row?: Parameters<TypesBuildView["targetFor"]>[0]) => {
+        const target = typesBuild.targetFor(row);
+        if (target) return runBuild(target);
+      },
+    ),
     vscode.commands.registerCommand("mf-dashboard.refetchTypes", (node?: DashboardNode) => {
       if (!node?.linkId) return false;
       if (!provider.refetch(node.linkId)) return false;

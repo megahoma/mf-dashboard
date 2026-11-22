@@ -4,7 +4,7 @@
   "viewContainer.title": "MF Dashboard",
   "view.title": "MF Dashboard",
   "view.details": "Details",
-  "view.typesBuild": "mt-types",
+  "view.typesBuild": "mf-types",
   "configuration.title": "MF Dashboard",
   "configuration.language": "Language of tree labels and details. auto follows VS Code. en and ru set the language explicitly.",
   "configuration.structure": "tree nests a remote under the microfrontend that uses it. flat lists every microfrontend on its own.",
@@ -24,7 +24,7 @@
   "configuration.apps.configFile": "Optional build config path relative to the app folder. Takes precedence over the start script's config path.",
   "configuration.apps.typesZipPath": "ZIP produced by the custom rebuild command. Relative paths are resolved from the application folder. Defaults to the path read from the build config.",
   "viewsWelcome.contents": "No Module Federation configs found\n[Find microfrontends](command:mf-dashboard.discover)",
-  "viewsWelcome.typesBuild": "No @mf-types build results yet.\n[Update all @mf-types](command:mf-dashboard.rebuildAllTypes)",
+  "viewsWelcome.typesBuild": "Find microfrontends to build their @mf-types.",
   "command.refresh": "Refresh",
   "command.discover": "Find microfrontends",
   "command.start": "Start",
@@ -38,5 +38,7 @@
   "command.openProducerConfig": "Open producer config",
   "command.revealTypes": "Reveal types",
   "command.openManifest": "Open manifest",
-  "command.showLogs": "MF Dashboard: Show Logs"
+  "command.showLogs": "MF Dashboard: Show Logs",
+  "command.rebuildAppTypes": "Rebuild @mf-types for this microfrontend",
+  "configuration.types.structure": "Display microfrontends in the mf-types view as a dependency tree or a flat list."
 }

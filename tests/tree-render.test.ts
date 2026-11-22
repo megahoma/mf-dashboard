@@ -256,7 +256,7 @@ test("the dashboard and Rebuild All accept the same unambiguous renamed app", as
     ["gallery"],
   );
   const report = await provider.rebuildAll(() => {});
-  assert.deepEqual(report.skipped, [
+  assert.deepEqual(report?.skipped, [
     { app: "gallery", reason: "Could not read the microfrontend config" },
   ]);
 });

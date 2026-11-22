@@ -31,10 +31,10 @@ export async function rebuildAllTypes(
   context: RebuildAllContext,
   io: typeof operations = operations,
 ): Promise<RebuildAllReport> {
-  const { order, cycles, conflicts } = workspaceTypesPlan(context.apps);
+  const { order, cycles, conflicts, apps } = workspaceTypesPlan(context.apps, context.target);
   const planned = new Set(order.map(({ app }) => app.name));
   context.status?.(
-    context.apps
+    apps
       .filter(({ name }) => !conflicts.has(name))
       .map(({ name, settingsKey }) => ({
         app: name,
@@ -214,7 +214,8 @@ export async function rebuildAllTypes(
         await io.runRebuildCommand(app, command, log);
         zip = await generatedZip(customZipPath, before, app.folder);
       } else {
-        const previous = confirmations.generation(app.name);
+        const previous =
+          app.name === context.target ? undefined : confirmations.generation(app.name);
         const confirmed =
           previous?.local &&
           confirmations.generationConfirmed(

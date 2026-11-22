@@ -34,6 +34,8 @@ import type {
 
 export class DashboardSession {
   loaded: LocalApp[] = [];
+  typesApps: readonly LocalApp[] = [];
+  hasConfiguredApps = false;
   ownershipSources: ReadonlySet<string> = new Set();
   extraUrls: string[] = [];
   structure: DashboardStructure = "tree";
@@ -96,12 +98,15 @@ export class DashboardSession {
     const started = Date.now();
     log.event(source === "timer" ? "debug" : "info", "refresh.started");
     const snapshot = this.captureRefreshState();
+    let hasConfiguredApps = this.hasConfiguredApps;
     let failureFields: LogFields = {};
     this.probeRunning = true;
     let structureAtProbe = this.structure;
     try {
       const current = this.ports.readSettings();
       const roots = this.ports.roots();
+      const configured = Object.keys(current.apps ?? {}).length;
+      hasConfiguredApps = roots.length > 0 && configured > 0;
       const extraUrls = [...current.extraManifestUrls];
       // A flat/tree toggle during the probe updates this.structure in place.
       this.structure = current.structure === "flat" ? "flat" : "tree";
@@ -109,7 +114,7 @@ export class DashboardSession {
       let ownershipSources = new Set<string>();
       let loaded: LocalApp[] = [];
       if (roots.length && current.apps) {
-        if (this.ports.loadKnownAsync && Object.keys(current.apps).length) {
+        if (this.ports.loadKnownAsync && configured > 0) {
           ({ apps: loaded, ownershipSources } = await this.ports.loadKnownAsync(
             roots,
             current,
@@ -130,12 +135,13 @@ export class DashboardSession {
         }
       }
       logDuration(log, "config.loaded", started, {
-        configured: Object.keys(current.apps ?? {}).length,
+        configured,
         loaded: loaded.length,
       });
       const names = new Set<string>();
       for (const app of loaded) {
         if (names.has(app.name)) {
+          this.typesApps = loaded;
           failureFields = { reason: "duplicate-federation-name", app: app.name };
           throw new Error(`duplicate federation name: ${app.name}`);
         }
@@ -158,6 +164,7 @@ export class DashboardSession {
         extraUrls,
         structure: this.structure,
       });
+      this.typesApps = loaded;
       for (const sources of new Set(loaded.map((app) => app.ownershipSources))) {
         if (sources) for (const file of sources) ownershipSources.add(file);
       }
@@ -179,9 +186,17 @@ export class DashboardSession {
       });
       this.pathWarnings = seenWarnings;
       this.onRefreshFailed();
-      if (toggledDuringProbe) this.onChange();
+      if (
+        toggledDuringProbe ||
+        this.hasConfiguredApps !== hasConfiguredApps ||
+        failureFields.reason === "duplicate-federation-name"
+      ) {
+        this.hasConfiguredApps = hasConfiguredApps;
+        this.onChange();
+      }
       throw error;
     }
+    this.hasConfiguredApps = hasConfiguredApps;
     this.pathWarnings = seenWarnings;
     this.probeRunning = false;
     this.pruneMessages(snapshot.loaded);

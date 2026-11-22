@@ -278,6 +278,7 @@ test("refresh keeps the previous book until the probe settles", async () => {
     },
   );
   failing.loaded = keptLoaded;
+  failing.hasConfiguredApps = true;
   await assert.rejects(() => failing.refresh(), /down/);
   assert.equal(failing.probeRunning, false);
   assert.equal(rejectedChange, false);

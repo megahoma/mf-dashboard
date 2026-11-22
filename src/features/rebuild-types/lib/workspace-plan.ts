@@ -16,7 +16,7 @@ function localProducer(url: URL | null, app: LocalApp | undefined): string | und
   }
 }
 
-export function workspaceTypesPlan(apps: readonly LocalApp[]) {
+export function workspaceTypesPlan(apps: readonly LocalApp[], target?: string) {
   const groups = new Map<string, LocalApp[]>();
   for (const app of apps) {
     const group = groups.get(app.name) ?? [];
@@ -58,17 +58,29 @@ export function workspaceTypesPlan(apps: readonly LocalApp[]) {
       for (const member of members) cycles.set(member, reason);
       return;
     }
-    const node = nodes.get(name)!;
+    const node = nodes.get(name);
+    if (!node) {
+      complete.add(name);
+      return;
+    }
     visiting.set(name, stack.length);
     stack.push(name);
-    for (const dependency of node.dependencies) {
-      if (nodes.has(dependency)) visit(dependency);
-    }
+    for (const dependency of node.dependencies) visit(dependency);
     stack.pop();
     visiting.delete(name);
     complete.add(name);
     order.push(node);
   };
-  for (const name of [...nodes.keys()].sort()) visit(name);
-  return { order, cycles, conflicts };
+  if (target === undefined) {
+    for (const name of [...nodes.keys()].sort()) visit(name);
+  } else {
+    visit(target);
+    for (const name of conflicts.keys()) if (!complete.has(name)) conflicts.delete(name);
+  }
+  return {
+    order,
+    cycles,
+    conflicts,
+    apps: target === undefined ? apps : apps.filter((app) => complete.has(app.name)),
+  };
 }

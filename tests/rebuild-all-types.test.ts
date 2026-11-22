@@ -1592,6 +1592,36 @@ test("offline workspace rebuild installs dependencies before generation and visi
   assert.deepEqual(reconfigured.installed, []);
 });
 
+test("rebuilding one app forces its generation and reuses only its required local dependencies", async (t) => {
+  const f = fixture(t);
+  const leaf = f.app("leaf", 4501);
+  const selected = f.app("selected", 4502, { consumeTypes: true, remotes: [remote(leaf)] });
+  const shell = f.app("shell", 4503, { consumeTypes: true, remotes: [remote(selected)] });
+  const other = f.app("other", 4504);
+  const updates = new Set<string>();
+  const context = f.context([shell, selected, other, leaf], {
+    target: selected.name,
+    status: (rows) => rows.forEach(({ app }) => updates.add(app)),
+  });
+  const generated: string[] = [];
+  const io = {
+    ...unused,
+    generateLocalFederatedTypes: mockGeneration((folder) => {
+      generated.push(path.basename(folder));
+      return writeZip(path.join(folder, "dist", "@mf-types.zip"), "types");
+    }),
+  };
+  const first = await rebuildAllTypes(context, io);
+  assert.deepEqual(first.rebuilt, ["leaf", "selected"]);
+  assert.deepEqual(first.installed, [{ consumer: "selected", alias: "leaf" }]);
+  const second = await rebuildAllTypes(context, io);
+  assert.deepEqual(second.current, ["leaf"]);
+  assert.deepEqual(second.rebuilt, ["selected"]);
+  assert.deepEqual(generated, ["leaf", "selected", "selected"]);
+  assert.deepEqual(updates, new Set(["leaf", "selected"]));
+  assert.equal(fs.existsSync(typeFile(shell, "selected")), false);
+});
+
 test("cycles, unresolved remotes and failed producers block only dependent chains", async (t) => {
   const f = fixture(t);
   const a = f.app("cycle-a", 4501, { consumeTypes: true });

@@ -5,6 +5,7 @@ import type { SourceProblem } from "../../../shared/models/source-problem.ts";
 
 export type RebuildAllContext = {
   apps: readonly LocalApp[];
+  target?: string;
   confirmations: ConfirmationStore;
   envMode: string;
   rebuildCommand: string;

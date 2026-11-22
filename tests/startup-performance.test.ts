@@ -23,6 +23,7 @@ import { KnownAppsWorker } from "../src/widgets/mf-dashboard-tree/lib/known-apps
 import { noLog } from "../src/shared/config/logging.ts";
 import { createLogger } from "../src/shared/lib/logging.ts";
 import type { DashboardSettings } from "../src/widgets/mf-dashboard-tree/models/session-types.ts";
+import type { TypesBuildView } from "../src/app/lib/types-build-view.ts";
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -56,6 +57,7 @@ async function start(
   initial: Record<string, unknown>,
   onWrite?: (key: string) => void,
   emitConfigurationEvents = false,
+  expectedRefresh = "refresh.completed",
 ) {
   const values = new Map(Object.entries(initial));
   const writes: string[] = [];
@@ -97,6 +99,7 @@ async function start(
     },
   })) as unknown as typeof stub.workspace.getConfiguration);
   let session: DashboardSession | undefined;
+  let typesView: TypesBuildView | undefined;
   const createTreeView = stub.window.createTreeView;
   t.mock.method(
     stub.window,
@@ -104,16 +107,23 @@ async function start(
     (id: string, options: { treeDataProvider: unknown }) => {
       if (id === "mf-dashboard")
         session = (options.treeDataProvider as { session: DashboardSession }).session;
+      if (id === "mf-dashboard.typesBuild") typesView = options.treeDataProvider as TypesBuildView;
       return createTreeView(id, options);
     },
   );
   const firstChannel = stub.outputChannels.length;
+  const state = new Map<string, unknown>();
   activate({
     subscriptions,
     extensionUri: stub.Uri.file(fileURLToPath(new URL("..", import.meta.url))),
     extension: { packageJSON: { version: "test-version" } },
     extensionMode: 2,
-    workspaceState: { get: () => undefined, update: async () => {} },
+    workspaceState: {
+      get: (key: string) => state.get(key),
+      async update(key: string, value: unknown) {
+        state.set(key, value);
+      },
+    },
   } as unknown as ExtensionContext);
   const channel = stub.outputChannels[firstChannel];
   for (
@@ -123,11 +133,203 @@ async function start(
   )
     await new Promise<void>((resolve) => setTimeout(resolve, 1));
   assert.ok(
-    channel.messages.some((message) => message.includes("refresh.completed")),
+    channel.messages.some((message) => message.includes(expectedRefresh)),
     channel.messages.join("\n"),
   );
   assert.ok(session);
-  return { session, values, writes, channel };
+  assert.ok(typesView);
+  return { session, values, writes, channel, changes, typesView, state };
+}
+
+test("discovery shows progress and enables type builds only after apps load", async (t) => {
+  const { root, writeApp } = fixture(t);
+  const context = t.mock.method(stub.commands, "executeCommand");
+  const progress = t.mock.method(stub.window, "withProgress");
+  const { session } = await start(t, root, {
+    ...defaultWorkspaceSettings(),
+    "mf-dashboard.apps": {},
+  });
+  const run = (name: string, ...args: unknown[]) =>
+    stub.registeredCommands.get(`mf-dashboard.${name}`)!(...args);
+  const enabled = () =>
+    context.mock.calls
+      .filter(
+        ({ arguments: args }) =>
+          args[0] === "setContext" && args[1] === "mf-dashboard.canUpdateTypes",
+      )
+      .at(-1)?.arguments[2];
+  assert.equal(enabled(), false);
+  await run("rebuildAllTypes");
+  assert.equal(progress.mock.callCount(), 0);
+  await run("discover");
+  assert.equal(enabled(), false);
+  writeApp("disabled");
+  fs.writeFileSync(
+    writeApp("widget"),
+    "export default {name:'widget', dts:true, exposes:{'.':'./index.ts'}}",
+  );
+  const scan = run("discover");
+  await run("discover");
+  assert.equal(progress.mock.callCount(), 2);
+  assert.deepEqual(progress.mock.calls.at(-1)?.arguments[0].location, { viewId: "mf-dashboard" });
+  await scan;
+  assert.equal(enabled(), true);
+  await run("rebuildAppTypes", { app: "removed" });
+  await run("rebuildAppTypes", { app: "disabled" });
+  assert.equal(progress.mock.callCount(), 2);
+  const build = run("rebuildAppTypes", { app: "widget" });
+  assert.equal(enabled(), false);
+  await run("rebuildAllTypes");
+  await build;
+  assert.equal(progress.mock.callCount(), 3);
+  assert.equal(enabled(), true);
+  t.mock.method(session, "discover", async () => {
+    throw new Error("scan failed");
+  });
+  await assert.rejects(async () => run("discover"), /scan failed/);
+  assert.equal(enabled(), true);
+});
+
+for (const duplicate of [false, true]) {
+  test(`a saved workspace can run its types build with ${duplicate ? "duplicate names" : "only unreadable configs"}`, async (t) => {
+    const { root, writeApp } = fixture(t);
+    const configured: Record<string, { path: string }> = { missing: { path: "missing" } };
+    if (duplicate) {
+      for (const name of ["first", "second", "independent", "disabled"]) {
+        const config = writeApp(name);
+        if (name === "first" || name === "second")
+          fs.writeFileSync(config, "export default {name:'duplicate', dts:false}");
+        if (name === "independent")
+          fs.writeFileSync(
+            config,
+            "export default {name:'independent', dts:true, exposes:{'.':'./index.ts'}}",
+          );
+        configured[name] = { path: name };
+      }
+    }
+    const context = t.mock.method(stub.commands, "executeCommand");
+    const document = t.mock.method(stub.workspace, "openTextDocument");
+    const { session, values, typesView } = await start(
+      t,
+      root,
+      { ...defaultWorkspaceSettings(), "mf-dashboard.apps": configured },
+      undefined,
+      false,
+      duplicate ? "refresh.failed" : "refresh.completed",
+    );
+    assert.deepEqual(session.loaded, []);
+    const availability = () =>
+      context.mock.calls
+        .filter(
+          ({ arguments: args }) =>
+            args[0] === "setContext" && args[1] === "mf-dashboard.canUpdateTypes",
+        )
+        .map(({ arguments: args }) => args[2]);
+    assert.deepEqual(availability(), [false, true]);
+    const run = (name: string, ...args: unknown[]) =>
+      stub.registeredCommands.get(`mf-dashboard.${name}`)!(...args);
+    await run("rebuildAllTypes");
+    await run("openTypesBuildReport");
+    const report = document.mock.calls.at(-1)?.arguments[0] as unknown as { content: string };
+    assert.match(report.content, /missing — Skipped\nCould not read/);
+    if (duplicate) {
+      assert.match(report.content, /duplicate \(first\) — Skipped/);
+      assert.match(report.content, /duplicate \(second\) — Skipped/);
+      assert.match(report.content, /disabled — No types to update/);
+      const independent = typesView
+        .getChildren()
+        .find((row) => "app" in row && row.app === "independent");
+      assert.ok(independent);
+      assert.equal(typesView.getTreeItem(independent).contextValue, "typesBuildApp");
+      const conflict = typesView
+        .getChildren()
+        .filter((row) => "app" in row && row.app === "duplicate");
+      assert.equal(conflict.length, 2);
+      for (const row of conflict) {
+        const item = typesView.getTreeItem(row);
+        assert.equal(item.description, "Skipped");
+        assert.equal(item.contextValue, undefined);
+      }
+      const previousUpdates = availability().length;
+      await run("rebuildAppTypes", independent);
+      assert.deepEqual(availability().slice(previousUpdates), [false, true]);
+    }
+    values.set("mf-dashboard.apps", {});
+    await run("refresh");
+    assert.equal(availability().at(-1), false);
+  });
+}
+
+test("renaming a loaded app to a duplicate keeps both build errors visible", async (t) => {
+  const { root, writeApp } = fixture(t);
+  writeApp("alpha");
+  const beta = writeApp("beta");
+  const { session, typesView } = await start(t, root, {
+    ...defaultWorkspaceSettings(),
+    "mf-dashboard.apps": { alpha: { path: "alpha" }, beta: { path: "beta" } },
+  });
+  fs.writeFileSync(beta, "export default {name:'alpha', dts:false}");
+  const run = (name: string) => stub.registeredCommands.get(`mf-dashboard.${name}`)!();
+  await assert.rejects(async () => run("refresh"), /duplicate federation name/);
+  assert.deepEqual(
+    session.loaded.map(({ name }) => name),
+    ["alpha", "beta"],
+  );
+  await run("rebuildAllTypes");
+  const items = typesView.getChildren().map((row) => typesView.getTreeItem(row));
+  assert.deepEqual(
+    items.map((item) => item.label),
+    ["alpha", "alpha (beta)"],
+  );
+  for (const item of items) {
+    assert.equal(item.description, "Skipped");
+    assert.match(String(item.tooltip), /Duplicate Module Federation name: alpha/);
+  }
+});
+
+for (const queueBuild of [false, true]) {
+  test(`clearing apps preserves the last report ${queueBuild ? "with a build queued" : "while refresh is queued"}`, async (t) => {
+    const { root, writeApp } = fixture(t);
+    writeApp("widget");
+    const context = t.mock.method(stub.commands, "executeCommand");
+    const { session, values, changes, state, typesView } = await start(t, root, {
+      ...defaultWorkspaceSettings(),
+      "mf-dashboard.apps": { widget: { path: "widget" } },
+    });
+    const run = (name: string) => stub.registeredCommands.get(`mf-dashboard.${name}`)!();
+    await run("rebuildAllTypes");
+    const lastReport = state.get("mf-dashboard.lastTypesBuild");
+    assert.ok(lastReport);
+    const refresh = session.refresh.bind(session);
+    let unblock = () => {};
+    const blocked = new Promise<void>((resolve) => {
+      unblock = resolve;
+    });
+    t.mock.method(session, "refresh", async (...args: Parameters<DashboardSession["refresh"]>) => {
+      if (args[0] === "manual") await blocked;
+      await refresh(...args);
+    });
+    const pendingRefresh = run("refresh");
+    const pendingBuild = queueBuild ? run("rebuildAllTypes") : undefined;
+    values.set("mf-dashboard.apps", {});
+    changes.fire({
+      affectsConfiguration: (key) => key === "mf-dashboard.apps",
+    } as ConfigurationChangeEvent);
+    const enabled = context.mock.calls
+      .filter(
+        ({ arguments: args }) =>
+          args[0] === "setContext" && args[1] === "mf-dashboard.canUpdateTypes",
+      )
+      .at(-1)?.arguments[2];
+    const pendingAfterClear = run("rebuildAllTypes");
+    unblock();
+    await Promise.all([pendingRefresh, pendingBuild, pendingAfterClear]);
+    await run("refresh");
+    assert.equal(enabled, false);
+    assert.equal(state.get("mf-dashboard.lastTypesBuild"), lastReport);
+    const [widget] = typesView.getChildren();
+    assert.equal(typesView.getTreeItem(widget).description, "No types to update");
+  });
 }
 
 test("startup diagnostics expose settings writes and preserve all configuration-triggered refreshes", async (t) => {
