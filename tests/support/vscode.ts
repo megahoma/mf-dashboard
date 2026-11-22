@@ -60,6 +60,7 @@ export const languages = {
   createDiagnosticCollection: () => ({ set(_entries: unknown) {}, clear() {}, dispose() {} }),
 };
 export const workspace = {
+  isTrusted: true,
   asRelativePath(file: string) {
     return file;
   },
@@ -95,6 +96,13 @@ export const outputChannels: {
 }[] = [];
 export const registeredCommands = new Map<string, (...args: unknown[]) => unknown>();
 export const window = {
+  async withProgress<T>(
+    _options: { location: { viewId: string }; title: string },
+    task: (progress: { report(message: { message: string }): void }) => Promise<T>,
+  ): Promise<T> {
+    return task({ report() {} });
+  },
+  async showInformationMessage(_message: string) {},
   createOutputChannel(name: string, options: { log: boolean }) {
     const state = {
       name,
@@ -137,7 +145,7 @@ export const commands = {
     registeredCommands.set(name, handler);
     return { dispose: () => registeredCommands.delete(name) };
   },
-  async executeCommand(_command: string, _uri: Uri) {},
+  async executeCommand(_command: string, ..._args: unknown[]) {},
 };
 
 export class Range {

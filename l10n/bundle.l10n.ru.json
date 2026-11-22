@@ -62,5 +62,7 @@
   "types": "типы",
   "zip": "zip",
   "not in workspace": "нет в воркспейсе",
-  "Reference: dependencies are shown at the first occurrence of this app.": "Ссылка: зависимости показаны при первом появлении этого приложения."
+  "Reference: dependencies are shown at the first occurrence of this app.": "Ссылка: зависимости показаны при первом появлении этого приложения.",
+  "Finding microfrontends…": "Ищем микрофронты…",
+  "Not built yet": "Ещё не собирался"
 }

@@ -1,6 +1,7 @@
 import {
   appProbeId,
   appsByName,
+  rootApps,
   externalManifestId,
   linkProbeId,
   manifestTooltipLines,
@@ -41,7 +42,9 @@ function hostLabel(url: string): string {
 export function dashboardNodes(view: DashboardView): DashboardNode[] {
   const byName = appsByName(view.loaded);
   const expanded = new Set<string>();
-  const roots = rootApps(view, byName).map((item) => appNode(view, item, byName, expanded));
+  const roots = rootApps(view.loaded, byName, view.structure).map((item) =>
+    appNode(view, item, byName, expanded),
+  );
   for (const url of view.extraUrls) roots.push(extraNode(view, url));
   return roots;
 }
@@ -79,37 +82,6 @@ export function dashboardProblemDrafts(
     if (draft) drafts.push(draft);
   }
   return drafts;
-}
-
-function rootApps(view: DashboardView, byName: Map<string, LocalApp>): LocalApp[] {
-  const sorted = [...view.loaded].sort((left, right) =>
-    left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
-  );
-  if (view.structure === "flat") return sorted;
-  const consumed = new Set<string>();
-  for (const app of view.loaded) {
-    for (const remote of app.remotes) {
-      if (byName.has(remote.name)) consumed.add(remote.name);
-    }
-  }
-  const entries = sorted.filter((app) => !consumed.has(app.name));
-  const reached = new Set<string>();
-  const visit = (app: LocalApp): void => {
-    if (reached.has(app.name)) return;
-    reached.add(app.name);
-    for (const remote of app.remotes) {
-      const child = byName.get(remote.name);
-      if (child) visit(child);
-    }
-  };
-  for (const app of entries) visit(app);
-  for (const app of sorted) {
-    if (!reached.has(app.name)) {
-      entries.push(app);
-      visit(app);
-    }
-  }
-  return entries;
 }
 
 function appNode(

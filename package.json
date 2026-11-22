@@ -89,7 +89,13 @@
         "command": "mf-dashboard.rebuildAllTypes",
         "title": "%command.rebuildAllTypes%",
         "icon": "$(package)",
-        "enablement": "isWorkspaceTrusted"
+        "enablement": "isWorkspaceTrusted && mf-dashboard.canUpdateTypes"
+      },
+      {
+        "command": "mf-dashboard.rebuildAppTypes",
+        "title": "%command.rebuildAppTypes%",
+        "icon": "$(tools)",
+        "enablement": "isWorkspaceTrusted && mf-dashboard.canUpdateTypes"
       },
       {
         "command": "mf-dashboard.refetchTypes",
@@ -130,6 +136,16 @@
       {
         "command": "mf-dashboard.showLogs",
         "title": "%command.showLogs%"
+      },
+      {
+        "command": "mf-dashboard.typesUseFlat",
+        "title": "%command.useFlat%",
+        "icon": "$(list-flat)"
+      },
+      {
+        "command": "mf-dashboard.typesUseTree",
+        "title": "%command.useTree%",
+        "icon": "$(list-tree)"
       }
     ],
     "menus": {
@@ -165,6 +181,18 @@
         {
           "command": "mf-dashboard.openManifest",
           "when": "false"
+        },
+        {
+          "command": "mf-dashboard.typesUseFlat",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.typesUseTree",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.rebuildAppTypes",
+          "when": "false"
         }
       ],
       "view/title": [
@@ -185,18 +213,28 @@
         },
         {
           "command": "mf-dashboard.rebuildAllTypes",
-          "when": "view == mf-dashboard",
+          "when": "view == mf-dashboard && mf-dashboard.canUpdateTypes",
           "group": "navigation@2"
         },
         {
           "command": "mf-dashboard.rebuildAllTypes",
-          "when": "view == mf-dashboard.typesBuild",
+          "when": "view == mf-dashboard.typesBuild && mf-dashboard.canUpdateTypes",
           "group": "navigation@1"
         },
         {
           "command": "mf-dashboard.openTypesBuildReport",
           "when": "view == mf-dashboard.typesBuild",
           "group": "navigation@2"
+        },
+        {
+          "command": "mf-dashboard.typesUseFlat",
+          "when": "view == mf-dashboard.typesBuild && config.mf-dashboard.types.structure != flat",
+          "group": "navigation@0"
+        },
+        {
+          "command": "mf-dashboard.typesUseTree",
+          "when": "view == mf-dashboard.typesBuild && config.mf-dashboard.types.structure == flat",
+          "group": "navigation@0"
         }
       ],
       "view/item/context": [
@@ -239,6 +277,11 @@
           "command": "mf-dashboard.openManifest",
           "when": "view == mf-dashboard && viewItem =~ /(^| )manifest($| )/",
           "group": "navigation"
+        },
+        {
+          "command": "mf-dashboard.rebuildAppTypes",
+          "when": "view == mf-dashboard.typesBuild && viewItem == typesBuildApp",
+          "group": "inline"
         }
       ]
     },
@@ -366,6 +409,15 @@
               }
             }
           }
+        },
+        "mf-dashboard.types.structure": {
+          "type": "string",
+          "enum": [
+            "tree",
+            "flat"
+          ],
+          "default": "tree",
+          "description": "%configuration.types.structure%"
         }
       }
     }

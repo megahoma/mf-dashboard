@@ -11,12 +11,11 @@ import type { LogContext } from "../../shared/models/logging.ts";
 import type { MfDashboardProvider } from "../../widgets/mf-dashboard-tree/index.ts";
 import { CONFIRMATIONS } from "../config/extension.ts";
 
-export function setStructure(structure: "flat" | "tree"): Thenable<void> {
-  return dashboardConfiguration().update(
-    "structure",
-    structure,
-    vscode.ConfigurationTarget.Workspace,
-  );
+export function setStructure(
+  structure: "flat" | "tree",
+  key: "structure" | "types.structure" = "structure",
+): Thenable<void> {
+  return dashboardConfiguration().update(key, structure, vscode.ConfigurationTarget.Workspace);
 }
 
 export async function ensureWorkspaceSettings(

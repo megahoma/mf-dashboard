@@ -10,7 +10,7 @@ import test from "node:test";
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
   scripts?: Record<string, string>;
   contributes: {
-    commands?: { command: string; title: string; icon?: string }[];
+    commands?: { command: string; title: string; icon?: string; enablement?: string }[];
     viewsWelcome?: { view: string; contents: string }[];
     menus?: {
       commandPalette?: { command: string; when?: string }[];
@@ -72,6 +72,7 @@ test("commands requiring a row stay out of the command palette", () => {
     "openManifest",
     "start",
     "rebuildTypes",
+    "rebuildAppTypes",
     "refetchTypes",
   ]) {
     assert.equal(
@@ -119,12 +120,40 @@ test("refresh and the localized workspace types update are available in the view
     },
   );
   const update = title.find((item) => item.command === "mf-dashboard.rebuildAllTypes");
-  assert.equal(update?.when, "view == mf-dashboard");
+  assert.equal(update?.when, "view == mf-dashboard && mf-dashboard.canUpdateTypes");
   assert.match(update?.group ?? "", /^navigation/);
   const command = pkg.contributes.commands?.find((item) => item.command === update?.command);
   assert.equal(command?.title, "%command.rebuildAllTypes%");
+  assert.equal(command?.enablement, "isWorkspaceTrusted && mf-dashboard.canUpdateTypes");
   assert.equal(en["command.rebuildAllTypes"], "Update all @mf-types");
   assert.equal(ru["command.rebuildAllTypes"], "Обновить все @mf-types");
+});
+
+test("mf-types offers a layout switch and a rebuild action on app rows", () => {
+  const menus = pkg.contributes.menus!;
+  for (const [suffix, operator] of [
+    ["Flat", "!="],
+    ["Tree", "=="],
+  ]) {
+    assert.equal(
+      menus["view/title"]?.find((entry) => entry.command === `mf-dashboard.typesUse${suffix}`)
+        ?.when,
+      `view == mf-dashboard.typesBuild && config.mf-dashboard.types.structure ${operator} flat`,
+    );
+  }
+  const action = "mf-dashboard.rebuildAppTypes";
+  assert.equal(
+    menus["view/item/context"]?.find((entry) => entry.command === action)?.when,
+    "view == mf-dashboard.typesBuild && viewItem == typesBuildApp",
+  );
+  assert.equal(
+    pkg.contributes.commands?.find((entry) => entry.command === action)?.enablement,
+    "isWorkspaceTrusted && mf-dashboard.canUpdateTypes",
+  );
+  for (const bundle of [en, ru]) {
+    assert.equal(bundle["view.typesBuild"], "mf-types");
+    assert.doesNotMatch(bundle["viewsWelcome.typesBuild"], /command:mf-dashboard.rebuildAllTypes/);
+  }
 });
 
 test("a package and a launch compile the extension before the host starts", () => {

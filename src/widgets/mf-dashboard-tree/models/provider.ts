@@ -25,6 +25,7 @@ import {
   rebuildAllTypes,
   rebuildTypes,
   type RebuildAllReport,
+  type RebuildAppStatus,
 } from "../../../features/rebuild-types/index.ts";
 import { installRemoteTypes } from "../../../features/refetch-types/index.ts";
 import { icons, type DashboardTerms } from "../../../shared/config/index.ts";
@@ -507,18 +508,37 @@ export class MfDashboardProvider
   rebuildAll(
     progress: (name: string, index: number, total: number) => void,
     status?: Parameters<typeof rebuildAllTypes>[0]["status"],
-  ): Promise<RebuildAllReport> {
+    target?: Pick<RebuildAppStatus, "app" | "settingsKey">,
+    onStart?: () => void,
+  ): Promise<RebuildAllReport | undefined> {
     return this.enqueue("rebuild-all", async (log) => {
       const settings = readWorkspaceSettings();
-      const { apps, skipped, zipPaths } = await this.knownAppsWorker.request(
-        "rebuild",
-        { roots: workspaceRoots(), settings },
-        log,
-      );
+      const roots = workspaceRoots();
+      if (!roots.length || !Object.keys(settings.apps ?? {}).length) return;
+      onStart?.();
+      const {
+        apps,
+        skipped: configIssues,
+        zipPaths,
+      } = await this.knownAppsWorker.request("rebuild", { roots, settings }, log);
+      const key = target?.settingsKey ?? target?.app;
+      const skipped = target ? configIssues.filter((issue) => issue.app === key) : configIssues;
+      if (
+        target &&
+        !apps.some((app) => app.name === target.app && (app.settingsKey ?? app.name) === key)
+      ) {
+        const issue = {
+          ...(skipped[0] ?? { reason: "Microfrontend configuration changed" }),
+          ...target,
+        };
+        status?.([{ ...issue, status: "skipped" }]);
+        return { rebuilt: [], current: [], installed: [], failed: [], skipped: [issue] };
+      }
       status?.(skipped.map((issue) => ({ ...issue, status: "skipped" })));
       log.event("info", "types.rebuild.all.started", { apps: apps.length });
       const report = await rebuildAllTypes({
         apps,
+        target: target?.app,
         confirmations: this.confirmations,
         envMode: settings.envMode,
         rebuildCommand: settings.rebuildCommand,

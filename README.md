@@ -42,7 +42,7 @@ Stopped links also show their `@mf-types` state beside the port status. Missing 
 
 Disabling a producer's `generateTypes` disables source-to-archive freshness checks and rebuilding. Missing, changed and verified consumer types are still reported. Fetch works while the consumer is stopped. Start, Rebuild and Fetch belong to a dashboard row and are available from that row, rather than the command palette.
 
-**Update all @mf-types** opens the **mt-types** view. It shows each project's progress and results. Select an error to open its source, or use **Show @mf-types Report** to open the latest report for this workspace. TypeScript and configuration errors with a known file appear in Problems. Independent projects continue when a build fails.
+**Update all @mf-types** opens the **mf-types** view. After discovery, switch between the dependency tree and the flat list in its toolbar. Use the rebuild action on a microfrontend’s row to rebuild it and prepare its required dependencies. Each row shows the project's progress and result. Select an error to open its source, or use **Show @mf-types Report** to open the latest report for this workspace. TypeScript and configuration errors with a known file appear in Problems. Independent projects continue when a build fails.
 
 URL issues and unreachable external manifests appear as warnings in Problems. Types issues appear as information; listening, stopped, and reachable rows do not add diagnostics.
 
@@ -104,6 +104,7 @@ All settings use the `mf-dashboard.*` namespace.
 | ------------------------------------ | ------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | `mf-dashboard.envMode`               | `development` | Mode for `.env.<mode>` and `.env.<mode>.local`.                                                                            |
 | `mf-dashboard.structure`             | `tree`        | `tree` or `flat`; also controlled by the view-title button.                                                                |
+| `mf-dashboard.types.structure`       | `tree`        | Layout of the mf-types view. Its toolbar switches between `tree` and `flat`.                                               |
 | `mf-dashboard.language`              | `auto`        | Tree labels and details: `auto`, `en`, or `ru`. Command titles follow VS Code.                                             |
 | `mf-dashboard.ignorePaths`           | `[]`          | Additional scan exclusions. A name matches at any depth; a relative path excludes that subtree. Saved apps are still read. |
 | `mf-dashboard.extraManifestUrls`     | `[]`          | External manifest URLs shown as root rows. Only valid HTTP(S) URLs are requested.                                          |

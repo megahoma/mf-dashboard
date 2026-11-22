@@ -6,6 +6,7 @@ export type { ChainNode, PlannedStep } from "./models/plan.ts";
 export { hashManifestZip, manifestZipUrl } from "../../entities/microfrontend/index.ts";
 export type { ManifestZipRequest } from "../../entities/microfrontend/index.ts";
 export { rebuildAllTypes } from "./lib/all.ts";
+export { workspaceTypesPlan } from "./lib/workspace-plan.ts";
 export { collectProducerEvidence, collectProducerEvidenceAsync } from "./lib/evidence.ts";
 export { rebuildTypes } from "./lib/workflow.ts";
 export type { RebuildAllReport, RebuildAppStatus } from "./models/all.ts";
