@@ -5,6 +5,7 @@ import type { SourceProblem } from "../../../shared/models/source-problem.ts";
 
 export type RebuildAllContext = {
   apps: readonly LocalApp[];
+  report?: RebuildAllReport;
   target?: string;
   confirmations: ConfirmationStore;
   envMode: string;
@@ -54,3 +55,7 @@ export type RebuildAllReport = {
   skipped: RebuildIssue[];
   failed: RebuildIssue[];
 };
+
+export function createRebuildAllReport(): RebuildAllReport {
+  return { rebuilt: [], current: [], installed: [], skipped: [], failed: [] };
+}

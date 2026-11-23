@@ -19,6 +19,7 @@ import {
 import type {
   DtsApi,
   GenerationInput,
+  MeasureGenerationPhase,
   MfOptions,
   RsbuildConfigExport,
 } from "../models/generate.ts";
@@ -118,12 +119,12 @@ async function prepare(input: GenerationInput) {
     mfRequire,
     remote: dtsManagerOptions?.remote,
     compilerCwd: configuredDts?.cwd,
-    generate() {
+    generate(measure: MeasureGenerationPhase) {
       return captureCompilerProblems(async () => {
         const before = zipRevision(zipPath);
         // Same API as `mf dts` in @module-federation/cli@2.9.1, including afterGenerate.
-        await dts.generateTypesAPI({ dtsManagerOptions });
-        return generatedZip(zipPath, before, input.appDir);
+        await measure("compileMs", () => dts.generateTypesAPI({ dtsManagerOptions }));
+        return measure("zipMs", () => generatedZip(zipPath, before, input.appDir));
       });
     },
   };

@@ -85,9 +85,31 @@ export type LocalGenerationInput = GenerationInput & {
   confirmed?: LocalGeneratedZip & { inputsFingerprint: string };
 };
 
+export type GenerationPhaseTimings = {
+  prepareMs: number;
+  inputsMs: number;
+  compileMs: number;
+  zipMs: number;
+};
+
+export function emptyGenerationPhaseTimings(): GenerationPhaseTimings {
+  return { prepareMs: 0, inputsMs: 0, compileMs: 0, zipMs: 0 };
+}
+
+export type MeasureGenerationPhase = <T>(
+  phase: keyof GenerationPhaseTimings,
+  work: () => Promise<T>,
+) => Promise<T>;
+
+export type GenerationTimings = GenerationPhaseTimings & {
+  queueMs: number;
+  processMs: number;
+};
+
 export type LocalGenerationResult = LocalGeneratedZip & {
   inputsFingerprint: string | null;
   current: boolean;
+  timings?: GenerationTimings;
 };
 
 export type GenerationRequest = GenerationInput | LocalGenerationInput;
@@ -97,10 +119,19 @@ export type GenerationResult = {
   port: number | null;
 };
 
-export type GenerationReply =
+export type GenerationProgress = {
+  timings: GenerationPhaseTimings;
+  activePhase?: keyof GenerationPhaseTimings;
+};
+
+export type GenerationReply = (
   | { result: GenerationResult }
   | {
       error: string;
       details?: DiagnosticDetails;
       problems?: readonly SourceProblem[];
-    };
+    }
+) & { kind: "mf-dashboard.generation-reply"; timings: GenerationPhaseTimings };
+
+export type GenerationMessage =
+  GenerationReply | ({ kind: "mf-dashboard.generation-progress" } & GenerationProgress);

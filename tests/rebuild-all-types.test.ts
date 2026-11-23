@@ -32,11 +32,12 @@ import {
   generateLocalFederatedTypes,
 } from "../src/features/rebuild-types/lib/generate.mts";
 import type {
+  GenerationTimings,
   LocalGeneratedZip,
   LocalGenerationInput,
 } from "../src/features/rebuild-types/models/generate.ts";
 import { installRemoteTypes } from "../src/features/refetch-types/lib/remote.ts";
-import { safeError } from "../src/shared/lib/logging.ts";
+import { createLogger, safeError } from "../src/shared/lib/logging.ts";
 import { noLog } from "../src/shared/config/logging.ts";
 import { loadKnownApps } from "../src/widgets/mf-dashboard-tree/lib/known-apps.ts";
 import { createAppParseCache } from "../src/widgets/mf-dashboard-tree/lib/app-parse-cache.ts";
@@ -1689,6 +1690,8 @@ test("duplicate federation names skip both configurations and their local consum
 });
 
 test("bulk rebuild reports compiler locations, isolates config errors and keeps independent apps running", async (t) => {
+  const messages: string[] = [];
+  const log = createLogger({ enabled: () => true, write: (_level, text) => messages.push(text) });
   const f = fixture(t);
   const root = path.dirname(f.app("healthy", 4601).folder);
   const { folder: broken } = f.app("broken", 4602);
@@ -1750,11 +1753,18 @@ fs.writeFileSync('dist/@mf-types.zip', Buffer.concat([Buffer.from([0x50,0x4b,3,4
   const status = new Map<string, string>();
   const report = await rebuildAllTypes(
     f.context(apps, {
+      log,
       status: (updates) => updates.forEach(({ app, status: next }) => status.set(app, next)),
     }),
   );
   const compiler = report.failed.find(({ app }) => app === "broken");
   assert.equal(compiler?.reason, "SDK dropped compiler output");
+  assert.match(
+    messages.find(
+      (line) => line.startsWith("types.rebuild.all.app") && line.includes("app=broken "),
+    ) ?? "",
+    /status=failed.*prepareGenerationMs=\d+ inputsMs=\d+ compileMs=[1-9]\d* zipMs=0 queueMs=\d+ processMs=\d+/,
+  );
   assert.deepEqual(compiler?.problems, [
     {
       file: path.join(broken, "index.ts"),
@@ -2711,7 +2721,9 @@ test("bulk generation uses the selected script environment and rebuilds when it 
   assert.equal(process.env[envKey], original);
 });
 
-test("a timed-out generator is stopped before the rebuild continues", async (t) => {
+test("a timed-out generator ignores unrelated IPC messages and stops before the rebuild continues", async (t) => {
+  const messages: string[] = [];
+  const log = createLogger({ enabled: () => true, write: (_level, text) => messages.push(text) });
   const f = fixture(t);
   const stalled = f.app("catalog", 4501);
   const independent = f.app("reports", 4502);
@@ -2727,6 +2739,14 @@ test("a timed-out generator is stopped before the rebuild continues", async (t) 
       app === stalled
         ? `afterGenerate() {
              require("node:fs").writeFileSync("generator-pid", String(process.pid));
+             const unrelated = { prepareMs: 999999, inputsMs: 999999, compileMs: 999999, zipMs: 999999 };
+             process.send({ progress: true, timings: unrelated });
+             process.send({ kind: "mf-dashboard.generation-progress", timings: {
+               ...unrelated, prepareMs: "unexpected-config-text",
+             } });
+             process.send({ kind: "mf-dashboard.generation-progress", timings: unrelated,
+               activePhase: "unknown",
+             });
              return new Promise(resolve => setTimeout(resolve, 5000));
            }`
         : "";
@@ -2754,6 +2774,7 @@ fs.writeFileSync("dist/@mf-types.zip", Buffer.from([0x50, 0x4b, 3, 4, 1]));
 
   const report = await rebuildAllTypes(
     f.context([consumer, independent, stalled], {
+      log,
       progress(name) {
         if (name === independent.name) {
           const pid = Number(fs.readFileSync(pidFile, "utf8"));
@@ -2763,8 +2784,12 @@ fs.writeFileSync("dist/@mf-types.zip", Buffer.from([0x50, 0x4b, 3, 4, 1]));
     }),
     {
       ...unused,
-      generateLocalFederatedTypes: (input) =>
-        generateLocalFederatedTypes(input, input.name === stalled.name ? timeoutMs : undefined),
+      generateLocalFederatedTypes: (input, _timeout, onFailureTimings) =>
+        generateLocalFederatedTypes(
+          input,
+          input.name === stalled.name ? timeoutMs : undefined,
+          onFailureTimings,
+        ),
     },
   );
   assert.deepEqual(report.failed, [
@@ -2776,6 +2801,48 @@ fs.writeFileSync("dist/@mf-types.zip", Buffer.from([0x50, 0x4b, 3, 4, 1]));
   assert.deepEqual(report.installed, []);
   assert.deepEqual(report.rebuilt, ["reports"]);
   assert.equal(f.confirmations.generation(stalled.name), null);
+  const failure =
+    messages.find(
+      (line) => line.startsWith("types.rebuild.all.app") && line.includes("app=catalog "),
+    ) ?? "";
+  assert.match(
+    failure,
+    /status=failed.*prepareGenerationMs=\d+ inputsMs=\d+ compileMs=[1-9]\d* zipMs=0 queueMs=\d+ processMs=\d+/,
+  );
+  assert.doesNotMatch(failure, /999999|unexpected-config-text/);
+});
+
+test("phase timings stay bounded when a timed-out generator's config replaces Date.now", async (t) => {
+  const { name, folder } = fixture(t).app("catalog", 4501);
+  const configFile = path.join(folder, "rsbuild.config.cjs");
+  fs.writeFileSync(
+    configFile,
+    `
+const { pluginModuleFederation } = require("@module-federation/rsbuild-plugin");
+Date.now = () => 0;
+module.exports = { plugins: [pluginModuleFederation({
+  name: "catalog", exposes: { "./index": "./index.ts" }, dts: true
+})] };
+`,
+  );
+  installGeneratorFixture(folder, "await new Promise(resolve => setTimeout(resolve, 5000));");
+  const timeoutMs = 1_500;
+  const captured: GenerationTimings[] = [];
+  await assert.rejects(
+    generateLocalFederatedTypes(
+      { appDir: folder, name, configFile, envMode: "development", workspaceFingerprint: "fixture" },
+      timeoutMs,
+      (timings) => captured.push(timings),
+    ),
+    new RegExp(`Type generation timed out after ${timeoutMs} ms`),
+  );
+  assert.equal(captured.length, 1);
+  const [timings] = captured;
+  assert.ok(
+    timings.compileMs > 0 && timings.compileMs <= timings.processMs,
+    JSON.stringify(timings),
+  );
+  assert.equal(timings.zipMs, 0);
 });
 
 test("partial DTS options propagate SDK generation errors and keep explicit overrides", async (t) => {
@@ -3040,6 +3107,8 @@ fs.writeFileSync("dist/@mf-types.zip", Buffer.concat([
 });
 
 test("renaming an expose invalidates the archive even when the compiler files match", async (t) => {
+  const messages: string[] = [];
+  const log = createLogger({ enabled: () => true, write: (_level, text) => messages.push(text) });
   const f = fixture(t);
   const { folder } = f.app("catalog", 4501);
   const exposes = path.join(folder, "exposes.json");
@@ -3072,9 +3141,12 @@ fs.writeFileSync("dist/@mf-types.zip", Buffer.concat([
   );
   const app = readAppFolder(folder, "development", "catalog");
   assert.ok(app?.hasExposes);
-  const context = f.context([app]);
+  const context = f.context([app], { log });
   assert.deepEqual((await rebuildAllTypes(context)).rebuilt, ["catalog"]);
   assert.deepEqual((await rebuildAllTypes(context)).current, ["catalog"]);
+  const phases = messages.filter((line) => line.startsWith("types.rebuild.all.app"));
+  assert.match(phases[0], /status=rebuilt.*compileMs=\d+ zipMs=\d+/);
+  assert.match(phases[1], /status=current.*compileMs=0 zipMs=\d+/);
   setAlias("./second");
   assert.deepEqual((await rebuildAllTypes(context)).rebuilt, ["catalog"]);
   assert.match(fs.readFileSync(path.join(folder, "dist", "@mf-types.zip"), "utf8"), /\.\/second/);
@@ -3150,4 +3222,70 @@ test("the ZIP path follows a statically resolved bundler output", () => {
     {},
   );
   assert.equal(dynamic?.generatedZipPath, null);
+});
+
+test("Rebuild All logs phase timings for each microfrontend", async (t) => {
+  const messages: string[] = [];
+  const log = createLogger({ enabled: () => true, write: (_level, text) => messages.push(text) });
+  const f = fixture(t);
+  const app = f.app("catalog", 4701);
+  fs.writeFileSync(path.join(app.folder, "tsconfig.json"), '{"files":["index.ts"]}');
+  app.tsconfig = path.join(app.folder, "tsconfig.json");
+  const timings = {
+    prepareMs: 11,
+    inputsMs: 22,
+    compileMs: 33,
+    zipMs: 7,
+    queueMs: 4,
+    processMs: 55,
+  };
+  const report = await rebuildAllTypes(
+    { ...f.context([app]), log, fingerprintInputs: async () => "fixture" },
+    {
+      ...unused,
+      async generateLocalFederatedTypes() {
+        return {
+          ...writeZip(path.join(app.folder, "dist", "@mf-types.zip"), "types"),
+          inputsFingerprint: "fixture",
+          current: false,
+          timings,
+        };
+      },
+    },
+  );
+  assert.deepEqual(report.rebuilt, ["catalog"]);
+  const line = messages.find((message) => message.startsWith("types.rebuild.all.app")) ?? "";
+  assert.match(line, /app=catalog status=rebuilt/);
+  assert.match(line, /durationMs=\d+/);
+  assert.match(
+    line,
+    /installLocalMs=\d+ installRemoteMs=\d+ prepareMs=\d+ generateMs=\d+ verifyMs=\d+/,
+  );
+  assert.match(
+    line,
+    /prepareGenerationMs=11 inputsMs=22 compileMs=33 zipMs=7 queueMs=4 processMs=55/,
+  );
+  const plan = messages.find((message) => message.startsWith("types.rebuild.all.plan")) ?? "";
+  assert.match(plan, /apps=1/);
+  assert.match(plan, /durationMs=\d+/);
+
+  messages.length = 0;
+  const failed = await rebuildAllTypes(
+    { ...f.context([app]), log, fingerprintInputs: async () => "fixture" },
+    {
+      ...unused,
+      async generateLocalFederatedTypes() {
+        throw new Error("generation failed");
+      },
+    },
+  );
+  assert.equal(failed.rebuilt.length, 0);
+  assert.equal(failed.failed.length, 1);
+  const failure = messages.find((message) => message.startsWith("types.rebuild.all.app"));
+  assert.match(failure ?? "", /app=catalog status=failed/);
+  assert.match(failure ?? "", /generateMs=\d+/);
+  assert.match(
+    messages.find((message) => message.startsWith("types.rebuild.all.failed")) ?? "",
+    /app=catalog/,
+  );
 });
