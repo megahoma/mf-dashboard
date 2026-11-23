@@ -5,19 +5,36 @@ import type {
   LocalGeneratedZip,
   LocalGenerationInput,
   LocalGenerationResult,
+  MeasureGenerationPhase,
 } from "../models/generate.ts";
 import { compilerInputsFingerprint, listCompilerInputs } from "./compiler-inputs.ts";
 import { readTypesZip } from "./generated-zip.ts";
 import { prepareGeneration } from "./load-project.ts";
 
-export async function generateTypesOnDisk(input: GenerationRequest): Promise<GenerationResult> {
-  const { mfRequire, remote, compilerCwd, zipPath, port, generate } =
-    await prepareGeneration(input);
+export async function generateTypesOnDisk(
+  input: GenerationRequest,
+  measure: MeasureGenerationPhase,
+): Promise<GenerationResult> {
+  const { mfRequire, remote, compilerCwd, zipPath, port, generate } = await measure(
+    "prepareMs",
+    () => prepareGeneration(input),
+  );
   if (!("workspaceFingerprint" in input)) {
-    return { archive: { ...(await generate()), inputsFingerprint: null, current: false }, port };
+    return {
+      archive: { ...(await generate(measure)), inputsFingerprint: null, current: false },
+      port,
+    };
   }
-  const inputs = await listCompilerInputs(mfRequire, remote, input.appDir, compilerCwd);
-  const archive = await rebuildLocalArchive(input, zipPath, inputs, generate);
+  const inputs = await measure("inputsMs", () =>
+    listCompilerInputs(mfRequire, remote, input.appDir, compilerCwd),
+  );
+  const archive = await rebuildLocalArchive(
+    input,
+    zipPath,
+    inputs,
+    () => generate(measure),
+    measure,
+  );
   return { archive, port };
 }
 
@@ -26,9 +43,10 @@ export async function rebuildLocalArchive(
   zipPath: string,
   inputs: CompilerInputs | null,
   generate: () => Promise<LocalGeneratedZip>,
+  measure: MeasureGenerationPhase = (_phase, work) => work(),
 ): Promise<LocalGenerationResult> {
   const fingerprint = inputs
-    ? await compilerInputsFingerprint(input.workspaceFingerprint, inputs)
+    ? await measure("inputsMs", () => compilerInputsFingerprint(input.workspaceFingerprint, inputs))
     : null;
   const { confirmed } = input;
   if (
@@ -36,14 +54,16 @@ export async function rebuildLocalArchive(
     confirmed?.inputsFingerprint === fingerprint &&
     confirmed.zipPath === zipPath
   ) {
-    const zip = await readTypesZip(zipPath);
+    const zip = await measure("zipMs", () => readTypesZip(zipPath));
     if (zip && zip.zipHash === confirmed.zipHash)
       return { ...zip, inputsFingerprint: fingerprint, current: true };
   }
   const zip = await generate();
   if (
     inputs &&
-    (await compilerInputsFingerprint(input.workspaceFingerprint, inputs)) !== fingerprint
+    (await measure("inputsMs", () =>
+      compilerInputsFingerprint(input.workspaceFingerprint, inputs),
+    )) !== fingerprint
   )
     throw new Error("Compiler inputs changed during type generation");
   return { ...zip, inputsFingerprint: fingerprint, current: false };

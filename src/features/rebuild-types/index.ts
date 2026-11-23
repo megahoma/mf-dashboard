@@ -10,5 +10,6 @@ export { workspaceTypesPlan } from "./lib/workspace-plan.ts";
 export { collectProducerEvidence, collectProducerEvidenceAsync } from "./lib/evidence.ts";
 export { rebuildTypes } from "./lib/workflow.ts";
 export type { RebuildAllReport, RebuildAppStatus } from "./models/all.ts";
+export { createRebuildAllReport } from "./models/all.ts";
 export type { ProducerSnapshot } from "./models/evidence.ts";
 export { inputsFingerprint, rebuildConfigFingerprint } from "./lib/inputs-fingerprint.ts";

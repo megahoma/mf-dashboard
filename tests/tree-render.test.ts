@@ -7,9 +7,11 @@ import os from "node:os";
 import path from "node:path";
 import { developmentFederationConfig, localApp } from "./support/app.ts";
 import { putAppResult } from "../src/entities/microfrontend/index.ts";
+import { shellQuote } from "../src/shared/lib/shell.ts";
 import * as vscode from "./support/vscode.ts";
 import { terms, type DashboardTerms } from "../src/shared/config/index.ts";
 import { DashboardDetails } from "../src/widgets/mf-dashboard-tree/models/details.ts";
+import { KnownAppsWorker } from "../src/widgets/mf-dashboard-tree/lib/known-apps-worker.mts";
 import type { DashboardNode } from "../src/widgets/mf-dashboard-tree/models/presentation.ts";
 import type { TreeView, TreeViewSelectionChangeEvent, WebviewView } from "vscode";
 
@@ -31,14 +33,17 @@ const workspace = vscode.workspace as typeof vscode.workspace & {
 
 type Provider = InstanceType<typeof MfDashboardProvider>;
 
-function providerFor(events?: { level: string; text: string }[]): Provider {
+function providerFor(
+  events?: { level: string; text: string }[],
+  persist?: () => void | PromiseLike<void>,
+): Provider {
   const log = events
     ? createLogger({
         enabled: (level) => level === "info" || level === "warn" || level === "error",
         write: (level, text) => events.push({ level, text }),
       })
     : undefined;
-  const provider = new MfDashboardProvider(() => terms, undefined, undefined, log);
+  const provider = new MfDashboardProvider(() => terms, undefined, persist, log);
   return provider;
 }
 
@@ -201,7 +206,11 @@ test("a rejected refresh does not prevent subsequent refreshes", async (t) => {
   await provider.refresh();
 });
 
-function useWorkspace(root: string, apps: Record<string, { path: string }>): () => void {
+function useWorkspace(
+  root: string,
+  apps: Record<string, { path: string; typesZipPath?: string }>,
+  rebuildCommand?: string,
+): () => void {
   const previous = {
     getConfiguration: vscode.workspace.getConfiguration,
     folders: workspace.workspaceFolders,
@@ -218,6 +227,7 @@ function useWorkspace(root: string, apps: Record<string, { path: string }>): () 
     get(key: string) {
       if (key === "structure") return "tree";
       if (key === "envMode") return "development";
+      if (key === "commands.rebuildTypes") return rebuildCommand;
       return undefined;
     },
   })) as unknown as typeof vscode.workspace.getConfiguration;
@@ -243,7 +253,8 @@ test("the dashboard and Rebuild All accept the same unambiguous renamed app", as
     archive: { path: "gallery" },
     gallery: { path: "missing" },
   });
-  const provider = providerFor();
+  const events: { level: string; text: string }[] = [];
+  const provider = providerFor(events);
   t.after(() => {
     restore();
     provider.dispose();
@@ -259,7 +270,155 @@ test("the dashboard and Rebuild All accept the same unambiguous renamed app", as
   assert.deepEqual(report?.skipped, [
     { app: "gallery", reason: "Could not read the microfrontend config" },
   ]);
+  const text = (event: string) => events.find((entry) => entry.text.startsWith(event))?.text ?? "";
+  assert.match(text("types.rebuild.all.resolve"), /durationMs=\d+/);
+  assert.match(text("types.rebuild.all.completed"), /durationMs=\d+/);
+  assert.match(text("types.rebuild.all.completed"), /skipped=1/);
 });
+
+test("Rebuild All logs a timed resolution failure and completes once", async (t) => {
+  const restore = useWorkspace(os.tmpdir(), { gallery: { path: "." } });
+  const events: { level: string; text: string }[] = [];
+  const provider = providerFor(events);
+  t.after(() => {
+    provider.dispose();
+    restore();
+  });
+  t.mock.method(KnownAppsWorker.prototype, "request", async () => {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    throw new Error("worker unavailable");
+  });
+  await assert.rejects(
+    provider.rebuildAll(() => {}),
+    /worker unavailable/,
+  );
+  const resolution = events.find(({ text }) => text.startsWith("types.rebuild.all.resolve"));
+  assert.equal(resolution?.level, "error");
+  assert.match(resolution?.text ?? "", /reason=resolve-failed.*durationMs=\d+/);
+  const completed = events.filter(({ text }) => text.startsWith("types.rebuild.all.completed"));
+  assert.equal(completed.length, 1);
+  assert.match(completed[0].text, /failed=0 reason=resolve-failed resolveMs=\d+/);
+});
+
+function writeTypesBuildFixture(appDir: string, root = appDir): string {
+  fs.writeFileSync(path.join(appDir, "index.ts"), "export const value = 1;");
+  fs.writeFileSync(
+    path.join(appDir, "rebuild.cjs"),
+    "require('node:fs').writeFileSync('types.zip', Buffer.from([0x50, 0x4b, 3, 4, 1]));",
+  );
+  const decoder = path.join(root, "node_modules", "adm-zip");
+  fs.mkdirSync(decoder, { recursive: true });
+  fs.writeFileSync(
+    path.join(decoder, "index.js"),
+    `
+      module.exports = class {
+        getEntries() { return [{ entryName: "index.d.ts" }]; }
+        extractAllTo(dir) { require("node:fs").writeFileSync(require("node:path").join(dir, "index.d.ts"), "types"); }
+      };`,
+  );
+  return `${shellQuote(process.execPath)} rebuild.cjs`;
+}
+
+test("Rebuild All counts current consumers in its summary without changing the generation report", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-current-consumer-log-"));
+  const producer = path.join(root, "gallery");
+  fs.mkdirSync(producer);
+  fs.writeFileSync(
+    path.join(producer, "rsbuild.config.ts"),
+    `
+    export default { server: { port: 4100 }, plugins: [pluginModuleFederation({
+      name: "gallery", manifest: true, dts: true, exposes: { "./index": "./index.ts" }
+    })] };`,
+  );
+  const consumer = path.join(root, "shell");
+  fs.mkdirSync(consumer);
+  fs.writeFileSync(
+    path.join(consumer, "module-federation.config.ts"),
+    `
+    export default {
+      name: "shell", dts: { generateTypes: false, consumeTypes: true },
+      remotes: { gallery: "gallery@http://localhost:4100/mf-manifest.json" }
+    };`,
+  );
+  const restore = useWorkspace(
+    root,
+    { gallery: { path: "gallery", typesZipPath: "types.zip" }, shell: { path: "shell" } },
+    writeTypesBuildFixture(producer, root),
+  );
+  const events: { level: string; text: string }[] = [];
+  const provider = providerFor(events);
+  t.after(() => {
+    restore();
+    provider.dispose();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  const first = await provider.rebuildAll(() => {});
+  assert.deepEqual(first?.installed, [{ consumer: "shell", alias: "gallery" }]);
+  assert.match(
+    events.find(({ text }) => text.startsWith("types.rebuild.all.completed"))?.text ?? "",
+    /rebuilt=1 installed=1 current=0 /,
+  );
+  events.length = 0;
+  const second = await provider.rebuildAll(() => {});
+  assert.deepEqual(second?.installed, []);
+  assert.deepEqual(second?.current, []);
+  assert.ok(
+    events.some(
+      ({ text }) =>
+        text.startsWith("types.rebuild.all.app") && text.includes("app=shell status=current"),
+    ),
+  );
+  assert.match(
+    events.find(({ text }) => text.startsWith("types.rebuild.all.completed"))?.text ?? "",
+    /rebuilt=1 installed=0 current=1 /,
+  );
+});
+
+for (const phase of ["persist", "refresh"]) {
+  test(`Rebuild All retains the result when ${phase} fails`, async (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-rebuild-log-"));
+    fs.writeFileSync(
+      path.join(root, "module-federation.config.ts"),
+      "export default { name: 'gallery', dts: true, exposes: { './index': './index.ts' } };",
+    );
+    const restore = useWorkspace(
+      root,
+      {
+        gallery: { path: ".", typesZipPath: "types.zip" },
+        missing: { path: "missing" },
+      },
+      writeTypesBuildFixture(root),
+    );
+    const events: { level: string; text: string }[] = [];
+    const fail = () => {
+      throw new Error(`${phase} unavailable`);
+    };
+    const provider = providerFor(events, phase === "persist" ? fail : undefined);
+    t.after(() => {
+      restore();
+      provider.dispose();
+      fs.rmSync(root, { recursive: true, force: true });
+    });
+    if (phase === "refresh") t.mock.method(provider.session, "problemDrafts", fail);
+    await assert.rejects(
+      provider.rebuildAll(() => {}),
+      new RegExp(`${phase} unavailable`),
+    );
+    const completed = events.filter(({ text }) => text.startsWith("types.rebuild.all.completed"));
+    assert.equal(completed.length, 1);
+    assert.match(
+      completed[0].text,
+      new RegExp(`rebuilt=1 installed=0 current=0 skipped=1 failed=0 reason=${phase}-failed`),
+    );
+    if (phase === "refresh") {
+      assert.match(completed[0].text, /refreshMs=\d+/);
+      assert.match(
+        events.find(({ text }) => text.startsWith("types.rebuild.all.refresh"))?.text ?? "",
+        /reason=refresh-failed/,
+      );
+    }
+  });
+}
 
 test("saving an Rslib config can restore a hidden, configured federation helper", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-rslib-ownership-save-"));

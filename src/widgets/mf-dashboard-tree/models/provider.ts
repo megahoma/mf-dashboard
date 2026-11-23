@@ -22,6 +22,7 @@ import {
   openManifestPreview,
 } from "../../../features/open-manifest/index.ts";
 import {
+  createRebuildAllReport,
   rebuildAllTypes,
   rebuildTypes,
   type RebuildAllReport,
@@ -512,88 +513,162 @@ export class MfDashboardProvider
     onStart?: () => void,
   ): Promise<RebuildAllReport | undefined> {
     return this.enqueue("rebuild-all", async (log) => {
-      const settings = readWorkspaceSettings();
-      const roots = workspaceRoots();
-      if (!roots.length || !Object.keys(settings.apps ?? {}).length) return;
-      onStart?.();
-      const {
-        apps,
-        skipped: configIssues,
-        zipPaths,
-      } = await this.knownAppsWorker.request("rebuild", { roots, settings }, log);
-      const key = target?.settingsKey ?? target?.app;
-      const skipped = target ? configIssues.filter((issue) => issue.app === key) : configIssues;
-      if (
-        target &&
-        !apps.some((app) => app.name === target.app && (app.settingsKey ?? app.name) === key)
-      ) {
-        const issue = {
-          ...(skipped[0] ?? { reason: "Microfrontend configuration changed" }),
-          ...target,
-        };
-        status?.([{ ...issue, status: "skipped" }]);
-        return { rebuilt: [], current: [], installed: [], failed: [], skipped: [issue] };
+      const started = Date.now();
+      const report = createRebuildAllReport();
+      // The log includes unchanged consumers as well as cached generations.
+      const currentApps = new Set<string>();
+      let reason: string | undefined = "build-failed";
+      let resolveMs: number | undefined;
+      let refreshMs: number | undefined;
+      try {
+        const settings = readWorkspaceSettings();
+        const roots = workspaceRoots();
+        if (!roots.length || !Object.keys(settings.apps ?? {}).length) {
+          reason = "no-apps";
+          return;
+        }
+        onStart?.();
+        const resolveStarted = Date.now();
+        reason = "resolve-failed";
+        const resolved = await this.knownAppsWorker
+          .request("rebuild", { roots, settings }, log)
+          .then(
+            (result) => {
+              resolveMs = Date.now() - resolveStarted;
+              log.event("info", "types.rebuild.all.resolve", {
+                apps: result.apps.length,
+                skipped: result.skipped.length,
+                target: target?.app,
+                durationMs: resolveMs,
+              });
+              return result;
+            },
+            (error: unknown) => {
+              resolveMs = Date.now() - resolveStarted;
+              log.event("error", "types.rebuild.all.resolve", {
+                ...safeError(error),
+                reason,
+                target: target?.app,
+                durationMs: resolveMs,
+              });
+              throw error;
+            },
+          );
+        const { apps, skipped: configIssues, zipPaths } = resolved;
+        reason = "build-failed";
+        const key = target?.settingsKey ?? target?.app;
+        const skipped = target ? configIssues.filter((issue) => issue.app === key) : configIssues;
+        if (
+          target &&
+          !apps.some((app) => app.name === target.app && (app.settingsKey ?? app.name) === key)
+        ) {
+          const issue = {
+            ...(skipped[0] ?? { reason: "Microfrontend configuration changed" }),
+            ...target,
+          };
+          status?.([{ ...issue, status: "skipped" }]);
+          report.skipped.push(issue);
+          reason = undefined;
+          return report;
+        }
+        status?.(skipped.map((issue) => ({ ...issue, status: "skipped" })));
+        log.event("info", "types.rebuild.all.started", { apps: apps.length, target: target?.app });
+        await rebuildAllTypes({
+          report,
+          apps,
+          target: target?.app,
+          confirmations: this.confirmations,
+          envMode: settings.envMode,
+          rebuildCommand: settings.rebuildCommand,
+          refetchCommand: settings.refetchCommand,
+          zipPathOverride: (app) => zipPaths.get(app.name),
+          rebuildConfigStamp: (app) => this.knownAppsWorker.request("rebuildConfigStamp", app, log),
+          fingerprintInputs: (app, zip, tsconfig, external) =>
+            this.knownAppsWorker.request(
+              "fingerprint",
+              [
+                app,
+                { envMode: settings.envMode, rebuildCommand: settings.rebuildCommand },
+                zip,
+                tsconfig,
+                external,
+              ],
+              log,
+            ),
+          persist: async () => {
+            reason = "persist-failed";
+            await this.persistConfirmations();
+            reason = "build-failed";
+          },
+          progress,
+          status: (updates) => {
+            for (const update of updates) {
+              const key = update.settingsKey ?? update.app;
+              if (update.status === "current") currentApps.add(key);
+              else currentApps.delete(key);
+            }
+            status?.(updates);
+          },
+          log,
+        }).finally(() => {
+          report.skipped.push(...skipped);
+        });
+
+        const changedProducers = new Set([
+          ...report.rebuilt,
+          ...report.failed.map(({ app }) => app),
+        ]);
+        for (const name of changedProducers) this.publishedZipHashes.delete(name);
+        if (changedProducers.size || report.installed.length) {
+          reason = "refresh-failed";
+          const refreshStarted = Date.now();
+          try {
+            const links = linksOf(this.session.loaded);
+            const changedInstalls = new Set(
+              report.installed.map(({ consumer, alias }) => `${consumer}\0${alias}`),
+            );
+            this.observation.invalidateLinks(
+              links
+                .filter(
+                  (link) =>
+                    changedProducers.has(link.remoteName) ||
+                    changedInstalls.has(`${link.consumer}\0${link.alias}`),
+                )
+                .map(linkProbeId),
+            );
+            this.clearTypeCache();
+            this.observation.apply(
+              await this.observation.prepare(this.session.loaded, links, this.session.book),
+            );
+            for (const name of report.rebuilt) this.session.rebuildErrors.delete(name);
+            this.notify();
+            reason = undefined;
+          } finally {
+            refreshMs = Date.now() - refreshStarted;
+            log.event(reason ? "error" : "info", "types.rebuild.all.refresh", {
+              changed: changedProducers.size,
+              installed: report.installed.length,
+              durationMs: refreshMs,
+              reason,
+            });
+          }
+        }
+        reason = undefined;
+        return report;
+      } finally {
+        log.event("info", "types.rebuild.all.completed", {
+          rebuilt: report.rebuilt.length,
+          installed: report.installed.length,
+          current: currentApps.size,
+          skipped: report.skipped.length,
+          failed: report.failed.length,
+          reason,
+          target: target?.app,
+          resolveMs,
+          refreshMs,
+          durationMs: Date.now() - started,
+        });
       }
-      status?.(skipped.map((issue) => ({ ...issue, status: "skipped" })));
-      log.event("info", "types.rebuild.all.started", { apps: apps.length });
-      const report = await rebuildAllTypes({
-        apps,
-        target: target?.app,
-        confirmations: this.confirmations,
-        envMode: settings.envMode,
-        rebuildCommand: settings.rebuildCommand,
-        refetchCommand: settings.refetchCommand,
-        zipPathOverride: (app) => zipPaths.get(app.name),
-        rebuildConfigStamp: (app) => this.knownAppsWorker.request("rebuildConfigStamp", app, log),
-        fingerprintInputs: (app, zip, tsconfig, external) =>
-          this.knownAppsWorker.request(
-            "fingerprint",
-            [
-              app,
-              { envMode: settings.envMode, rebuildCommand: settings.rebuildCommand },
-              zip,
-              tsconfig,
-              external,
-            ],
-            log,
-          ),
-        persist: this.persistConfirmations,
-        progress,
-        status,
-        log,
-      });
-      report.skipped.push(...skipped);
-      const changedProducers = new Set([...report.rebuilt, ...report.failed.map(({ app }) => app)]);
-      for (const name of changedProducers) this.publishedZipHashes.delete(name);
-      if (changedProducers.size || report.installed.length) {
-        const links = linksOf(this.session.loaded);
-        const changedInstalls = new Set(
-          report.installed.map(({ consumer, alias }) => `${consumer}\0${alias}`),
-        );
-        this.observation.invalidateLinks(
-          links
-            .filter(
-              (link) =>
-                changedProducers.has(link.remoteName) ||
-                changedInstalls.has(`${link.consumer}\0${link.alias}`),
-            )
-            .map(linkProbeId),
-        );
-        this.clearTypeCache();
-        this.observation.apply(
-          await this.observation.prepare(this.session.loaded, links, this.session.book),
-        );
-        for (const name of report.rebuilt) this.session.rebuildErrors.delete(name);
-        this.notify();
-      }
-      log.event("info", "types.rebuild.all.completed", {
-        rebuilt: report.rebuilt.length,
-        installed: report.installed.length,
-        current: report.current.length,
-        skipped: report.skipped.length,
-        failed: report.failed.length,
-      });
-      return report;
     });
   }
 
