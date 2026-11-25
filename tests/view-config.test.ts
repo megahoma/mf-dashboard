@@ -115,7 +115,7 @@ test("refresh and the localized workspace types update are available in the view
     title.find((item) => item.command === "mf-dashboard.refresh"),
     {
       command: "mf-dashboard.refresh",
-      when: "view == mf-dashboard",
+      when: "view == mf-dashboard && !mf-dashboard.discovering",
       group: "navigation",
     },
   );
