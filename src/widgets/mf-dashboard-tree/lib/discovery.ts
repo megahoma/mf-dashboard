@@ -3,6 +3,7 @@ import { isIndependentRslibProject, type LocalApp } from "../../../entities/micr
 import { mergeMissingApps } from "../../../features/init-settings/index.ts";
 import { DEFAULT_START_SCRIPT } from "../../../shared/config/project.ts";
 import { logDuration } from "../../../shared/lib/logging.ts";
+import { protectPathWhitespace } from "../../../shared/lib/paths.ts";
 import type { LogContext } from "../../../shared/models/logging.ts";
 import type {
   AppSetting,
@@ -228,11 +229,9 @@ export function planDiscovery(
       const zip = typeof saved.typesZipPath === "string" ? saved.typesZipPath.trim() : "";
       if (zip && !path.isAbsolute(zip)) {
         const absoluteZip = path.resolve(previousFolder, zip);
-        let relativeZip = workspaceRelative(app.folder, absoluteZip);
-        // Rebuild trims the setting before resolving it, so protect whitespace in names.
-        if (/^\s/.test(relativeZip)) relativeZip = `./${relativeZip}`;
-        if (/\s$/.test(relativeZip)) relativeZip = `${relativeZip}/.`;
-        foundApps[name].typesZipPath = relativeZip;
+        foundApps[name].typesZipPath = protectPathWhitespace(
+          workspaceRelative(app.folder, absoluteZip),
+        );
       }
       migrations.add(name);
     }

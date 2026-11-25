@@ -12,7 +12,7 @@ MF Dashboard is a VS Code extension for working with Module Federation microfron
 
 ## Features
 
-1. **Automatic discovery** of microfrontend configurations.
+1. **Local graph** of discovered microfrontend configurations.
 2. **Work with multiple projects** in one VS Code window.
 3. **Tree or flat list** of applications and remote dependencies.
 4. **Periodic checks** of ports, manifests, and types ZIP archives.
@@ -48,7 +48,7 @@ URL issues and unreachable external manifests appear as warnings in Problems. Ty
 
 ## Detection
 
-The extension activates on startup and looks for these config files:
+**Find microfrontends** scans for these config files:
 
 | Config family     | File name                    |
 | ----------------- | ---------------------------- |
@@ -72,11 +72,13 @@ A simple start script can select a config with `--config`. Discovery uses `mf-da
 
 The local port comes from `server.port` or `devServer.port`. Remote URLs may use `process.env` or `import.meta.env` values from `.env.<mode>` and `.env.<mode>.local`, with the local file taking precedence. When discovery recognizes a Vite start script, it resolves `process.env` from literal assignments in the script and uses Vite's default `NODE_ENV` when the script leaves it unset. The default manifest path is `/mf-manifest.json`.
 
-Discovery skips `node_modules`, `.git`, `dist`, and `mf-dashboard.ignorePaths`. It adds missing app names without overwriting saved entries. Once `mf-dashboard.apps` exists, even as an empty object, startup reloads that list instead of scanning for new apps. An empty scan writes no settings and an explicit search with no loaded apps shows a notification.
+After cloning, run **Find microfrontends** once. It generates `.mf-dashboard/graph.json` and adds an ignore rule in `.mf-dashboard/.gitignore`. The graph is a local cache. On later opens, the dashboard renders the saved graph while probes run. **Refresh** updates statuses using the graph. **Find microfrontends** is available in the toolbar to rebuild it.
 
-Multi-root workspaces are scanned folder by folder. Federation names and workspace-folder names must be unique. If different app folders use the same federation name, discovery reports the conflicting folders and leaves saved settings unchanged. Settings are stored in `.vscode/settings.json` for a folder opened on its own, or in the saved `.code-workspace` file.
+The graph stores relative paths, resolved URLs and checksums of relevant inputs, including local dotenv files. A dotenv edit marks the existing tree as outdated until the next Find. Explicit types rebuilds read the current build configs and launcher environment.
 
-Refresh reads known app directories and reuses parsed configs until a config, active env file, or tracked local import changes size or mtime. The tree keeps its previous results until a probe succeeds. Each successful cycle shares ZIP downloads by URL; later cycles use `If-Modified-Since` when available and reuse hashes on 304. Manifests are requested separately for each row.
+Discovery skips `node_modules`, `.git`, `dist`, `.mf-dashboard`, and `mf-dashboard.ignorePaths`. It writes one graph per workspace folder. Federation names and workspace-folder names must be unique. A conflicting search preserves the saved graph. The dashboard marks an outdated graph when it detects changes to discovery settings, tracked inputs, or candidate files, including custom configs selected by the start script.
+
+Probe cycles share ZIP downloads by URL. Later cycles use `If-Modified-Since` when available and reuse hashes on 304. Manifests are requested separately for each row.
 
 Types installed by Rsbuild watch or another tool are verified automatically against the published ZIP. This read-only comparison may download the archive once more when its hash or the installed files change. Matching files receive an install confirmation; unchanged matches and mismatches are reused without repeating the comparison. The consumer's type files are never replaced by this check.
 
@@ -100,25 +102,25 @@ Package versions are not checked against a semver matrix at runtime. Compatibili
 
 All settings use the `mf-dashboard.*` namespace.
 
-| Setting                              | Default       | Description                                                                                                                |
-| ------------------------------------ | ------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `mf-dashboard.envMode`               | `development` | Mode for `.env.<mode>` and `.env.<mode>.local`.                                                                            |
-| `mf-dashboard.structure`             | `tree`        | `tree` or `flat`; also controlled by the view-title button.                                                                |
-| `mf-dashboard.types.structure`       | `tree`        | Layout of the mf-types view. Its toolbar switches between `tree` and `flat`.                                               |
-| `mf-dashboard.language`              | `auto`        | Tree labels and details: `auto`, `en`, or `ru`. Command titles follow VS Code.                                             |
-| `mf-dashboard.ignorePaths`           | `[]`          | Additional scan exclusions. A name matches at any depth; a relative path excludes that subtree. Saved apps are still read. |
-| `mf-dashboard.extraManifestUrls`     | `[]`          | External manifest URLs shown as root rows. Only valid HTTP(S) URLs are requested.                                          |
-| `mf-dashboard.packageManager`        | `auto`        | Start command manager: `auto`, `npm`, `pnpm`, `yarn`, or `bun`.                                                            |
-| `mf-dashboard.probeIntervalMs`       | `5000`        | Interval between port, manifest, and ZIP checks in milliseconds; minimum `1000`.                                           |
-| `mf-dashboard.types.autoCheck`       | `true`        | Automatically check types; disable for manual checks while ports and manifests keep updating.                              |
-| `mf-dashboard.typesSettleMs`         | `15000`       | Delay after saving source before types can count as stale, in milliseconds.                                                |
-| `mf-dashboard.terminal.reveal`       | `true`        | Show the terminal when starting an app.                                                                                    |
-| `mf-dashboard.scripts.start`         | `dev`         | `package.json` script key for Start when the app has no override.                                                          |
-| `mf-dashboard.commands.rebuildTypes` | `""`          | Command replacing built-in type generation. Empty uses the plugin API.                                                     |
-| `mf-dashboard.commands.refetchTypes` | `""`          | Command replacing built-in types download. The 60-second timeout and result checks still apply.                            |
-| `mf-dashboard.apps`                  | absent        | Saved apps. First open discovers apps when absent; an empty object disables startup discovery.                             |
+| Setting                              | Default       | Description                                                                                                                                |
+| ------------------------------------ | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `mf-dashboard.envMode`               | `development` | Mode for `.env.<mode>` and `.env.<mode>.local`.                                                                                            |
+| `mf-dashboard.structure`             | `tree`        | `tree` or `flat`; also controlled by the view-title button.                                                                                |
+| `mf-dashboard.types.structure`       | `tree`        | Layout of the mf-types view. Its toolbar switches between `tree` and `flat`.                                                               |
+| `mf-dashboard.language`              | `auto`        | Tree labels and details: `auto`, `en`, or `ru`. Command titles follow VS Code.                                                             |
+| `mf-dashboard.ignorePaths`           | `[]`          | Additional scan exclusions. A name matches at any depth; a relative path excludes that subtree. Explicit legacy selections are still read. |
+| `mf-dashboard.extraManifestUrls`     | `[]`          | External manifest URLs shown as root rows. Only valid HTTP(S) URLs are requested.                                                          |
+| `mf-dashboard.packageManager`        | `auto`        | Start command manager: `auto`, `npm`, `pnpm`, `yarn`, or `bun`.                                                                            |
+| `mf-dashboard.probeIntervalMs`       | `5000`        | Interval between port, manifest, and ZIP checks in milliseconds; minimum `1000`.                                                           |
+| `mf-dashboard.types.autoCheck`       | `true`        | Automatically check types; disable for manual checks while ports and manifests keep updating.                                              |
+| `mf-dashboard.typesSettleMs`         | `15000`       | Delay after saving source before types can count as stale, in milliseconds.                                                                |
+| `mf-dashboard.terminal.reveal`       | `true`        | Show the terminal when starting an app.                                                                                                    |
+| `mf-dashboard.scripts.start`         | `dev`         | `package.json` script key for Start when the app has no override.                                                                          |
+| `mf-dashboard.commands.rebuildTypes` | `""`          | Command replacing built-in type generation. Empty uses the plugin API.                                                                     |
+| `mf-dashboard.commands.refetchTypes` | `""`          | Command replacing built-in types download. The 60-second timeout and result checks still apply.                                            |
+| `mf-dashboard.apps`                  | absent        | Legacy app selections and overrides read by Find microfrontends.                                                                           |
 
-Example app entry:
+Example legacy override:
 
 ```json
 {

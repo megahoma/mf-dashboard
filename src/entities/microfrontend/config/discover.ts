@@ -5,7 +5,7 @@ export const FEDERATION_CONFIG_PREFIX =
 export const CONFIG_EXTENSION = new RegExp(`\\.${CONFIG_EXTENSIONS}$`);
 export const CONFIG_FILE = new RegExp(`${FEDERATION_CONFIG_PREFIX.source}${CONFIG_EXTENSIONS}$`);
 
-export const ALWAYS_SKIP = new Set(["node_modules", ".git", "dist"]);
+export const ALWAYS_SKIP = new Set(["node_modules", ".git", "dist", ".mf-dashboard"]);
 
 export const RSLIB_CONFIG_NAMES = ["mjs", "ts", "js", "cjs", "mts", "cts"].map(
   (extension) => `rslib.config.${extension}`,

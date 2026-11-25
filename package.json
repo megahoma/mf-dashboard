@@ -217,19 +217,24 @@
           "group": "navigation"
         },
         {
-          "command": "mf-dashboard.useFlat",
-          "when": "view == mf-dashboard && !mf-dashboard.discovering && config.mf-dashboard.structure != flat",
+          "command": "mf-dashboard.discover",
+          "when": "view == mf-dashboard && !mf-dashboard.discovering",
           "group": "navigation@1"
         },
         {
+          "command": "mf-dashboard.useFlat",
+          "when": "view == mf-dashboard && !mf-dashboard.discovering && !mf-dashboard.flat",
+          "group": "navigation@2"
+        },
+        {
           "command": "mf-dashboard.useTree",
-          "when": "view == mf-dashboard && !mf-dashboard.discovering && config.mf-dashboard.structure == flat",
-          "group": "navigation@1"
+          "when": "view == mf-dashboard && !mf-dashboard.discovering && mf-dashboard.flat",
+          "group": "navigation@2"
         },
         {
           "command": "mf-dashboard.rebuildAllTypes",
           "when": "view == mf-dashboard && mf-dashboard.canUpdateTypes",
-          "group": "navigation@2"
+          "group": "navigation@3"
         },
         {
           "command": "mf-dashboard.rebuildAllTypes",
@@ -243,12 +248,12 @@
         },
         {
           "command": "mf-dashboard.typesUseFlat",
-          "when": "view == mf-dashboard.typesBuild && config.mf-dashboard.types.structure != flat",
+          "when": "view == mf-dashboard.typesBuild && !mf-dashboard.typesFlat",
           "group": "navigation@0"
         },
         {
           "command": "mf-dashboard.typesUseTree",
-          "when": "view == mf-dashboard.typesBuild && config.mf-dashboard.types.structure == flat",
+          "when": "view == mf-dashboard.typesBuild && mf-dashboard.typesFlat",
           "group": "navigation@0"
         }
       ],

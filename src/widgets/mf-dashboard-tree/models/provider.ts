@@ -44,12 +44,17 @@ import { problemDiagnostics } from "../lib/problem-diagnostics.ts";
 import { startRow } from "../lib/start-row.ts";
 import { appTypesDir, linkTypesDir } from "../lib/targets.ts";
 import {
+  prepareWorkspaceGraphDirectories,
+  readWorkspaceGraphs,
+  writeWorkspaceGraphs,
+} from "../lib/workspace-graph.ts";
+import {
   readWorkspaceSettings,
   settingsDiagnosticFile,
   workspaceRoots,
   writeWorkspaceApps,
 } from "../lib/workspace-settings.ts";
-import type { DashboardNode } from "./presentation.ts";
+import type { DashboardNode, DashboardStructure } from "./presentation.ts";
 import { DashboardSession } from "./session.ts";
 import type { TypeEvidence } from "./type-observation-types.ts";
 import { DashboardTypeObservation } from "./type-observation.ts";
@@ -91,6 +96,7 @@ export class MfDashboardProvider
     confirmations: ConfirmationStore = createConfirmationStore(),
     persistConfirmations: () => void | PromiseLike<void> = () => {},
     log: LogContext = noLog,
+    graphOptions?: { structure(): DashboardStructure },
   ) {
     this.log = log;
     this.termsOf = termsOf;
@@ -99,7 +105,36 @@ export class MfDashboardProvider
     const book = createProbeBook();
     this.session = new DashboardSession(
       {
-        readSettings: readWorkspaceSettings,
+        ...(graphOptions && {
+          graph: {
+            prepare: prepareWorkspaceGraphDirectories,
+            read: readWorkspaceGraphs,
+            publish: async (roots, settings, selections, cache, stillCurrent, log) => {
+              const { apps, ownershipSources } = await this.knownAppsWorker.load(
+                {
+                  roots,
+                  settings: { ...settings, apps: selections },
+                  discovery: cache,
+                },
+                log,
+              );
+              if (new Set(apps.map((app) => app.name)).size !== apps.length)
+                throw new Error("Duplicate Module Federation name in graph");
+              await writeWorkspaceGraphs(
+                roots,
+                settings,
+                selections,
+                apps,
+                ownershipSources,
+                stillCurrent,
+              );
+            },
+          },
+        }),
+        readSettings: () => {
+          const settings = readWorkspaceSettings();
+          return graphOptions ? { ...settings, structure: graphOptions.structure() } : settings;
+        },
         writeApps: (apps) => writeWorkspaceApps(apps, this.log),
         scan: prepareWorkspaceScan,
         prepareDiscovery: (roots, settings, log) =>
@@ -529,8 +564,9 @@ export class MfDashboardProvider
       let refreshMs: number | undefined;
       try {
         const settings = readWorkspaceSettings();
+        const appsToBuild = this.session.workspaceGraph?.settings ?? settings.apps;
         const roots = workspaceRoots();
-        if (!roots.length || !Object.keys(settings.apps ?? {}).length) {
+        if (!roots.length || !Object.keys(appsToBuild ?? {}).length) {
           reason = "no-apps";
           return;
         }
@@ -538,7 +574,7 @@ export class MfDashboardProvider
         const resolveStarted = Date.now();
         reason = "resolve-failed";
         const resolved = await this.knownAppsWorker
-          .request("rebuild", { roots, settings }, log)
+          .request("rebuild", { roots, settings: { ...settings, apps: appsToBuild } }, log)
           .then(
             (result) => {
               resolveMs = Date.now() - resolveStarted;
@@ -686,15 +722,29 @@ export class MfDashboardProvider
     log.event("info", "types.rebuild.started", { app: rootName });
     const settings = readWorkspaceSettings();
     try {
+      const graph = this.session.workspaceGraph;
+      const appSettings = graph?.settings ?? settings.apps;
+      const apps = graph
+        ? (
+            await this.knownAppsWorker.request(
+              "rebuild",
+              {
+                roots: workspaceRoots(),
+                settings: { ...settings, apps: appSettings },
+              },
+              log,
+            )
+          ).apps
+        : this.session.loaded;
       await rebuildTypes(rootName, {
         log,
-        apps: this.session.loaded,
+        apps,
         book: this.session.book,
         confirmations: this.confirmations,
         published: this.publishedZipHashes,
         settings: {
           "mf-dashboard.scripts.start": settings.startScript,
-          "mf-dashboard.apps": settings.apps,
+          "mf-dashboard.apps": appSettings,
           rebuildCommand: settings.rebuildCommand,
           envMode: settings.envMode,
         },
