@@ -14,6 +14,7 @@ import {
 import { noLog } from "../../../shared/config/logging.ts";
 import { errorMessage } from "../../../shared/lib/errors.ts";
 import { safeError } from "../../../shared/lib/logging.ts";
+import { DiagnosticError } from "../../../shared/models/diagnostic-error.ts";
 import { LocatedError } from "../../../shared/models/source-problem.ts";
 import { dependencyTypesTarget, installRemoteTypes } from "../../refetch-types/index.ts";
 import {
@@ -32,12 +33,27 @@ import { workspaceTypesPlan } from "./workspace-plan.ts";
 const operations = { generateLocalFederatedTypes, runRebuildCommand, installRemoteTypes };
 const CHANGED_CONFIG = "Sources or build configuration changed during type generation";
 
+function manifestUnavailable(error: unknown): boolean {
+  if (!(error instanceof DiagnosticError) || error.details.stage !== "manifest") return false;
+  const { reason, status } = error.details;
+  return (
+    reason === "network" ||
+    reason === "timeout" ||
+    reason === "invalid-json" ||
+    reason === "missing-types-metadata" ||
+    (reason === "http-status" && status !== undefined && (status === 404 || status >= 500))
+  );
+}
+
 export async function rebuildAllTypes(
   context: RebuildAllContext,
   io: typeof operations = operations,
 ): Promise<RebuildAllReport> {
   const planStarted = Date.now();
-  const { order, cycles, conflicts, apps } = workspaceTypesPlan(context.apps, context.target);
+  const { order, candidates, cycles, conflicts, apps } = workspaceTypesPlan(
+    context.apps,
+    context.target,
+  );
   const planned = new Set(order.map(({ app }) => app.name));
   context.status?.(
     apps
@@ -51,8 +67,12 @@ export async function rebuildAllTypes(
   const { confirmations } = context;
   const log = context.log ?? noLog;
   const report = context.report ?? createRebuildAllReport();
-  for (const [name, apps] of conflicts) {
-    const updates = apps.map((app) => ({
+  const reportedConflicts = new Set<string>();
+  const reportConflict = (name: string) => {
+    const duplicates = conflicts.get(name);
+    if (!duplicates || reportedConflicts.has(name)) return;
+    reportedConflicts.add(name);
+    const updates = duplicates.map((app) => ({
       app: name,
       settingsKey: app.settingsKey ?? app.folder,
       status: "skipped" as const,
@@ -62,14 +82,15 @@ export async function rebuildAllTypes(
       ...updates.map(({ settingsKey, reason }) => ({ app: settingsKey, reason })),
     );
     context.status?.(updates);
-  }
+  };
+  for (const { name } of apps) reportConflict(name);
   const localNames = new Set(
     context.apps.filter((app) => app.generateTypes && app.port != null).map((app) => app.name),
   );
   const zips = new Map<string, LocalGeneratedZip>();
   const configSnapshots = new Map<LocalApp, string>();
   const configErrors = new Map<LocalApp, unknown>();
-  for (const { app } of order) {
+  for (const { app } of candidates.values()) {
     if (app.configInputs?.length || app.configDependencies?.length) {
       try {
         configSnapshots.set(
@@ -91,21 +112,44 @@ export async function rebuildAllTypes(
   log.event("info", "types.rebuild.all.plan", {
     apps: order.length,
     cycles: cycles.size,
-    conflicts: conflicts.size,
+    conflicts: reportedConflicts.size,
     durationMs: Date.now() - planStarted,
     target: context.target,
   });
-  for (const [index, { app, generate, links, dependencies }] of order.entries()) {
-    context.progress?.(app.name, index, order.length);
-    const installStart = report.installed.length;
+  const started = new Set<string>();
+  let nextIndex = 0;
+  async function build(name: string): Promise<void> {
+    // An active ancestor has no ZIP yet. Treat that edge as unavailable without waiting on it.
+    if (started.has(name)) return;
+    started.add(name);
+    const node = candidates.get(name);
+    if (!node) {
+      reportConflict(name);
+      return;
+    }
+    const { app, generate, links, dependencies } = node;
+    if (!planned.has(name)) {
+      planned.add(name);
+      context.status?.([{ app: name, settingsKey: app.settingsKey, status: "queued" }]);
+    }
+    if (!cycles.has(name)) for (const dependency of dependencies) await build(dependency);
+    const index = nextIndex++;
+    const total = planned.size;
+    context.progress?.(app.name, index, total);
+    const installedAliases: string[] = [];
     const status = (
       state: RebuildAppStatus["status"],
       issue?: RebuildAllReport["failed"][number],
     ) => {
       if (!context.status) return;
-      const installed = report.installed.slice(installStart).map(({ alias }) => alias);
       context.status([
-        { ...issue, app: app.name, settingsKey: app.settingsKey, status: state, installed },
+        {
+          ...issue,
+          app: app.name,
+          settingsKey: app.settingsKey,
+          status: state,
+          installed: [...installedAliases],
+        },
       ]);
     };
     const appStarted = Date.now();
@@ -123,7 +167,7 @@ export async function rebuildAllTypes(
         app: app.name,
         status: outcome,
         index: index + 1,
-        total: order.length,
+        total,
         durationMs: Date.now() - appStarted,
         ...phases,
         prepareGenerationMs: generationTimings?.prepareMs,
@@ -134,7 +178,7 @@ export async function rebuildAllTypes(
         processMs: generationTimings?.processMs,
       });
     };
-    const missing = links.find(({ url }) => url === null);
+    const missing = links.find(({ url, producer }) => url === null && producer === undefined);
     const blocked = dependencies.find((name) => !zips.has(name));
     const reason =
       cycles.get(app.name) ??
@@ -146,7 +190,7 @@ export async function rebuildAllTypes(
       log.event("warn", "types.rebuild.all.skipped", { app: app.name, reason });
       outcome = "skipped";
       recordApp();
-      continue;
+      return;
     }
     try {
       status("running");
@@ -169,15 +213,18 @@ export async function rebuildAllTypes(
       const dependencyHashes: Record<string, string> = Object.create(null);
       const external: [string, string, string][] = [];
       const installedInputs = new Map<string, string>();
-      for (const { remote, url, producer } of links) {
-        if (url === null || (producer === undefined && !generate)) continue;
+      for (const { remote, url, producer, fallback } of links) {
+        if (producer === undefined && !generate) continue;
         const link: RemoteLink = remoteLink(app.name, remote);
         const resolveTarget = () => dependencyTypesTarget(app, remote, context.apps);
         const destination = resolveTarget();
         const previous = confirmations.install(link) ?? confirmations.installedAt(link);
         const sameRemote = previous?.remoteName === link.remoteName && previous.url === link.url;
-        if (producer !== undefined) {
-          const zip = zips.get(producer)!;
+        const recordInstall = () => {
+          report.installed.push({ consumer: app.name, alias: remote.alias });
+          installedAliases.push(remote.alias);
+        };
+        const installLocal = async (name: string, zip: LocalGeneratedZip) => {
           const installStarted = Date.now();
           const installed = await installLocalTypesArchive({
             zipPath: zip.zipPath,
@@ -192,21 +239,25 @@ export async function rebuildAllTypes(
           }).finally(() => {
             phases.installLocalMs += Date.now() - installStarted;
           });
-          dependencyHashes[producer] = installed.zipHash;
+          dependencyHashes[name] = installed.zipHash;
           installedInputs.set(destination, installed.filesFingerprint);
-          if (installed.changed) report.installed.push({ consumer: app.name, alias: remote.alias });
+          if (installed.changed) recordInstall();
           if (
             installed.changed ||
             !sameRemote ||
             previous.zipHash !== installed.zipHash ||
             previous.filesFingerprint !== installed.filesFingerprint ||
-            previous.fromManifest === undefined
+            previous.fromManifest !== false
           ) {
             confirmations.saveInstall(link, installed.filesFingerprint, installed.zipHash, false);
             dirty = true;
           }
+        };
+        if (producer !== undefined) {
+          await installLocal(producer, zips.get(producer)!);
           continue;
         }
+        if (url === null) continue;
         const installStarted = Date.now();
         const evidence = await readInstalledEvidenceAsync(destination, log, true).finally(() => {
           phases.installRemoteMs += Date.now() - installStarted;
@@ -235,19 +286,33 @@ export async function rebuildAllTypes(
             )
             .finally(() => {
               phases.installRemoteMs += Date.now() - fetchStarted;
+            })
+            .catch(async (error: unknown) => {
+              if (fallback === undefined || !manifestUnavailable(error)) throw error;
+              await build(fallback);
+              const zip = zips.get(fallback);
+              if (!zip) throw error;
+              await installLocal(fallback, zip);
+              log.event("warn", "types.rebuild.all.local-fallback", {
+                app: app.name,
+                alias: remote.alias,
+                producer: fallback,
+              });
+              return undefined;
             });
+          if (!installed) continue;
           confirmations.saveInstall(link, installed.filesFingerprint, installed.zipHash, true);
           fingerprint = installed.filesFingerprint;
-          report.installed.push({ consumer: app.name, alias: remote.alias });
+          recordInstall();
           dirty = true;
         }
         external.push([remote.alias, url.href, fingerprint]);
         installedInputs.set(destination, fingerprint);
       }
       if (!generate) {
-        outcome = report.installed.length > installStart ? "installed" : "current";
+        outcome = installedAliases.length ? "installed" : "current";
         status(outcome);
-        continue;
+        return;
       }
       const fingerprint = (tsconfig: string) =>
         context.fingerprintInputs?.(app, customZipPath, tsconfig, external) ??
@@ -333,7 +398,7 @@ export async function rebuildAllTypes(
         report.current.push(app.name);
         outcome = "current";
         status("current");
-        continue;
+        return;
       }
       confirmations.saveGeneration(
         app.name,
@@ -362,6 +427,7 @@ export async function rebuildAllTypes(
       recordApp();
     }
   }
+  for (const { app } of order) await build(app.name);
   if (dirty) await context.persist();
   return report;
 }

@@ -9,7 +9,7 @@ export type TypesBuildSnapshot = {
 };
 
 type AppTarget = Pick<RebuildAppStatus, "app" | "settingsKey">;
-type AppRow = AppTarget & { id?: string; children?: AppRow[] };
+type AppRow = AppTarget & { id?: string; children?: AppRow[]; expandByDefault?: boolean };
 type Row = AppRow | { label: string; text?: string; problem?: SourceProblem };
 type Translate = (message: string, ...args: (string | number)[]) => string;
 
@@ -60,17 +60,19 @@ function appLabel(app: AppTarget): string {
 }
 
 export class TypesBuildView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
-  private readonly change = new vscode.EventEmitter<void>();
+  private readonly change = new vscode.EventEmitter<AppRow[] | void>();
   readonly onDidChangeTreeData = this.change.event;
   private readonly diagnostics = vscode.languages.createDiagnosticCollection(
     "mf-dashboard-types-build",
   );
   private readonly apps = new Map<string, RebuildAppStatus>();
   private loaded: readonly LocalApp[] = [];
+  private workspaceKey = "[]";
   private structure: "flat" | "tree" = "tree";
   private roots: AppRow[] = [];
   private workspaceApps = new Map<string, LocalApp>();
-  private dependencies = new Map<string, string[]>();
+  private targets = new Set<string>();
+  private readonly rowsByApp = new Map<string, AppRow[]>();
   private running = false;
   private error: string | undefined;
   private t: Translate;
@@ -88,50 +90,82 @@ export class TypesBuildView implements vscode.TreeDataProvider<Row>, vscode.Disp
 
   setWorkspace(loaded: readonly LocalApp[], structure: "flat" | "tree"): void {
     if (loaded === this.loaded && structure === this.structure) return;
+    let topologyChanged = false;
     if (loaded !== this.loaded) {
       this.loaded = loaded;
-      this.workspaceApps = new Map(loaded.map((app) => [app.settingsKey ?? app.name, app]));
-      this.dependencies = new Map(
-        workspaceTypesPlan(loaded).order.map(({ app, dependencies }) => [app.name, dependencies]),
+      const key = JSON.stringify(
+        loaded.map((app) => [
+          app.name,
+          app.settingsKey,
+          app.generateTypes,
+          app.consumeTypes,
+          app.hasExposes,
+          app.port,
+          app.manifestPath,
+          app.devManifestPath,
+          app.remotes.map(({ name, alias, url }) => [name, alias, url]),
+        ]),
       );
+      topologyChanged = key !== this.workspaceKey;
+      if (topologyChanged) {
+        this.workspaceKey = key;
+        this.workspaceApps = new Map(loaded.map((app) => [app.settingsKey ?? app.name, app]));
+        this.targets = new Set(workspaceTypesPlan(loaded).order.map(({ app }) => app.name));
+      }
     }
+    if (!topologyChanged && structure === this.structure) return;
     this.structure = structure;
-    const byName = appsByName(loaded.filter((app) => this.dependencies.has(app.name)));
-    const dependenciesOf = (app: LocalApp) => this.dependencies.get(app.name) ?? [];
+    const names = new Set<string>();
+    const duplicates = new Set<string>();
+    for (const { name } of loaded) {
+      if (names.has(name)) duplicates.add(name);
+      names.add(name);
+    }
+    const byName = appsByName(loaded.filter((app) => !duplicates.has(app.name)));
+    this.rowsByApp.clear();
     const expanded = new Set<string>();
-    const build = (app: LocalApp, parent?: string): AppRow => {
+    const build = (app: LocalApp, parent?: string, alias?: string): AppRow => {
       const key = app.settingsKey ?? app.name;
       const children: AppRow[] = [];
       if (structure === "tree" && !expanded.has(key)) {
         expanded.add(key);
-        for (const name of dependenciesOf(app)) {
-          const child = byName.get(name);
-          if (child) children.push(build(child, key));
+        for (const remote of app.remotes) {
+          const child = byName.get(remote.name);
+          if (child) children.push(build(child, key, remote.alias));
         }
       }
-      return {
+      const row = {
         app: app.name,
         settingsKey: app.settingsKey,
         children,
-        id: parent === undefined ? `types:${key}` : `types-link:${JSON.stringify([parent, key])}`,
+        expandByDefault: parent === undefined && children.length > 0,
+        id:
+          parent === undefined
+            ? `types:${key}`
+            : `types-link:${JSON.stringify([parent, alias, key])}`,
       };
+      const rows = this.rowsByApp.get(key) ?? [];
+      rows.push(row);
+      this.rowsByApp.set(key, rows);
+      return row;
     };
-    this.roots = rootApps(loaded, byName, structure, dependenciesOf).map((app) => build(app));
+    this.roots = rootApps(loaded, byName, structure).map((app) => build(app));
     this.change.fire();
   }
 
   targetFor(row?: Row): AppTarget | undefined {
     if (!row || !("app" in row)) return;
     const app = this.workspaceApps.get(row.settingsKey ?? row.app);
-    if (app?.name === row.app && this.dependencies.has(app.name))
+    if (app?.name === row.app && this.targets.has(app.name))
       return { app: app.name, settingsKey: app.settingsKey };
   }
 
   start(target?: AppTarget): void {
+    const wasStopped = this.error !== undefined;
     this.running = true;
     this.error = undefined;
     if (target) {
-      this.update([{ ...target, status: "queued" }]);
+      this.update([{ ...target, status: "queued" }], wasStopped);
       return;
     }
     this.apps.clear();
@@ -139,15 +173,35 @@ export class TypesBuildView implements vscode.TreeDataProvider<Row>, vscode.Disp
     this.change.fire();
   }
 
-  update(updates: readonly RebuildAppStatus[]): void {
+  reset(): void {
+    if (!this.apps.size && !this.error && !this.running) return;
+    this.running = false;
+    this.error = undefined;
+    this.apps.clear();
+    this.diagnostics.clear();
+    this.change.fire();
+  }
+
+  update(updates: readonly RebuildAppStatus[], rootsChanged = false): void {
+    if (!updates.length) return;
     let changed = false;
+    const rows: AppRow[] = [];
     for (const update of updates) {
       const key = update.settingsKey ?? update.app;
-      if (update.problems?.length || this.apps.get(key)?.problems?.length) changed = true;
+      const previous = this.apps.get(key);
+      if (update.problems?.length || previous?.problems?.length) changed = true;
+      const occurrences = this.rowsByApp.get(key);
+      if (
+        occurrences &&
+        this.matchesResult(occurrences[0].app, update) &&
+        (!previous || this.matchesResult(occurrences[0].app, previous))
+      )
+        rows.push(...occurrences);
+      else rootsChanged = true;
       this.apps.set(key, update);
     }
     if (changed) this.publishProblems();
-    this.change.fire();
+    this.change.fire(rootsChanged ? undefined : rows);
   }
 
   finish(error?: string): TypesBuildSnapshot {
@@ -197,15 +251,18 @@ export class TypesBuildView implements vscode.TreeDataProvider<Row>, vscode.Disp
 
   getTreeItem(row: Row): vscode.TreeItem {
     if ("app" in row) {
+      const result = this.resultFor(row);
       const item = new vscode.TreeItem(
         appLabel(row),
-        row.children?.length
+        row.expandByDefault
           ? vscode.TreeItemCollapsibleState.Expanded
-          : this.getChildren(row).length
+          : row.children?.length ||
+              result?.reason ||
+              result?.problems?.length ||
+              result?.installed?.length
             ? vscode.TreeItemCollapsibleState.Collapsed
             : vscode.TreeItemCollapsibleState.None,
       );
-      const result = this.resultFor(row);
       item.id = row.id ?? `types:${row.settingsKey ?? row.app}`;
       item.description = result ? statusLabel(result.status, this.t) : this.t("Not built yet");
       item.iconPath = new vscode.ThemeIcon(result ? icons[result.status] : "package");

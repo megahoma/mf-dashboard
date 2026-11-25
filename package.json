@@ -34,6 +34,14 @@
           "id": "mf-dashboard",
           "name": "%view.title%",
           "icon": "media/mf-dashboard.svg",
+          "when": "!mf-dashboard.discovering",
+          "initialSize": 3
+        },
+        {
+          "id": "mf-dashboard.discovery",
+          "name": "%view.title%",
+          "icon": "media/mf-dashboard.svg",
+          "when": "mf-dashboard.discovering",
           "initialSize": 3
         },
         {
@@ -45,6 +53,7 @@
         {
           "id": "mf-dashboard.typesBuild",
           "name": "%view.typesBuild%",
+          "when": "mf-dashboard.typesVisible",
           "initialSize": 1
         }
       ]
@@ -52,7 +61,8 @@
     "viewsWelcome": [
       {
         "view": "mf-dashboard",
-        "contents": "%viewsWelcome.contents%"
+        "contents": "%viewsWelcome.contents%",
+        "when": "!mf-dashboard.discovering"
       },
       {
         "view": "mf-dashboard.typesBuild",
@@ -68,12 +78,14 @@
       {
         "command": "mf-dashboard.refresh",
         "title": "%command.refresh%",
-        "icon": "$(refresh)"
+        "icon": "$(refresh)",
+        "enablement": "!mf-dashboard.discovering"
       },
       {
         "command": "mf-dashboard.discover",
         "title": "%command.discover%",
-        "icon": "$(search)"
+        "icon": "$(search)",
+        "enablement": "!mf-dashboard.discovering"
       },
       {
         "command": "mf-dashboard.start",
@@ -105,17 +117,20 @@
       {
         "command": "mf-dashboard.openTypesBuildReport",
         "title": "%command.openTypesBuildReport%",
-        "icon": "$(output)"
+        "icon": "$(output)",
+        "enablement": "mf-dashboard.typesVisible"
       },
       {
         "command": "mf-dashboard.useFlat",
         "title": "%command.useFlat%",
-        "icon": "$(list-flat)"
+        "icon": "$(list-flat)",
+        "enablement": "!mf-dashboard.discovering"
       },
       {
         "command": "mf-dashboard.useTree",
         "title": "%command.useTree%",
-        "icon": "$(list-tree)"
+        "icon": "$(list-tree)",
+        "enablement": "!mf-dashboard.discovering"
       },
       {
         "command": "mf-dashboard.openConfig",
@@ -164,7 +179,7 @@
         },
         {
           "command": "mf-dashboard.checkTypes",
-          "when": "config.mf-dashboard.types.autoCheck == false"
+          "when": "!mf-dashboard.discovering && config.mf-dashboard.types.autoCheck == false"
         },
         {
           "command": "mf-dashboard.openConfig",
@@ -198,17 +213,17 @@
       "view/title": [
         {
           "command": "mf-dashboard.refresh",
-          "when": "view == mf-dashboard",
+          "when": "view == mf-dashboard && !mf-dashboard.discovering",
           "group": "navigation"
         },
         {
           "command": "mf-dashboard.useFlat",
-          "when": "view == mf-dashboard && config.mf-dashboard.structure != flat",
+          "when": "view == mf-dashboard && !mf-dashboard.discovering && config.mf-dashboard.structure != flat",
           "group": "navigation@1"
         },
         {
           "command": "mf-dashboard.useTree",
-          "when": "view == mf-dashboard && config.mf-dashboard.structure == flat",
+          "when": "view == mf-dashboard && !mf-dashboard.discovering && config.mf-dashboard.structure == flat",
           "group": "navigation@1"
         },
         {
