@@ -24,6 +24,7 @@ import { noLog } from "../src/shared/config/logging.ts";
 import { createLogger } from "../src/shared/lib/logging.ts";
 import type { DashboardSettings } from "../src/widgets/mf-dashboard-tree/models/session-types.ts";
 import type { TypesBuildView } from "../src/app/lib/types-build-view.ts";
+import type { MfDashboardProvider } from "../src/widgets/mf-dashboard-tree/index.ts";
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -99,14 +100,17 @@ async function start(
     },
   })) as unknown as typeof stub.workspace.getConfiguration);
   let session: DashboardSession | undefined;
+  let dashboard: MfDashboardProvider | undefined;
   let typesView: TypesBuildView | undefined;
   const createTreeView = stub.window.createTreeView;
   t.mock.method(
     stub.window,
     "createTreeView",
     (id: string, options: { treeDataProvider: unknown }) => {
-      if (id === "mf-dashboard")
-        session = (options.treeDataProvider as { session: DashboardSession }).session;
+      if (id === "mf-dashboard") {
+        dashboard = options.treeDataProvider as MfDashboardProvider;
+        session = dashboard.session;
+      }
       if (id === "mf-dashboard.typesBuild") typesView = options.treeDataProvider as TypesBuildView;
       return createTreeView(id, options);
     },
@@ -137,8 +141,9 @@ async function start(
     channel.messages.join("\n"),
   );
   assert.ok(session);
+  assert.ok(dashboard);
   assert.ok(typesView);
-  return { session, values, writes, channel, changes, typesView, state };
+  return { session, values, writes, channel, changes, typesView, state, dashboard };
 }
 
 test("discovery shows progress and enables type builds only after apps load", async (t) => {
@@ -171,7 +176,9 @@ test("discovery shows progress and enables type builds only after apps load", as
   const scan = run("discover");
   await run("discover");
   assert.equal(progress.mock.callCount(), 2);
-  assert.deepEqual(progress.mock.calls.at(-1)?.arguments[0].location, { viewId: "mf-dashboard" });
+  assert.deepEqual(progress.mock.calls.at(-1)?.arguments[0].location, {
+    viewId: "mf-dashboard.discovery",
+  });
   await scan;
   assert.equal(enabled(), true);
   await run("rebuildAppTypes", { app: "removed" });
@@ -188,6 +195,48 @@ test("discovery shows progress and enables type builds only after apps load", as
   });
   await assert.rejects(async () => run("discover"), /scan failed/);
   assert.equal(enabled(), true);
+});
+
+test("finding microfrontends hides the previous tree and types view and ignores view commands", async (t) => {
+  const { root, writeApp } = fixture(t);
+  writeApp("widget");
+  const context = t.mock.method(stub.commands, "executeCommand");
+  const report = t.mock.method(stub.workspace, "openTextDocument");
+  const { session, dashboard, values } = await start(t, root, {
+    ...defaultWorkspaceSettings(),
+    "mf-dashboard.apps": { widget: { path: "widget" } },
+  });
+  let complete = () => {};
+  const scanning = new Promise<void>((resolve) => {
+    complete = resolve;
+  });
+  t.mock.method(session, "discover", () => scanning);
+  const refresh = t.mock.method(session, "refresh");
+  const run = (name: string) => stub.registeredCommands.get(`mf-dashboard.${name}`)!();
+  const viewVisible = () =>
+    context.mock.calls
+      .filter(
+        ({ arguments: args }) =>
+          args[0] === "setContext" && args[1] === "mf-dashboard.typesVisible",
+      )
+      .at(-1)?.arguments[2];
+  assert.equal(viewVisible(), true);
+  const scan = run("discover");
+  try {
+    assert.equal(viewVisible(), false);
+    assert.deepEqual(dashboard.getChildren(), []);
+    await run("refresh");
+    await run("useFlat");
+    await run("openTypesBuildReport");
+    assert.equal(refresh.mock.callCount(), 0);
+    assert.equal(report.mock.callCount(), 0);
+    assert.equal(values.get("mf-dashboard.structure"), "tree");
+  } finally {
+    complete();
+    await scan;
+  }
+  assert.equal(viewVisible(), true);
+  assert.equal(dashboard.getChildren()[0]?.name, "widget");
 });
 
 for (const duplicate of [false, true]) {
@@ -288,7 +337,7 @@ test("renaming a loaded app to a duplicate keeps both build errors visible", asy
 });
 
 for (const queueBuild of [false, true]) {
-  test(`clearing apps preserves the last report ${queueBuild ? "with a build queued" : "while refresh is queued"}`, async (t) => {
+  test(`removing apps clears the build report ${queueBuild ? "with a build queued" : "while refresh is queued"}`, async (t) => {
     const { root, writeApp } = fixture(t);
     writeApp("widget");
     const context = t.mock.method(stub.commands, "executeCommand");
@@ -298,8 +347,7 @@ for (const queueBuild of [false, true]) {
     });
     const run = (name: string) => stub.registeredCommands.get(`mf-dashboard.${name}`)!();
     await run("rebuildAllTypes");
-    const lastReport = state.get("mf-dashboard.lastTypesBuild");
-    assert.ok(lastReport);
+    assert.ok(state.get("mf-dashboard.lastTypesBuild"));
     const refresh = session.refresh.bind(session);
     let unblock = () => {};
     const blocked = new Promise<void>((resolve) => {
@@ -311,7 +359,8 @@ for (const queueBuild of [false, true]) {
     });
     const pendingRefresh = run("refresh");
     const pendingBuild = queueBuild ? run("rebuildAllTypes") : undefined;
-    values.set("mf-dashboard.apps", {});
+    if (queueBuild) values.set("mf-dashboard.apps", {});
+    else values.delete("mf-dashboard.apps");
     changes.fire({
       affectsConfiguration: (key) => key === "mf-dashboard.apps",
     } as ConfigurationChangeEvent);
@@ -326,9 +375,11 @@ for (const queueBuild of [false, true]) {
     await Promise.all([pendingRefresh, pendingBuild, pendingAfterClear]);
     await run("refresh");
     assert.equal(enabled, false);
-    assert.equal(state.get("mf-dashboard.lastTypesBuild"), lastReport);
+    assert.equal(state.get("mf-dashboard.lastTypesBuild"), undefined);
+    assert.deepEqual(typesView.getChildren(), []);
+    await run("discover");
     const [widget] = typesView.getChildren();
-    assert.equal(typesView.getTreeItem(widget).description, "No types to update");
+    assert.equal(typesView.getTreeItem(widget).description, "Not built yet");
   });
 }
 

@@ -1633,7 +1633,7 @@ test("cycles, unresolved remotes and failed producers block only dependent chain
   const healthy = f.app("healthy", 4505);
   const unresolved = f.app("unresolved", 4506, {
     consumeTypes: true,
-    remotes: [{ alias: "unknown", name: healthy.name, url: null }],
+    remotes: [{ alias: "unknown", name: "not-in-workspace", url: null }],
   });
   const report = await rebuildAllTypes(f.context([a, b, failed, dependent, healthy, unresolved]), {
     ...unused,
@@ -1891,6 +1891,182 @@ fs.writeFileSync("dist/@mf-types.zip", Buffer.concat([
     }
   });
 }
+
+test("a missing manifest URL uses the ZIP of the named workspace dependency", async (t) => {
+  const f = fixture(t);
+  const catalog = f.app("catalog", 4501);
+  const shell = f.app("shell", 4502, {
+    consumeTypes: true,
+    remotes: [{ ...remote(catalog), url: null }],
+  });
+  const report = await rebuildAllTypes(f.context([shell, catalog], { target: shell.name }), {
+    ...unused,
+    generateLocalFederatedTypes: mockGeneration((folder) =>
+      writeZip(path.join(folder, "dist", "@mf-types.zip"), path.basename(folder)),
+    ),
+  });
+  assert.deepEqual(report.rebuilt, [catalog.name, shell.name]);
+  assert.deepEqual(report.failed, []);
+  assert.deepEqual(report.skipped, []);
+  assert.equal(fs.readFileSync(typeFile(shell, catalog.name), "utf8"), catalog.name);
+});
+
+test("bulk and single builds use workspace types when configured external manifests are unavailable", async (t) => {
+  const f = fixture(t);
+  const schema = f.app("schema", 4501);
+  const unreachable = (app: LocalApp) => ({
+    ...remote(app),
+    url: `https://unavailable.example/${app.name}/mf-manifest.json`,
+  });
+  const catalog = f.app("catalog", 4502, {
+    consumeTypes: true,
+    remotes: [unreachable(schema)],
+  });
+  const shell = f.app("shell", 4503, {
+    consumeTypes: true,
+    remotes: [unreachable(catalog), unreachable(schema)],
+  });
+  const unrelated = f.app("unrelated", 4504);
+  const fetch = t.mock.method(globalThis, "fetch", async () => new Response(null, { status: 503 }));
+  const io = {
+    ...unused,
+    installRemoteTypes,
+    generateLocalFederatedTypes: mockGeneration((folder) =>
+      writeZip(path.join(folder, "dist", "@mf-types.zip"), path.basename(folder)),
+    ),
+  };
+  const apps = [shell, catalog, unrelated, schema];
+  const installedByApp = new Map<string, readonly string[]>();
+  const single = await rebuildAllTypes(
+    f.context(apps, {
+      target: shell.name,
+      status(rows) {
+        for (const row of rows) if (row.installed) installedByApp.set(row.app, row.installed);
+      },
+    }),
+    io,
+  );
+  assert.deepEqual(single.failed, []);
+  assert.deepEqual(single.rebuilt, [schema.name, catalog.name, shell.name]);
+  assert.equal(fetch.mock.callCount(), 3);
+  assert.equal(fs.readFileSync(typeFile(shell, catalog.name), "utf8"), catalog.name);
+  assert.equal(fs.readFileSync(typeFile(shell, schema.name), "utf8"), schema.name);
+  assert.deepEqual(installedByApp.get(shell.name), [catalog.name, schema.name]);
+  assert.deepEqual(installedByApp.get(catalog.name), [schema.name]);
+  assert.equal(
+    f.confirmations.install({
+      consumer: shell.name,
+      alias: catalog.name,
+      remoteName: catalog.name,
+    })?.fromManifest,
+    false,
+  );
+  const bulk = await rebuildAllTypes(f.context(apps), io);
+  assert.deepEqual(bulk.failed, []);
+  assert.ok(bulk.rebuilt.includes(unrelated.name));
+});
+
+test("a single rebuild with available or already installed staging types leaves the local fallback alone", async (t) => {
+  const f = fixture(t);
+  const catalog = f.app("catalog", 4501);
+  const stagingUrl = "https://staging.example/catalog/mf-manifest.json";
+  const shell = f.app("shell", 4502, {
+    consumeTypes: true,
+    remotes: [{ ...remote(catalog), url: stagingUrl }],
+  });
+  const stagingZip = writeZip(path.join(catalog.folder, "staging.zip"), "staging");
+  serveZip(t, stagingUrl, stagingZip.zipPath);
+  const statusNames = new Set<string>();
+  const context = f.context([catalog, shell], {
+    target: shell.name,
+    status: (rows) => rows.forEach(({ app }) => statusNames.add(app)),
+  });
+  const io = {
+    ...unused,
+    installRemoteTypes,
+    generateLocalFederatedTypes: mockGeneration((folder) => {
+      assert.equal(folder, shell.folder);
+      const stagingTypes = fs.readFileSync(typeFile(shell, catalog.name), "utf8");
+      return writeZip(path.join(folder, "dist", "@mf-types.zip"), stagingTypes);
+    }),
+  };
+  const first = await rebuildAllTypes(context, io);
+  assert.deepEqual(first.failed, []);
+  assert.deepEqual(first.rebuilt, [shell.name]);
+  assert.equal(fs.readFileSync(typeFile(shell, catalog.name), "utf8"), "staging");
+
+  const fetch = t.mock.method(globalThis, "fetch", async () => new Response(null, { status: 503 }));
+  const second = await rebuildAllTypes(context, io);
+  assert.deepEqual(second.failed, []);
+  assert.deepEqual(second.rebuilt, [shell.name]);
+  assert.equal(fetch.mock.callCount(), 0);
+  assert.deepEqual(statusNames, new Set([shell.name]));
+});
+
+for (const [mode, unavailable] of [
+  ["bulk", "alpha"],
+  ["bulk", "beta"],
+  ["single", "alpha"],
+]) {
+  test(`${mode} rebuild resolves mutual external links when the ${unavailable} manifest returns 503`, async (t) => {
+    const f = fixture(t);
+    const alpha = f.app("alpha", 4501, { consumeTypes: true, remotes: [] });
+    const beta = f.app("beta", 4502, { consumeTypes: true, remotes: [] });
+    const origin = (name: string) => `https://staging.example/${name}/`;
+    const staged = (app: LocalApp) => ({
+      ...remote(app),
+      url: `${origin(app.name)}mf-manifest.json`,
+    });
+    alpha.remotes.push(staged(beta));
+    beta.remotes.push(staged(alpha));
+    const [producer, consumer] = unavailable === alpha.name ? [alpha, beta] : [beta, alpha];
+    const archive = writeZip(path.join(consumer.folder, "staging.zip"), "staging");
+    const fetch = t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
+      if (String(input) === staged(producer).url) return new Response(null, { status: 503 });
+      if (String(input) === staged(consumer).url)
+        return Response.json({
+          metaData: { publicPath: origin(consumer.name), types: { zip: "types.zip" } },
+        });
+      assert.equal(String(input), `${origin(consumer.name)}types.zip`);
+      return new Response(fs.readFileSync(archive.zipPath));
+    });
+    const target = mode === "single" ? consumer.name : undefined;
+    const report = await rebuildAllTypes(f.context([alpha, beta], { target }), {
+      ...unused,
+      installRemoteTypes,
+      generateLocalFederatedTypes: mockGeneration((folder) =>
+        writeZip(path.join(folder, "dist", "@mf-types.zip"), path.basename(folder)),
+      ),
+    });
+    assert.deepEqual(report.failed, []);
+    assert.deepEqual(report.skipped, []);
+    assert.deepEqual(report.rebuilt, [producer.name, consumer.name]);
+    assert.equal(fetch.mock.callCount(), 3);
+    assert.equal(fs.readFileSync(typeFile(producer, consumer.name), "utf8"), "staging");
+    assert.equal(fs.readFileSync(typeFile(consumer, producer.name), "utf8"), producer.name);
+  });
+}
+
+test("a possible local fallback does not create a cycle when the external manifest is available", async (t) => {
+  const f = fixture(t);
+  const shell = f.app("shell", 4501, { consumeTypes: true, remotes: [] });
+  const catalog = f.app("catalog", 4502, { consumeTypes: true, remotes: [remote(shell)] });
+  const stagingUrl = `https://staging.example/${catalog.name}/mf-manifest.json`;
+  shell.remotes.push({ ...remote(catalog), url: stagingUrl });
+  const stagingZip = writeZip(path.join(catalog.folder, "staging.zip"), "staging");
+  serveZip(t, stagingUrl, stagingZip.zipPath);
+  const report = await rebuildAllTypes(f.context([shell, catalog]), {
+    ...unused,
+    installRemoteTypes,
+    generateLocalFederatedTypes: mockGeneration((folder) =>
+      writeZip(path.join(folder, "dist", "@mf-types.zip"), path.basename(folder)),
+    ),
+  });
+  assert.deepEqual(report.failed, []);
+  assert.deepEqual(report.skipped, []);
+  assert.deepEqual(report.rebuilt, [shell.name, catalog.name]);
+  assert.equal(fs.readFileSync(typeFile(shell, catalog.name), "utf8"), "staging");
+});
 
 test("a staging URL uses external types even when a same-named local producer fails", async (t) => {
   const f = fixture(t);

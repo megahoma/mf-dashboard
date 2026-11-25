@@ -19,6 +19,11 @@ export type PlannedStep = {
 export type WorkspaceTypesNode = {
   app: LocalApp;
   generate: boolean;
-  links: { remote: LocalApp["remotes"][number]; url: URL | null; producer?: string }[];
+  links: {
+    remote: LocalApp["remotes"][number];
+    url: URL | null;
+    producer?: string;
+    fallback?: string;
+  }[];
   dependencies: string[];
 };

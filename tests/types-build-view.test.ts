@@ -45,6 +45,11 @@ test("discovered apps can be rebuilt in either layout before the first workspace
   assert.equal(view.getTreeItem(shell).description, "Not built yet");
   const [catalog, shared] = view.getChildren(shell);
   assert.equal(view.getChildren(shell).length, 2);
+  assert.equal(view.getTreeItem(shell).collapsibleState, vscode.TreeItemCollapsibleState.Expanded);
+  assert.equal(
+    view.getTreeItem(catalog).collapsibleState,
+    vscode.TreeItemCollapsibleState.Collapsed,
+  );
   const [nestedShared] = view.getChildren(catalog);
   assert.notEqual(view.getTreeItem(shared).id, view.getTreeItem(nestedShared).id);
   assert.deepEqual(view.getChildren(view.getChildren(nestedShared)[0]), []);
@@ -70,7 +75,7 @@ test("discovered apps can be rebuilt in either layout before the first workspace
   assert.equal(view.targetFor(flatCatalog), undefined);
 });
 
-test("a same-named local producer stays at the root when a consumer uses staging types", (t) => {
+test("the types tree follows the workspace hierarchy even when a consumer uses a staging URL", (t) => {
   const view = new TypesBuildView();
   t.after(() => view.dispose());
   view.setWorkspace(
@@ -85,13 +90,41 @@ test("a same-named local producer stays at the root when a consumer uses staging
     ],
     "tree",
   );
-  const [catalog, shell] = view.getChildren();
-  assert.deepEqual(
-    [view.getTreeItem(catalog).label, view.getTreeItem(shell).label],
-    ["catalog", "shell"],
-  );
-  assert.deepEqual(view.getChildren(shell), []);
+  const [shell] = view.getChildren();
+  assert.equal(view.getChildren().length, 1);
+  assert.equal(view.getTreeItem(shell).label, "shell");
+  const [catalog] = view.getChildren(shell);
+  assert.equal(view.getTreeItem(catalog).label, "catalog");
   assert.equal(view.targetFor(catalog)?.app, "catalog");
+});
+
+test("the types tree keeps its rows across identical probes and updates only the app occurrences", (t) => {
+  const view = new TypesBuildView();
+  const events: unknown[] = [];
+  t.after(() => view.dispose());
+  view.onDidChangeTreeData((event) => events.push(event));
+  const catalog = localApp("catalog", "/catalog");
+  const remotes = [
+    { name: "catalog", alias: "catalog", url: "http://localhost:4100/mf-manifest.json" },
+  ];
+  const apps = [
+    catalog,
+    localApp("admin", "/admin", { remotes }),
+    localApp("shell", "/shell", { remotes }),
+  ];
+  view.setWorkspace(apps, "tree");
+  const roots = view.getChildren();
+  const occurrences = roots.map((row) => view.getChildren(row)[0]);
+  events.length = 0;
+  view.setWorkspace(structuredClone(apps), "tree");
+  assert.deepEqual(events, []);
+  assert.equal(view.getChildren()[0], roots[0]);
+  view.update([{ app: "catalog", status: "running" }]);
+  assert.deepEqual(events, [occurrences]);
+  assert.deepEqual(
+    occurrences.map((row) => view.getTreeItem(row).description),
+    ["Updating", "Updating"],
+  );
 });
 
 test("build view can reopen the report and keeps compiler Problems until the next run", async (t) => {

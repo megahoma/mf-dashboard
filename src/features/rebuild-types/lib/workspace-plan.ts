@@ -30,13 +30,23 @@ export function workspaceTypesPlan(apps: readonly LocalApp[], target?: string) {
     const generate = isProducer(app);
     const links = (app.consumeTypes ? app.remotes : []).map((remote) => {
       const url = parseHttpUrl(remote.url);
-      const ambiguous = conflicts.get(remote.name);
-      const producer = ambiguous
-        ? ambiguous
-            .map((candidate) => localProducer(url, candidate))
-            .find((name) => name !== undefined)
-        : localProducer(url, groups.get(remote.name)?.[0]);
-      return { remote, url, producer };
+      const candidates = groups.get(remote.name) ?? [];
+      const [candidate] = candidates;
+      const ambiguous = candidates.length > 1;
+      const workspaceProducer =
+        !ambiguous && candidate && candidate !== app && isProducer(candidate)
+          ? candidate.name
+          : undefined;
+      const producer =
+        remote.url === null
+          ? workspaceProducer
+          : ambiguous
+            ? candidates
+                .map((candidate) => localProducer(url, candidate))
+                .find((name) => name !== undefined)
+            : localProducer(url, candidate);
+      const fallback = generate && url && !producer ? workspaceProducer : undefined;
+      return { remote, url, producer, fallback };
     });
     const dependencies = [
       ...new Set(links.map(({ producer }) => producer).filter((name) => name !== undefined)),
@@ -75,12 +85,21 @@ export function workspaceTypesPlan(apps: readonly LocalApp[], target?: string) {
     for (const name of [...nodes.keys()].sort()) visit(name);
   } else {
     visit(target);
+  }
+  const required = target === undefined ? order : [...order];
+  const selectedApps = target === undefined ? apps : apps.filter((app) => complete.has(app.name));
+  if (target !== undefined) {
+    // Keep fallback candidates and their dependencies available for an actual manifest failure.
+    for (const node of order) {
+      for (const { fallback } of node.links) if (fallback !== undefined) visit(fallback);
+    }
     for (const name of conflicts.keys()) if (!complete.has(name)) conflicts.delete(name);
   }
   return {
-    order,
+    order: required,
+    candidates: target === undefined ? nodes : new Map(order.map((node) => [node.app.name, node])),
     cycles,
     conflicts,
-    apps: target === undefined ? apps : apps.filter((app) => complete.has(app.name)),
+    apps: selectedApps,
   };
 }

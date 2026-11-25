@@ -80,6 +80,7 @@ export class MfDashboardProvider
   private timer: ReturnType<typeof setTimeout> | undefined;
   private readonly saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private disposed = false;
+  private discovering = false;
   private readonly log: LogContext;
   private statuses = new Map<string, string>();
   private readonly manifests = new ManifestDocuments();
@@ -345,6 +346,12 @@ export class MfDashboardProvider
 
   discover(): Promise<void> {
     return this.enqueue("discovery", (log) => this.session.discover(log));
+  }
+
+  setDiscovering(discovering: boolean): void {
+    if (this.discovering === discovering) return;
+    this.discovering = discovering;
+    this.change.fire();
   }
 
   async fileSaved(file: string): Promise<void> {
@@ -726,11 +733,13 @@ export class MfDashboardProvider
   }
 
   getChildren(element?: DashboardNode): DashboardNode[] {
+    if (this.discovering) return [];
     if (!element) return this.viewNodes();
     return element.children;
   }
 
   findRow(id: string): DashboardNode | undefined {
+    if (this.discovering) return;
     const pending = [...(this.view?.nodes ?? this.viewNodes())];
     while (pending.length > 0) {
       const row = pending.pop()!;
