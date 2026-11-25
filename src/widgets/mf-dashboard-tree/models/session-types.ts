@@ -7,6 +7,7 @@ import type {
 import type { AppConfig } from "../../../features/init-settings/index.ts";
 import type { inputsFingerprint } from "../../../features/rebuild-types/index.ts";
 import type { LogContext, LogFields, LogLevel } from "../../../shared/models/logging.ts";
+import type { WorkspaceGraph } from "../lib/workspace-graph.ts";
 import type { resolveRebuildApps } from "../lib/rebuild-apps.ts";
 import type { DashboardStructure } from "./presentation.ts";
 
@@ -60,6 +61,18 @@ export type DashboardSettings = {
 };
 
 export type DashboardPorts = {
+  graph?: {
+    prepare(roots: readonly WorkspaceRoot[]): Promise<void>;
+    read(roots: readonly WorkspaceRoot[], log: LogContext): Promise<WorkspaceGraph>;
+    publish(
+      roots: readonly WorkspaceRoot[],
+      settings: DashboardSettings,
+      selections: Record<string, AppSetting>,
+      cache: DiscoveryCache,
+      stillCurrent: () => boolean,
+      log: LogContext,
+    ): Promise<void>;
+  };
   readSettings(): DashboardSettings;
   writeApps(apps: Record<string, AppSetting>): void | Promise<void>;
   scan(

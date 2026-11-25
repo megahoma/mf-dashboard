@@ -132,13 +132,13 @@ test("refresh and the localized workspace types update are available in the view
 test("mf-types offers a layout switch and a rebuild action on app rows", () => {
   const menus = pkg.contributes.menus!;
   for (const [suffix, operator] of [
-    ["Flat", "!="],
-    ["Tree", "=="],
+    ["Flat", "!"],
+    ["Tree", ""],
   ]) {
     assert.equal(
       menus["view/title"]?.find((entry) => entry.command === `mf-dashboard.typesUse${suffix}`)
         ?.when,
-      `view == mf-dashboard.typesBuild && config.mf-dashboard.types.structure ${operator} flat`,
+      `view == mf-dashboard.typesBuild && ${operator}mf-dashboard.typesFlat`,
     );
   }
   const action = "mf-dashboard.rebuildAppTypes";

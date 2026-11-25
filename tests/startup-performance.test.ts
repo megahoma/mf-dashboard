@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -21,8 +22,18 @@ import {
 } from "../src/widgets/mf-dashboard-tree/lib/known-apps.ts";
 import { KnownAppsWorker } from "../src/widgets/mf-dashboard-tree/lib/known-apps-worker.mts";
 import { noLog } from "../src/shared/config/logging.ts";
+import {
+  GRAPH_FILE,
+  prepareWorkspaceGraphDirectories,
+  readWorkspaceGraphs,
+  workspaceGraphIsStale,
+  writeWorkspaceGraphs,
+} from "../src/widgets/mf-dashboard-tree/lib/workspace-graph.ts";
 import { createLogger } from "../src/shared/lib/logging.ts";
-import type { DashboardSettings } from "../src/widgets/mf-dashboard-tree/models/session-types.ts";
+import type {
+  DashboardSettings,
+  WorkspaceRoot,
+} from "../src/widgets/mf-dashboard-tree/models/session-types.ts";
 import type { TypesBuildView } from "../src/app/lib/types-build-view.ts";
 import type { MfDashboardProvider } from "../src/widgets/mf-dashboard-tree/index.ts";
 
@@ -54,11 +65,8 @@ function fixture(t: TestContext) {
 
 async function start(
   t: TestContext,
-  root: string,
+  root: string | readonly WorkspaceRoot[],
   initial: Record<string, unknown>,
-  onWrite?: (key: string) => void,
-  emitConfigurationEvents = false,
-  expectedRefresh = "refresh.completed",
 ) {
   const values = new Map(Object.entries(initial));
   const writes: string[] = [];
@@ -77,7 +85,11 @@ async function start(
     workspaceFolders?: { name: string; uri: stub.Uri }[];
   };
   const previousFolders = workspace.workspaceFolders;
-  workspace.workspaceFolders = [{ name: "workspace", uri: stub.Uri.file(root) }];
+  const roots = typeof root === "string" ? [{ name: "workspace", path: root }] : root;
+  workspace.workspaceFolders = roots.map(({ name, path: folder }) => ({
+    name,
+    uri: stub.Uri.file(folder),
+  }));
   t.after(() => {
     workspace.workspaceFolders = previousFolders;
   });
@@ -94,9 +106,6 @@ async function start(
       const full = section ? `${section}.${key}` : key;
       writes.push(full);
       values.set(full, value);
-      if (emitConfigurationEvents)
-        changes.fire({ affectsConfiguration: (key) => key === full } as ConfigurationChangeEvent);
-      onWrite?.(full);
     },
   })) as unknown as typeof stub.workspace.getConfiguration);
   let session: DashboardSession | undefined;
@@ -137,7 +146,7 @@ async function start(
   )
     await new Promise<void>((resolve) => setTimeout(resolve, 1));
   assert.ok(
-    channel.messages.some((message) => message.includes(expectedRefresh)),
+    channel.messages.some((message) => message.includes("refresh.completed")),
     channel.messages.join("\n"),
   );
   assert.ok(session);
@@ -206,6 +215,7 @@ test("finding microfrontends hides the previous tree and types view and ignores 
     ...defaultWorkspaceSettings(),
     "mf-dashboard.apps": { widget: { path: "widget" } },
   });
+  await session.discover();
   let complete = () => {};
   const scanning = new Promise<void>((resolve) => {
     complete = resolve;
@@ -239,250 +249,440 @@ test("finding microfrontends hides the previous tree and types view and ignores 
   assert.equal(dashboard.getChildren()[0]?.name, "widget");
 });
 
-for (const duplicate of [false, true]) {
-  test(`a saved workspace can run its types build with ${duplicate ? "duplicate names" : "only unreadable configs"}`, async (t) => {
-    const { root, writeApp } = fixture(t);
-    const configured: Record<string, { path: string }> = { missing: { path: "missing" } };
-    if (duplicate) {
-      for (const name of ["first", "second", "independent", "disabled"]) {
-        const config = writeApp(name);
-        if (name === "first" || name === "second")
-          fs.writeFileSync(config, "export default {name:'duplicate', dts:false}");
-        if (name === "independent")
-          fs.writeFileSync(
-            config,
-            "export default {name:'independent', dts:true, exposes:{'.':'./index.ts'}}",
-          );
-        configured[name] = { path: name };
-      }
-    }
-    const context = t.mock.method(stub.commands, "executeCommand");
-    const document = t.mock.method(stub.workspace, "openTextDocument");
-    const { session, values, typesView } = await start(
-      t,
-      root,
-      { ...defaultWorkspaceSettings(), "mf-dashboard.apps": configured },
-      undefined,
-      false,
-      duplicate ? "refresh.failed" : "refresh.completed",
-    );
-    assert.deepEqual(session.loaded, []);
-    const availability = () =>
-      context.mock.calls
-        .filter(
-          ({ arguments: args }) =>
-            args[0] === "setContext" && args[1] === "mf-dashboard.canUpdateTypes",
-        )
-        .map(({ arguments: args }) => args[2]);
-    assert.deepEqual(availability(), [false, true]);
-    const run = (name: string, ...args: unknown[]) =>
-      stub.registeredCommands.get(`mf-dashboard.${name}`)!(...args);
-    await run("rebuildAllTypes");
-    await run("openTypesBuildReport");
-    const report = document.mock.calls.at(-1)?.arguments[0] as unknown as { content: string };
-    assert.match(report.content, /missing — Skipped\nCould not read/);
-    if (duplicate) {
-      assert.match(report.content, /duplicate \(first\) — Skipped/);
-      assert.match(report.content, /duplicate \(second\) — Skipped/);
-      assert.match(report.content, /disabled — No types to update/);
-      const independent = typesView
-        .getChildren()
-        .find((row) => "app" in row && row.app === "independent");
-      assert.ok(independent);
-      assert.equal(typesView.getTreeItem(independent).contextValue, "typesBuildApp");
-      const conflict = typesView
-        .getChildren()
-        .filter((row) => "app" in row && row.app === "duplicate");
-      assert.equal(conflict.length, 2);
-      for (const row of conflict) {
-        const item = typesView.getTreeItem(row);
-        assert.equal(item.description, "Skipped");
-        assert.equal(item.contextValue, undefined);
-      }
-      const previousUpdates = availability().length;
-      await run("rebuildAppTypes", independent);
-      assert.deepEqual(availability().slice(previousUpdates), [false, true]);
-    }
-    values.set("mf-dashboard.apps", {});
-    await run("refresh");
-    assert.equal(availability().at(-1), false);
-  });
-}
+test("duplicate names leave the saved graph intact after a failed rescan", async (t) => {
+  const { root, writeApp } = fixture(t);
+  writeApp("first");
+  const { session } = await start(t, root, {});
+  await session.discover();
+  const file = path.join(root, GRAPH_FILE);
+  const before = fs.readFileSync(file, "utf8");
+  fs.writeFileSync(writeApp("second"), "export default {name:'first'}");
+  await assert.rejects(session.discover(), /duplicate federation name: first/);
+  assert.equal(fs.readFileSync(file, "utf8"), before);
+  assert.deepEqual(
+    session.loaded.map(({ name }) => name),
+    ["first"],
+  );
+});
 
-test("renaming a loaded app to a duplicate keeps both build errors visible", async (t) => {
+test("refresh keeps the saved graph while an explicit build reports changed configurations", async (t) => {
   const { root, writeApp } = fixture(t);
   writeApp("alpha");
   const beta = writeApp("beta");
-  const { session, typesView } = await start(t, root, {
-    ...defaultWorkspaceSettings(),
-    "mf-dashboard.apps": { alpha: { path: "alpha" }, beta: { path: "beta" } },
-  });
+  const { session, typesView } = await start(t, root, {});
+  await session.discover();
   fs.writeFileSync(beta, "export default {name:'alpha', dts:false}");
   const run = (name: string) => stub.registeredCommands.get(`mf-dashboard.${name}`)!();
-  await assert.rejects(async () => run("refresh"), /duplicate federation name/);
+  await run("refresh");
   assert.deepEqual(
     session.loaded.map(({ name }) => name),
     ["alpha", "beta"],
   );
   await run("rebuildAllTypes");
   const items = typesView.getChildren().map((row) => typesView.getTreeItem(row));
-  assert.deepEqual(
-    items.map((item) => item.label),
-    ["alpha", "alpha (beta)"],
+  const conflicts = items.filter((item) =>
+    /Duplicate Module Federation name: alpha/.test(String(item.tooltip)),
   );
-  for (const item of items) {
-    assert.equal(item.description, "Skipped");
-    assert.match(String(item.tooltip), /Duplicate Module Federation name: alpha/);
-  }
+  assert.deepEqual(conflicts.map((item) => item.label).sort(), ["alpha", "alpha (beta)"]);
 });
 
-for (const queueBuild of [false, true]) {
-  test(`removing apps clears the build report ${queueBuild ? "with a build queued" : "while refresh is queued"}`, async (t) => {
-    const { root, writeApp } = fixture(t);
-    writeApp("widget");
-    const context = t.mock.method(stub.commands, "executeCommand");
-    const { session, values, changes, state, typesView } = await start(t, root, {
-      ...defaultWorkspaceSettings(),
-      "mf-dashboard.apps": { widget: { path: "widget" } },
-    });
-    const run = (name: string) => stub.registeredCommands.get(`mf-dashboard.${name}`)!();
-    await run("rebuildAllTypes");
-    assert.ok(state.get("mf-dashboard.lastTypesBuild"));
-    const refresh = session.refresh.bind(session);
-    let unblock = () => {};
-    const blocked = new Promise<void>((resolve) => {
-      unblock = resolve;
-    });
-    t.mock.method(session, "refresh", async (...args: Parameters<DashboardSession["refresh"]>) => {
-      if (args[0] === "manual") await blocked;
-      await refresh(...args);
-    });
-    const pendingRefresh = run("refresh");
-    const pendingBuild = queueBuild ? run("rebuildAllTypes") : undefined;
-    if (queueBuild) values.set("mf-dashboard.apps", {});
-    else values.delete("mf-dashboard.apps");
-    changes.fire({
-      affectsConfiguration: (key) => key === "mf-dashboard.apps",
-    } as ConfigurationChangeEvent);
-    const enabled = context.mock.calls
-      .filter(
-        ({ arguments: args }) =>
-          args[0] === "setContext" && args[1] === "mf-dashboard.canUpdateTypes",
-      )
-      .at(-1)?.arguments[2];
-    const pendingAfterClear = run("rebuildAllTypes");
-    unblock();
-    await Promise.all([pendingRefresh, pendingBuild, pendingAfterClear]);
-    await run("refresh");
-    assert.equal(enabled, false);
-    assert.equal(state.get("mf-dashboard.lastTypesBuild"), undefined);
-    assert.deepEqual(typesView.getChildren(), []);
-    await run("discover");
-    const [widget] = typesView.getChildren();
-    assert.equal(typesView.getTreeItem(widget).description, "Not built yet");
-  });
-}
-
-test("startup diagnostics expose settings writes and preserve all configuration-triggered refreshes", async (t) => {
+test("deleting the graph clears the types report, while clearing legacy settings keeps the graph", async (t) => {
   const { root, writeApp } = fixture(t);
-  writeApp("shell");
   writeApp("widget");
-  const { channel, writes } = await start(t, root, {}, undefined, true);
-  const refreshes = () => channel.messages.filter((text) => text.startsWith("refresh.started"));
-  for (
-    const deadline = Date.now() + 5000;
-    channel.messages.filter((text) => text.startsWith("refresh.completed")).length < 8 &&
-    Date.now() < deadline;
-  ) {
-    await new Promise<void>((resolve) => setTimeout(resolve, 1));
-  }
-  assert.equal(writes.length, Object.keys(defaultWorkspaceSettings()).length + 1);
-  assert.equal(refreshes().length, 8, channel.messages.join("\n"));
-  assert.ok(channel.messages.some((text) => text.startsWith("settings.seed.completed")));
-  assert.ok(channel.messages.some((text) => text.startsWith("discovery.scan.completed")));
-  assert.ok(channel.messages.some((text) => text.startsWith("startup.completed")));
+  const context = t.mock.method(stub.commands, "executeCommand");
+  const { session, values, changes, state, typesView } = await start(t, root, {
+    "mf-dashboard.apps": { widget: { path: "widget" } },
+  });
+  await session.discover();
+  const run = (name: string) => stub.registeredCommands.get(`mf-dashboard.${name}`)!();
+  await run("rebuildAllTypes");
+  assert.ok(state.get("mf-dashboard.lastTypesBuild"));
+  values.delete("mf-dashboard.apps");
+  changes.fire({
+    affectsConfiguration: (key) => key === "mf-dashboard.apps",
+  } as ConfigurationChangeEvent);
+  await run("refresh");
+  assert.deepEqual(
+    session.loaded.map(({ name }) => name),
+    ["widget"],
+  );
+  assert.ok(state.get("mf-dashboard.lastTypesBuild"));
+
+  fs.unlinkSync(path.join(root, GRAPH_FILE));
+  await run("refresh");
+  const enabled = context.mock.calls
+    .filter(
+      ({ arguments: args }) =>
+        args[0] === "setContext" && args[1] === "mf-dashboard.canUpdateTypes",
+    )
+    .at(-1)?.arguments[2];
+  assert.equal(enabled, false);
+  assert.equal(state.get("mf-dashboard.lastTypesBuild"), undefined);
+  assert.deepEqual(typesView.getChildren(), []);
+  await run("discover");
+  const [widget] = typesView.getChildren();
+  assert.equal(typesView.getTreeItem(widget).description, "Not built yet");
 });
 
-for (const seeded of [false, true]) {
-  test(`configured startup skips workspace discovery with defaults ${seeded ? "saved" : "missing"}`, async (t) => {
-    const { root, writeApp } = fixture(t);
-    writeApp("configured");
-    writeApp("not-yet-discovered");
-    fs.writeFileSync(path.join(root, "package.json"), '{"workspaces":["configured"]}');
-    fs.writeFileSync(path.join(root, "configured", "package.json"), '{"name":"configured"}');
-    const readdir = t.mock.method(fs, "readdirSync");
-    const initial = {
-      ...(seeded ? defaultWorkspaceSettings() : {}),
-      "mf-dashboard.apps": { configured: { path: "configured" } },
-    };
-    const { session, writes } = await start(t, root, initial);
-    assert.deepEqual(
-      session.loaded.map((app) => app.name),
-      ["configured"],
-    );
-    assert.equal(readdir.mock.calls.filter((call) => String(call.arguments[0]) === root).length, 0);
-    assert.equal(
-      readdir.mock.calls.filter((call) => String(call.arguments[0]).includes("unrelated")).length,
-      0,
-    );
-    assert.equal(writes.length, seeded ? 0 : Object.keys(defaultWorkspaceSettings()).length);
-    await session.refresh("manual");
-    assert.equal(
-      readdir.mock.calls.filter((call) => String(call.arguments[0]).includes("unrelated")).length,
-      0,
-    );
-    await session.discover();
-    assert.deepEqual(session.loaded.map((app) => app.name).sort(), [
-      "configured",
-      "not-yet-discovered",
-    ]);
-  });
-}
-
-test("first startup shares one worker scan and config parse across seeding, discovery and refresh", async (t) => {
+test("first open waits for Find and never seeds workspace settings", async (t) => {
   const { root, writeApp } = fixture(t);
-  const config = writeApp("discovered");
-  const readdir = t.mock.method(fs, "readdirSync");
-  const openFile = t.mock.method(fs, "openSync");
-  const createOutputChannel = stub.window.createOutputChannel;
-  t.mock.method(
-    stub.window,
-    "createOutputChannel",
-    (...args: Parameters<typeof createOutputChannel>) => {
-      const channel = createOutputChannel(...args);
-      channel.logLevel = stub.LogLevel.Trace;
-      return channel;
-    },
-  );
-  const { session, values, channel } = await start(t, root, {});
-  assert.deepEqual(
-    session.loaded.map((app) => app.name),
-    ["discovered"],
-  );
-  assert.equal(readdir.mock.calls.filter((call) => String(call.arguments[0]) === root).length, 0);
+  writeApp("first");
+  const { session, channel, writes } = await start(t, root, {});
+  assert.deepEqual(session.loaded, []);
+  assert.equal(fs.existsSync(path.join(root, GRAPH_FILE)), false);
   assert.equal(
-    openFile.mock.calls.filter((call) => String(call.arguments[0]) === config).length,
-    0,
+    channel.messages.some((line) => line.startsWith("discovery.scan.started")),
+    false,
   );
+  await stub.registeredCommands.get("mf-dashboard.discover")!();
+  assert.deepEqual(
+    session.loaded.map(({ name }) => name),
+    ["first"],
+  );
+  assert.deepEqual(writes, []);
   assert.equal(
     channel.messages.filter((line) => line.startsWith("discovery.scan.started")).length,
     1,
   );
+  assert.ok(fs.existsSync(path.join(root, GRAPH_FILE)));
+});
+
+test("a local graph cold-loads without scanning or requiring legacy app settings", async (t) => {
+  const { root, writeApp } = fixture(t);
+  const config = writeApp("configured");
+  const roots = [{ name: "workspace", path: root }];
+  const settings: DashboardSettings = {
+    apps: undefined,
+    envMode: "development",
+    ignorePaths: [],
+    extraManifestUrls: [],
+    structure: "tree",
+  };
+  await prepareWorkspaceGraphDirectories(roots);
+  await writeWorkspaceGraphs(
+    roots,
+    settings,
+    { configured: { path: "configured" } },
+    Object.values(scanWorkspace(root)),
+    new Set(),
+    () => true,
+  );
+  fs.writeFileSync(config, "export default {name:'edited'}");
+  writeApp("new-app");
+
+  const { session, writes, channel } = await start(t, root, {});
+  assert.deepEqual(
+    session.loaded.map(({ name }) => name),
+    ["configured"],
+  );
+  assert.deepEqual(writes, []);
+  for (let i = 0; i < 100 && !session.graphStale; i++)
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  assert.equal(session.graphStale, true);
   assert.equal(
-    channel.messages.filter(
-      (line) =>
-        line.startsWith("discovery.candidate") && line.includes("module-federation.config.ts"),
-    ).length,
+    channel.messages.some((line) => line.startsWith("discovery.scan.started")),
+    false,
+  );
+  await session.discover();
+  assert.deepEqual(
+    session.loaded.map(({ name }) => name),
+    ["edited", "new-app"],
+  );
+});
+
+test("a saved graph resolves paths in another checkout and rejects paths outside it", async (t) => {
+  const original = fixture(t);
+  original.writeApp("catalog");
+  const roots = [{ name: "original", path: original.root }];
+  const settings: DashboardSettings = {
+    apps: undefined,
+    envMode: "development",
+    ignorePaths: [],
+    extraManifestUrls: [],
+    structure: "tree",
+  };
+  await prepareWorkspaceGraphDirectories(roots);
+  await writeWorkspaceGraphs(
+    roots,
+    settings,
+    {},
+    Object.values(scanWorkspace(original.root)),
+    new Set(),
+    () => true,
+  );
+  const clone = fixture(t);
+  fs.cpSync(original.root, clone.root, { recursive: true });
+  const copiedRoots = [{ name: "clone", path: clone.root }];
+  const { apps, settings: selections } = await readWorkspaceGraphs(copiedRoots, noLog);
+  assert.equal(apps[0]?.folder, path.join(clone.root, "catalog"));
+  assert.equal(selections.catalog.workspaceFolder, "clone");
+
+  const file = path.join(clone.root, GRAPH_FILE);
+  const graph = JSON.parse(fs.readFileSync(file, "utf8"));
+  fs.symlinkSync(original.root, path.join(clone.root, "outside"), "dir");
+  graph.apps[0].folder = "outside/catalog";
+  fs.writeFileSync(file, JSON.stringify(graph));
+  const rejected = await readWorkspaceGraphs(copiedRoots, noLog);
+  assert.deepEqual(rejected.apps, []);
+  assert.equal(rejected.incomplete, true);
+});
+
+test("Find preserves computed URLs in an ignored graph and reindexes after edits to local dotenv", async (t) => {
+  const { root, writeApp } = fixture(t);
+  execFileSync("git", ["init", "-q"], { cwd: root });
+  const folder = path.dirname(writeApp("shell"));
+  fs.writeFileSync(
+    path.join(folder, "module-federation.config.ts"),
+    [
+      'const local = "http://127.0.0.1:43113";',
+      'export default {name:"shell", remotes: {',
+      "  catalog: `catalog@${import.meta.env.CATALOG_URL}/${import.meta.env.ROUTE}/mf-manifest.json`,",
+      "  repo: `repo@${local}/mf-manifest.json`,",
+      "}};",
+    ].join("\n"),
+  );
+  const env = path.join(folder, ".env.development.local");
+  const firstHost = "http://127.0.0.1:43110";
+  fs.writeFileSync(env, `OTHER_URL=${firstHost}\nCATALOG_URL=${firstHost}\nROUTE=fixture-path`);
+  const { session, channel } = await start(t, root, {});
+  await session.discover();
+  const file = path.join(root, GRAPH_FILE);
+  const graph = fs.readFileSync(file, "utf8");
+  assert.equal(graph.includes(root), false);
+  assert.doesNotMatch(graph, /OTHER_URL|CATALOG_URL|launchEnvironment/);
+  assert.equal(
+    execFileSync("git", ["check-ignore", GRAPH_FILE], { cwd: root, encoding: "utf8" }).trim(),
+    GRAPH_FILE,
+  );
+  assert.equal(fs.existsSync(path.join(root, ".gitignore")), false);
+  assert.deepEqual(session.loaded[0].remotes, [
+    { name: "catalog", alias: "catalog", url: `${firstHost}/fixture-path/mf-manifest.json` },
+    { name: "repo", alias: "repo", url: "http://127.0.0.1:43113/mf-manifest.json" },
+  ]);
+
+  const nextHost = "http://127.0.0.1:43111";
+  fs.writeFileSync(env, `OTHER_URL=${firstHost}\nCATALOG_URL=${nextHost}\nROUTE=updated-path`);
+  await session.refresh();
+  assert.equal(session.loaded[0].remotes[0].url, `${firstHost}/fixture-path/mf-manifest.json`);
+  assert.equal(fs.readFileSync(file, "utf8"), graph);
+  for (let i = 0; i < 100 && !session.graphStale; i++)
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  assert.equal(session.graphStale, true);
+  assert.equal(
+    channel.messages.filter((line) => line.startsWith("discovery.scan.started")).length,
     1,
   );
-  assert.deepEqual(values.get("mf-dashboard.apps"), {
-    discovered: {
-      path: "discovered",
-    },
-  });
-  writeApp("new-config");
   await session.discover();
-  assert.deepEqual(session.loaded.map((app) => app.name).sort(), ["discovered", "new-config"]);
+  assert.equal(session.loaded[0].remotes[0].url, `${nextHost}/updated-path/mf-manifest.json`);
+});
+
+test("graph initialization preserves existing ignore rules and refuses a tracked graph", async (t) => {
+  const { root } = fixture(t);
+  const roots = [{ name: "workspace", path: root }];
+  execFileSync("git", ["init", "-q"], { cwd: root });
+  fs.mkdirSync(path.join(root, ".mf-dashboard"));
+  const ignore = path.join(root, ".mf-dashboard/.gitignore");
+  fs.writeFileSync(ignore, "# Team notes\n/notes.json");
+  await prepareWorkspaceGraphDirectories(roots);
+  const contents = fs.readFileSync(ignore, "utf8");
+  assert.match(contents, /^# Team notes\n\/notes\.json\n/);
+  await prepareWorkspaceGraphDirectories(roots);
+  assert.equal(fs.readFileSync(ignore, "utf8"), contents);
+  fs.writeFileSync(path.join(root, GRAPH_FILE), "{}");
+  execFileSync("git", ["add", "-f", "--", GRAPH_FILE], { cwd: root });
+  await assert.rejects(prepareWorkspaceGraphDirectories(roots), /is tracked by Git/);
+});
+
+test("Find retains a migrated explicit config after a temporary syntax error", async (t) => {
+  const { root } = fixture(t);
+  const config = path.join(root, "custom.ts");
+  const valid = 'export default {name:"configured", dts:false};';
+  fs.writeFileSync(path.join(root, "package.json"), "{}");
+  fs.writeFileSync(config, valid);
+  const { session, values } = await start(t, root, {
+    "mf-dashboard.apps": { configured: { path: ".", configFile: "custom.ts" } },
+  });
+  await session.discover();
+  assert.equal(session.loaded[0]?.name, "configured");
+  values.delete("mf-dashboard.apps");
+  fs.writeFileSync(config, "export default {");
+  await session.discover();
+  assert.equal(session.loaded.length, 0);
+  assert.equal(session.workspaceGraph?.overrides.configured.configFile, "custom.ts");
+  assert.deepEqual(Object.keys(session.workspaceGraph?.settings ?? {}), []);
+  await session.refresh();
+
+  fs.writeFileSync(config, valid);
+  await session.discover();
+  assert.equal(session.loaded[0]?.name, "configured");
+  assert.equal(session.workspaceGraph?.settings.configured.configFile, "custom.ts");
+});
+
+test("Find can recover an unresolved unscoped override in another workspace root", async (t) => {
+  const first = fixture(t);
+  const second = fixture(t);
+  first.writeApp("shell");
+  const roots = [
+    { name: "first", path: first.root },
+    { name: "second", path: second.root },
+  ];
+  for (const { path: root } of roots) {
+    fs.mkdirSync(path.join(root, "widget"));
+    fs.writeFileSync(path.join(root, "widget/custom.ts"), "export default {");
+  }
+  const override = { path: "widget", configFile: "custom.ts" };
+  const { session, values } = await start(t, roots, {
+    "mf-dashboard.apps": { widget: override },
+  });
+  await session.discover();
+  assert.deepEqual(session.workspaceGraph?.overrides.widget, override);
+  values.delete("mf-dashboard.apps");
+  await session.refresh();
+
+  fs.writeFileSync(
+    path.join(second.root, "widget/custom.ts"),
+    'export default {name:"widget", dts:false};',
+  );
+  assert.equal(
+    await workspaceGraphIsStale(session.workspaceGraph!, {
+      apps: undefined,
+      envMode: "development",
+      ignorePaths: [],
+      extraManifestUrls: [],
+      structure: "tree",
+    }),
+    true,
+  );
+  await session.discover();
+  assert.equal(
+    session.loaded.find(({ name }) => name === "widget")?.folder,
+    path.join(second.root, "widget"),
+  );
+  assert.equal(session.workspaceGraph?.settings.widget.workspaceFolder, "second");
+});
+
+test("a ZIP override preserves whitespace in the file name after Find", async (t) => {
+  const { root, writeApp } = fixture(t);
+  const config = writeApp("widget");
+  const valid = fs.readFileSync(config, "utf8");
+  const folder = path.dirname(config);
+  const zip = path.join(folder, " types.zip ");
+  fs.writeFileSync(zip, "types archive");
+  fs.writeFileSync(config, "export default {");
+  const { session, values } = await start(t, root, {
+    "mf-dashboard.apps": { widget: { path: "widget", typesZipPath: "./ types.zip /." } },
+  });
+
+  await session.discover();
+  const unresolved = session.workspaceGraph?.overrides.widget.typesZipPath;
+  assert.ok(unresolved);
+  assert.equal(path.resolve(folder, unresolved.trim()), zip);
+
+  values.delete("mf-dashboard.apps");
+  fs.writeFileSync(config, valid);
+  await session.discover();
+  const resolved = session.workspaceGraph?.settings.widget.typesZipPath;
+  assert.ok(resolved);
+  assert.equal(fs.readFileSync(path.resolve(folder, resolved.trim()), "utf8"), "types archive");
+});
+
+test("editing an inactive standard config invalidates the graph", async (t) => {
+  const { root, writeApp } = fixture(t);
+  writeApp("shell");
+  const config = writeApp("widget");
+  const valid = fs.readFileSync(config, "utf8");
+  fs.writeFileSync(config, "export default {};");
+  const { session } = await start(t, root, {});
+  const settings: DashboardSettings = {
+    apps: undefined,
+    envMode: "development",
+    ignorePaths: [],
+    extraManifestUrls: [],
+    structure: "tree",
+  };
+
+  await session.discover();
+  assert.deepEqual(
+    session.loaded.map(({ name }) => name),
+    ["shell"],
+  );
+  assert.equal(await workspaceGraphIsStale(session.workspaceGraph!, settings), false);
+  fs.writeFileSync(config, valid);
+  assert.equal(await workspaceGraphIsStale(session.workspaceGraph!, settings), true);
+  await session.discover();
+  assert.deepEqual(
+    session.loaded.map(({ name }) => name),
+    ["shell", "widget"],
+  );
+});
+
+test("a launcher with a custom config invalidates the graph without AST parsing", async (t) => {
+  const { root, writeApp } = fixture(t);
+  writeApp("shell");
+  const { session } = await start(t, root, {});
+  await session.discover();
+  const settings: DashboardSettings = {
+    apps: undefined,
+    envMode: "development",
+    ignorePaths: [],
+    extraManifestUrls: [],
+    structure: "tree",
+  };
+  const folder = path.join(root, "new-package");
+  fs.mkdirSync(folder);
+  fs.writeFileSync(path.join(folder, "package.json"), "{}");
+  assert.equal(await workspaceGraphIsStale(session.workspaceGraph!, settings), false);
+
+  fs.writeFileSync(
+    path.join(folder, "package.json"),
+    '{"scripts":{"dev":"rsbuild dev --config custom.ts"}}',
+  );
+  assert.equal(await workspaceGraphIsStale(session.workspaceGraph!, settings), true);
+  await session.discover();
+  assert.deepEqual(
+    session.loaded.map(({ name }) => name),
+    ["shell"],
+  );
+  fs.writeFileSync(
+    path.join(folder, "custom.ts"),
+    'export default {plugins:[pluginModuleFederation({name:"newApp"})]};',
+  );
+  assert.equal(await workspaceGraphIsStale(session.workspaceGraph!, settings), true);
+  await session.discover();
+  assert.deepEqual(
+    session.loaded.map(({ name }) => name),
+    ["newApp", "shell"],
+  );
+});
+
+test("rebuild from the main tree resolves the configured launcher environment again", async (t) => {
+  const { root } = fixture(t);
+  fs.mkdirSync(path.join(root, "env"));
+  fs.writeFileSync(path.join(root, "env/.env.review"), "MODE_VALUE=fixture");
+  fs.writeFileSync(path.join(root, "tsconfig.json"), '{"include":["index.ts"]}');
+  fs.writeFileSync(path.join(root, "index.ts"), "export type Example = string;");
+  fs.writeFileSync(
+    path.join(root, "package.json"),
+    '{"scripts":{"dev":"rslib mf-dev --env-dir env --env-mode review"}}',
+  );
+  fs.writeFileSync(
+    path.join(root, "rslib.config.ts"),
+    'export default { lib: [{ format: "mf", plugins: [pluginModuleFederation({ name: "library", exposes: { ".": "./index.ts" }, dts: true })] }] };',
+  );
+  const { session, dashboard } = await start(t, root, {});
+  await session.discover();
+  assert.equal(session.loaded[0]?.launchEnvironment, undefined);
+  const request = t.mock.method(KnownAppsWorker.prototype, "request");
+  await dashboard.rebuild(dashboard.getChildren()[0]);
+  const resolve = request.mock.calls.find(({ arguments: args }) => args[0] === "rebuild");
+  assert.ok(resolve);
+  const resolved = (await resolve.result) as Awaited<
+    ReturnType<
+      typeof import("../src/widgets/mf-dashboard-tree/lib/rebuild-apps.ts").resolveRebuildApps
+    >
+  >;
+  assert.equal(resolved.apps[0]?.launchEnvironment?.envMode, "review");
+  assert.equal(resolved.apps[0]?.launchEnvironment?.env.MODE_VALUE, "fixture");
 });
 
 for (const apps of [undefined, {}]) {
@@ -499,7 +699,7 @@ for (const apps of [undefined, {}]) {
     assert.equal(readdir.mock.calls.filter((call) => String(call.arguments[0]) === root).length, 0);
     assert.equal(
       channel.messages.filter((line) => line.startsWith("discovery.scan.started")).length,
-      apps === undefined ? 1 : 0,
+      0,
     );
   });
 }
@@ -800,7 +1000,8 @@ test("Discover repairs a saved Rslib project path using its launcher", async (t)
   });
   assert.equal(session.loaded[0]?.launchFolder, undefined);
   await session.discover();
-  assert.deepEqual(values.get("mf-dashboard.apps"), { nested: { ...saved, path: "z-launch" } });
+  assert.deepEqual(values.get("mf-dashboard.apps"), { nested: saved });
+  assert.equal(session.workspaceGraph?.settings.nested.path, "z-launch");
   assert.equal(session.loaded[0]?.folder, project);
   assert.equal(session.loaded[0]?.launchFolder, launcher);
   assert.equal(session.loaded[0]?.manifestPath, "/custom.json");
@@ -827,7 +1028,8 @@ test("Discover repairs a saved Rslib project path using its launcher", async (t)
   );
   values.set("mf-dashboard.apps", { oldName: saved });
   await session.discover();
-  assert.deepEqual(values.get("mf-dashboard.apps"), { nested: { ...saved, path: "z-launch" } });
+  assert.deepEqual(values.get("mf-dashboard.apps"), { oldName: saved });
+  assert.equal(session.workspaceGraph?.settings.nested.path, "z-launch");
   assert.equal(session.loaded[0]?.manifestPath, "/custom.json");
 
   for (const pinned of [
@@ -913,7 +1115,8 @@ test("Discover repairs a saved Rslib project path using its launcher", async (t)
 
   values.set("mf-dashboard.apps", { broken: null });
   await session.discover();
-  assert.deepEqual(values.get("mf-dashboard.apps"), { broken: null, nested: { path: "z-launch" } });
+  assert.deepEqual(values.get("mf-dashboard.apps"), { broken: null });
+  assert.equal(session.workspaceGraph?.settings.nested.path, "z-launch");
   assert.deepEqual(
     session.loaded.map(({ settingsKey }) => settingsKey),
     ["nested"],
@@ -922,10 +1125,8 @@ test("Discover repairs a saved Rslib project path using its launcher", async (t)
   const ambiguousAliases = { first: { path: "z-launch" }, second: { path: "z-launch" } };
   values.set("mf-dashboard.apps", ambiguousAliases);
   await session.discover();
-  assert.deepEqual(values.get("mf-dashboard.apps"), {
-    ...ambiguousAliases,
-    nested: { path: "z-launch" },
-  });
+  assert.deepEqual(values.get("mf-dashboard.apps"), ambiguousAliases);
+  assert.equal(session.workspaceGraph?.settings.nested.path, "z-launch");
   assert.deepEqual(
     session.loaded.map(({ settingsKey }) => settingsKey),
     ["nested"],
@@ -1041,7 +1242,7 @@ test("Discover moves a saved standalone helper to its Rslib owner and preserves 
   );
 });
 
-test("Refresh tracks helper ownership through a sibling Rslib launcher's custom config", async (t) => {
+test("Find updates helper ownership through a sibling Rslib launcher's custom config", async (t) => {
   const { root } = fixture(t);
   for (const directory of ["helper", "launcher", "project"])
     fs.mkdirSync(path.join(root, directory));
@@ -1059,6 +1260,7 @@ test("Refresh tracks helper ownership through a sibling Rslib launcher's custom 
   const { session } = await start(t, root, {
     "mf-dashboard.apps": { legacy: { path: "helper" }, designKit: { path: "launcher" } },
   });
+  await session.discover();
   assert.equal(session.loaded[0]?.settingsKey, "legacy");
 
   fs.writeFileSync(
@@ -1066,13 +1268,15 @@ test("Refresh tracks helper ownership through a sibling Rslib launcher's custom 
     '{"scripts":{"dev":"rslib mf-dev --root ../project --config ../custom.ts"}}',
   );
   await session.refresh("timer");
+  assert.equal(session.loaded[0]?.settingsKey, "legacy");
+  await session.discover();
   assert.deepEqual(
     session.loaded.map(({ settingsKey, folder }) => [settingsKey, folder]),
     [["designKit", path.join(root, "project")]],
   );
 
   fs.writeFileSync(launcherPackage, "{}");
-  await session.refresh("manual");
+  await session.discover();
   assert.deepEqual(
     session.loaded.map(({ settingsKey }) => settingsKey),
     ["legacy"],
@@ -1714,31 +1918,6 @@ test("Discover does not save helpers imported by a configured Rslib start overri
   );
 });
 
-test("an imported intermediate changed while default settings are written invalidates startup discovery", async (t) => {
-  const { root, writeApp } = fixture(t);
-  const config = writeApp("app");
-  const folder = path.dirname(config);
-  const helper = path.join(folder, "name.ts");
-  fs.writeFileSync(
-    config,
-    'import { name } from "./bridge"; export default { name, manifest: true, dts: false };\n',
-  );
-  fs.writeFileSync(path.join(folder, "bridge.ts"), 'export { name } from "./name";\n');
-  fs.writeFileSync(helper, 'export const name = "before";\n');
-  let changed = false;
-  const { session, values } = await start(t, root, {}, () => {
-    if (changed) return;
-    changed = true;
-    fs.writeFileSync(helper, 'export const name = "after-change";\n');
-  });
-  assert.equal(changed, true);
-  assert.deepEqual(
-    session.loaded.map((app) => app.name),
-    ["after-change"],
-  );
-  assert.deepEqual(Object.keys(values.get("mf-dashboard.apps") as object), ["after-change"]);
-});
-
 test("an imported value changed during the apps write is reread before the first probe", async (t) => {
   const { root, writeApp } = fixture(t);
   const config = writeApp("app");
@@ -1818,26 +1997,6 @@ test("the worker checks discovery imports again before probing", async (t) => {
   );
   await session.discover();
 });
-
-for (const existingDirectory of [false, true]) {
-  test(`a config added ${existingDirectory ? "in an existing directory" : "with a new app directory"} during settings writes invalidates startup discovery`, async (t) => {
-    const { root, writeApp } = fixture(t);
-    writeApp("first");
-    if (existingDirectory) fs.mkdirSync(path.join(root, "second"));
-    let changed = false;
-    const { session, values } = await start(t, root, {}, () => {
-      if (changed) return;
-      changed = true;
-      writeApp("second");
-    });
-    assert.equal(changed, true);
-    assert.deepEqual(session.loaded.map((app) => app.name).sort(), ["first", "second"]);
-    assert.deepEqual(Object.keys(values.get("mf-dashboard.apps") as object).sort(), [
-      "first",
-      "second",
-    ]);
-  });
-}
 
 test("changes inside ignored directories do not invalidate the prepared discovery", async (t) => {
   const { root, writeApp } = fixture(t);

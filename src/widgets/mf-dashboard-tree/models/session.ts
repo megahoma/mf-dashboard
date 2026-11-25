@@ -24,6 +24,7 @@ import {
 import { beginRefetch, endRefetch, linksOf } from "../lib/links.ts";
 import { dashboardNodes, dashboardProblemDrafts } from "../lib/presentation.ts";
 import { resolveRowAction } from "../lib/targets.ts";
+import { workspaceGraphIsStale, type WorkspaceGraph } from "../lib/workspace-graph.ts";
 import type { DashboardNode, DashboardStructure } from "./presentation.ts";
 import type {
   AppParseCache,
@@ -36,6 +37,8 @@ export class DashboardSession {
   loaded: LocalApp[] = [];
   typesApps: readonly LocalApp[] = [];
   hasConfiguredApps = false;
+  workspaceGraph?: WorkspaceGraph;
+  graphStale = false;
   ownershipSources: ReadonlySet<string> = new Set();
   extraUrls: string[] = [];
   structure: DashboardStructure = "tree";
@@ -56,6 +59,7 @@ export class DashboardSession {
   private activeLog: LogContext = noLog;
   private pathWarnings = new Set<string>();
   private preparedDiscovery: DiscoverySnapshot | undefined;
+  private graphCheck = 0;
   readonly book: ProbeBook;
   private readonly onChange: () => void;
 
@@ -97,7 +101,7 @@ export class DashboardSession {
     };
     const started = Date.now();
     log.event(source === "timer" ? "debug" : "info", "refresh.started");
-    const snapshot = this.captureRefreshState();
+    let snapshot = this.captureRefreshState();
     let hasConfiguredApps = this.hasConfiguredApps;
     let failureFields: LogFields = {};
     this.probeRunning = true;
@@ -105,7 +109,7 @@ export class DashboardSession {
     try {
       const current = this.ports.readSettings();
       const roots = this.ports.roots();
-      const configured = Object.keys(current.apps ?? {}).length;
+      let configured = Object.keys(current.apps ?? {}).length;
       hasConfiguredApps = roots.length > 0 && configured > 0;
       const extraUrls = [...current.extraManifestUrls];
       // A flat/tree toggle during the probe updates this.structure in place.
@@ -113,7 +117,48 @@ export class DashboardSession {
       structureAtProbe = this.structure;
       let ownershipSources = new Set<string>();
       let loaded: LocalApp[] = [];
-      if (roots.length && current.apps) {
+      const graph = this.ports.graph;
+      if (graph) {
+        const previous = this.workspaceGraph;
+        const workspace =
+          source === "timer" && previous ? previous : await graph.read(roots, loadLog);
+        this.workspaceGraph = workspace;
+        loaded = workspace.apps;
+        configured = loaded.length;
+        hasConfiguredApps = configured > 0;
+        if (
+          previous !== workspace &&
+          (!previous ||
+            JSON.stringify(this.loaded) !== JSON.stringify(loaded) ||
+            JSON.stringify(this.extraUrls) !== JSON.stringify(extraUrls))
+        ) {
+          // Publish the saved structure before any network or type freshness checks.
+          this.applyRefreshState({
+            apps: new Map(),
+            links: new Map(),
+            extras: new Map(),
+            loaded,
+            extraUrls,
+            structure: this.structure,
+          });
+          this.typesApps = loaded;
+          this.hasConfiguredApps = hasConfiguredApps;
+          if (!workspace.files.length) this.graphStale = false;
+          snapshot = this.captureRefreshState();
+          this.onChange();
+        }
+        if (source !== "timer" || Date.now() - this.graphCheck >= 30_000) {
+          this.graphCheck = Date.now();
+          void workspaceGraphIsStale(workspace, current).then(
+            (stale) => {
+              if (this.workspaceGraph !== workspace || stale === this.graphStale) return;
+              this.graphStale = stale;
+              this.onChange();
+            },
+            (error: unknown) => log.event("warn", "graph.check.failed", safeError(error)),
+          );
+        }
+      } else if (roots.length && current.apps) {
         if (this.ports.loadKnownAsync && configured > 0) {
           ({ apps: loaded, ownershipSources } = await this.ports.loadKnownAsync(
             roots,
@@ -235,12 +280,21 @@ export class DashboardSession {
     let failureFields: LogFields = {};
     log.event("info", "discovery.started");
     try {
-      const current = this.ports.readSettings();
+      const readDiscoverySettings = () => {
+        const settings = this.ports.readSettings();
+        if (!this.workspaceGraph || settings.apps !== undefined) return settings;
+        return {
+          ...settings,
+          apps: this.workspaceGraph.overrides,
+        };
+      };
+      const current = readDiscoverySettings();
       const roots = this.ports.roots();
       if (new Set(roots.map((root) => root.name)).size !== roots.length) {
         failureFields = { reason: "duplicate-workspace-folder-name" };
         throw new Error("workspace folder names must be unique");
       }
+      if (this.ports.graph) await this.ports.graph.prepare(roots);
       const prepared = this.preparedDiscovery;
       this.preparedDiscovery = undefined;
       const key = discoveryKey(roots, current);
@@ -251,11 +305,22 @@ export class DashboardSession {
         failureFields = { reason: "duplicate-federation-name", app: plan.duplicateName };
         throw new Error(`duplicate federation name: ${plan.duplicateName}`);
       }
-      if (key !== discoveryKey(this.ports.roots(), this.ports.readSettings()))
+      if (key !== discoveryKey(this.ports.roots(), readDiscoverySettings()))
         throw new Error("Workspace settings changed during Discover");
-      if (plan.apps && !discoveryFilesAreCurrent(plan.cache))
+      if ((plan.apps || this.ports.graph) && !discoveryFilesAreCurrent(plan.cache))
         throw new Error("Workspace config files changed during Discover");
-      if (plan.apps) await this.ports.writeApps(plan.apps);
+      if (this.ports.graph) {
+        await this.ports.graph.publish(
+          roots,
+          current,
+          plan.apps ?? current.apps ?? {},
+          plan.cache,
+          () =>
+            key === discoveryKey(this.ports.roots(), readDiscoverySettings()) &&
+            discoveryFilesAreCurrent(plan.cache),
+          log,
+        );
+      } else if (plan.apps) await this.ports.writeApps(plan.apps);
       await this.refresh("discovery", log, plan.cache);
       log.event("info", "discovery.completed", {
         apps: this.loaded.length,

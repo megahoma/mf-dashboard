@@ -27,7 +27,7 @@ export async function startRow(
   const scriptKey = resolveStartScript(
     {
       "mf-dashboard.scripts.start": settings.startScript,
-      "mf-dashboard.apps": settings.apps,
+      "mf-dashboard.apps": session.workspaceGraph?.settings ?? settings.apps,
     },
     app.settingsKey ?? app.name,
   );

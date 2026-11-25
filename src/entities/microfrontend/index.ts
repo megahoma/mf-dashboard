@@ -5,7 +5,7 @@ export {
   configInputFingerprint,
   packageManifestInput,
 } from "./lib/config-input.ts";
-export { readPackageScripts } from "./lib/launch-script.ts";
+export { parseLaunchScript, readPackageScripts } from "./lib/launch-script.ts";
 export { federationClaimKey } from "./lib/discover-directory.ts";
 export {
   isIndependentRslibProject,

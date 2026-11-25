@@ -78,6 +78,12 @@ export const workspace = {
   onDidSaveTextDocument: () => ({ dispose() {} }),
   onDidChangeWorkspaceFolders: () => ({ dispose() {} }),
   onDidChangeConfiguration: () => ({ dispose() {} }),
+  createFileSystemWatcher: () => ({
+    onDidCreate: (_callback: () => void) => ({ dispose() {} }),
+    onDidChange: (_callback: () => void) => ({ dispose() {} }),
+    onDidDelete: (_callback: () => void) => ({ dispose() {} }),
+    dispose() {},
+  }),
   registerTextDocumentContentProvider: () => ({ dispose() {} }),
   async openTextDocument(uri: Uri) {
     return { uri };

@@ -29,7 +29,14 @@ export function readLaunchScript(
   scriptName: string,
   dependencies?: Set<string>,
   inputs?: Map<string, ConfigInput>,
-): {
+) {
+  const scripts = readPackageScripts(dir, dependencies, inputs);
+  return scripts && Object.hasOwn(scripts, scriptName)
+    ? parseLaunchScript(scripts[scriptName])
+    : null;
+}
+
+export function parseLaunchScript(script: unknown): {
   program: string;
   env: Record<string, string>;
   mode?: string;
@@ -40,9 +47,6 @@ export function readLaunchScript(
   envDir?: string;
   noEnv: boolean;
 } | null {
-  const scripts = readPackageScripts(dir, dependencies, inputs);
-  if (!scripts || !Object.hasOwn(scripts, scriptName)) return null;
-  const script = scripts[scriptName];
   try {
     const literal = process.platform === "win32" ? /^[\w.@:/\\=+\- \t]+$/ : /^[\w.@:/=+\- \t]+$/;
     if (typeof script !== "string" || !literal.test(script)) return null;
