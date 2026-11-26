@@ -5,8 +5,10 @@ import {
   sourceContainsAsync,
   type ConfirmationStore,
   type InstalledEvidence,
+  type LinkTypeObservation,
 } from "../../../entities/federated-types/index.ts";
 import {
+  appProbeId,
   createProbeBook,
   linkProbeId,
   probeWorkspace,
@@ -33,6 +35,7 @@ import { icons, type DashboardTerms } from "../../../shared/config/index.ts";
 import { noLog } from "../../../shared/config/logging.ts";
 import { logDuration, safeError } from "../../../shared/lib/logging.ts";
 import { createSerialQueue } from "../../../shared/lib/queue.ts";
+import { isLoopbackAtPort, localManifestUrl, parseHttpUrl } from "../../../shared/lib/urls.ts";
 import type { LogContext } from "../../../shared/models/logging.ts";
 import { savedFileKind } from "../lib/app-parse-cache.ts";
 import { KnownAppsWorker } from "../lib/known-apps-worker.mts";
@@ -180,13 +183,10 @@ export class MfDashboardProvider
           logDuration(input.log ?? log, "types.verify.completed", verifyStarted, { checkTypes });
           if (checkTypes && this.canCheckTypes()) {
             const evidenceStarted = Date.now();
-            this.pendingEvidence = await this.observation.prepare(
-              input.apps,
-              input.links,
-              target,
+            this.pendingEvidence = await this.observation.prepare(input.apps, input.links, target, {
               installed,
-              input.log,
-            );
+              log: input.log,
+            });
             logDuration(input.log ?? log, "types.evidence.completed", evidenceStarted, {
               producers: this.pendingEvidence.producers.size,
               destinations: this.pendingEvidence.installed.size,
@@ -205,7 +205,7 @@ export class MfDashboardProvider
       this.canCheckTypes(link),
     );
     this.session.terms = termsOf();
-    this.session.typesForLink = (link) => this.observation.statusFor(link);
+    this.session.typesForLink = (link) => this.observation.detailsFor(link).status;
     this.session.typesAutoCheck = readWorkspaceSettings().typesAutoCheck;
     this.session.typesCheckedAt = (link) => this.observation.checkedAt(link);
     this.session.beforeRefreshChange = (log) => {
@@ -217,7 +217,14 @@ export class MfDashboardProvider
         this.observation.apply(this.pendingEvidence);
         this.pendingEvidence = undefined;
       }
-      this.observation.pruneLinks(new Set(linksOf(this.session.loaded).map(linkProbeId)));
+      const links = linksOf(this.session.loaded);
+      this.observation.pruneLinks(new Set(links.map(linkProbeId)));
+      // Manual checks must keep their results even when no view reads the link.
+      if (this.explicitTypeCheck) {
+        for (const link of links) {
+          if (this.canCheckTypes(link)) this.observation.detailsFor(link);
+        }
+      }
     };
     this.session.onRefreshFailed = () => {
       this.pendingEvidence = undefined;
@@ -379,8 +386,8 @@ export class MfDashboardProvider
     return links.length > 0 ? new Set(links.map(linkProbeId)) : null;
   }
 
-  discover(): Promise<void> {
-    return this.enqueue("discovery", (log) => this.session.discover(log));
+  discover(onAppsReady?: () => void): Promise<void> {
+    return this.enqueue("discovery", (log) => this.session.discover(log, onAppsReady));
   }
 
   setDiscovering(discovering: boolean): void {
@@ -453,6 +460,10 @@ export class MfDashboardProvider
     this.session.setStructure(structure);
   }
 
+  setFlatSort(sort: DashboardSession["flatSort"]): void {
+    this.session.setFlatSort(sort);
+  }
+
   refetch(linkId: string): boolean {
     return this.session.refetch(linkId);
   }
@@ -522,13 +533,13 @@ export class MfDashboardProvider
   async openConfig(node?: DashboardNode): Promise<void> {
     const action = this.session.actionFor(node);
     if (!action?.configFile) return;
-    await showConfigFile(action.configFile);
+    await showConfigFile(action.configFile, this.session.terms.missingConfig);
   }
 
   async openProducerConfig(node?: DashboardNode): Promise<void> {
     const action = this.session.actionFor(node);
     if (!action?.producerConfigFile) return;
-    await showConfigFile(action.producerConfigFile);
+    await showConfigFile(action.producerConfigFile, this.session.terms.missingConfig);
   }
 
   async revealTypes(node?: DashboardNode): Promise<void> {
@@ -541,7 +552,13 @@ export class MfDashboardProvider
     const action = this.session.actionFor(node);
     if (!node || !action?.manifestUrl) return;
     const log = this.log.operation("open-manifest");
-    await openManifestPreview(this.manifests, node.name, action.manifestUrl, log);
+    await openManifestPreview(
+      this.manifests,
+      node.name,
+      action.manifestUrl,
+      log,
+      this.session.terms,
+    );
   }
 
   rebuild(node?: DashboardNode): Promise<void> {
@@ -769,9 +786,11 @@ export class MfDashboardProvider
     const row = element;
     const item = new vscode.TreeItem(
       row.name,
-      row.children.length > 0
-        ? vscode.TreeItemCollapsibleState.Expanded
-        : vscode.TreeItemCollapsibleState.None,
+      row.children.length === 0
+        ? vscode.TreeItemCollapsibleState.None
+        : row.linkId === null
+          ? vscode.TreeItemCollapsibleState.Expanded
+          : vscode.TreeItemCollapsibleState.Collapsed,
     );
     item.id = row.id;
     item.description = row.description;
@@ -779,6 +798,11 @@ export class MfDashboardProvider
     if (!readWorkspaceSettings().typesAutoCheck && this.typeLinksForNode(row))
       item.contextValue += " check-types";
     item.iconPath = new vscode.ThemeIcon(icons[row.kind]);
+    if (row.kind === "listen" || row.kind === "silent") {
+      item.accessibilityInformation = {
+        label: [row.name, this.session.terms[row.kind], row.description].filter(Boolean).join(", "),
+      };
+    }
     return item;
   }
 
@@ -789,13 +813,67 @@ export class MfDashboardProvider
   }
 
   findRow(id: string): DashboardNode | undefined {
+    return this.findViewRow((row) => row.id === id);
+  }
+
+  findAppRow(name: string): DashboardNode | undefined {
+    if (!this.session.loaded.some((app) => app.name === name)) return;
+    return this.findViewRow(
+      (row) => row.name === name && (row.linkId !== null || row.id === `app:${name}`),
+    );
+  }
+
+  getParent(node: DashboardNode): DashboardNode | undefined {
+    if (!node.linkId) return;
+    return this.findViewRow((row) => row.children.some((child) => child.id === node.id));
+  }
+
+  private findViewRow(matches: (row: DashboardNode) => boolean): DashboardNode | undefined {
     if (this.discovering) return;
-    const pending = [...(this.view?.nodes ?? this.viewNodes())];
+    const pending = [...(this.view?.nodes ?? this.viewNodes())].reverse();
     while (pending.length > 0) {
       const row = pending.pop()!;
-      if (row.id === id) return row;
-      for (const child of row.children) pending.push(child);
+      if (matches(row)) return row;
+      for (let index = row.children.length - 1; index >= 0; index--)
+        pending.push(row.children[index]);
     }
+  }
+
+  typeDetails(linkId: string): (LinkTypeObservation & { startToCheck?: true }) | undefined {
+    const link = parseLinkId(linkId);
+    if (!link) return;
+    const remote = this.session.loaded
+      .find(({ name }) => name === link.consumer)
+      ?.remotes.find(({ alias, name }) => alias === link.alias && name === link.remoteName);
+    if (!remote) return;
+    const observation = this.observation.detailsFor({ ...link, url: remote.url });
+    if (
+      observation.status === "none" ||
+      observation.archiveMatch === "matches" ||
+      observation.archiveMatch === "differs" ||
+      observation.sourceFreshness !== "unknown"
+    )
+      return observation;
+
+    const producer = this.session.loaded.find(({ name }) => name === link.remoteName);
+    const port = producer?.port;
+    const url = parseHttpUrl(remote.url);
+    if (
+      producer?.manifest &&
+      producer.generateTypes &&
+      producer.hasExposes !== false &&
+      port != null &&
+      url &&
+      isLoopbackAtPort(url, port) &&
+      this.session.book.apps.get(appProbeId(producer.name))?.portOpen === false &&
+      [producer.manifestPath, producer.devManifestPath].some((route) => {
+        if (route === undefined) return false;
+        const manifest = parseHttpUrl(localManifestUrl(port, route));
+        return manifest?.pathname === url.pathname && manifest.search === url.search;
+      })
+    )
+      return { ...observation, startToCheck: true };
+    return observation;
   }
 
   private viewNodes(): DashboardNode[] {
@@ -809,7 +887,6 @@ export class MfDashboardProvider
   // The probe book does not record whether a types path is a directory.
   // Comparing that shape keeps Reveal types current without building the tree again.
   private typesStamp(): string {
-    if (!readWorkspaceSettings().typesAutoCheck) return "";
     const rows: string[] = [];
     for (const app of this.session.loaded) {
       rows.push(directoryStamp(appTypesDir(app.folder, app.typesFolder)));
@@ -844,6 +921,7 @@ export class MfDashboardProvider
           this.session.loaded,
           links,
           this.session.book,
+          { allowDownload: false },
         );
         if (!this.canRefreshSavedTypes()) return;
         this.observation.invalidateLinks(links.map(linkProbeId));

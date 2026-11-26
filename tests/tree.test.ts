@@ -452,7 +452,7 @@ test("relabel uses the next terms without scanning", async () => {
   assert.equal(scans, 0);
   assert.equal(probes, 1);
   assert.equal(fires, before + 1);
-  assert.match(session.nodes()[0]?.description ?? "", /работает/);
+  assert.match(session.nodes()[0]?.tooltip ?? "", /работает/);
   assert.match(session.nodes()[0]?.tooltip ?? "", /каталог/);
 });
 
@@ -520,7 +520,7 @@ test("each row tooltip uses that row's manifest modules", () => {
   assert.ok(link);
 
   assert.equal(appRow.kind, "listen");
-  assert.equal(appRow.description, ":4100 · " + terms.listen);
+  assert.equal(appRow.description, ":4100");
   assert.ok(appRow.tooltip.indexOf("exposes: ./App") > appRow.tooltip.indexOf(terms.listen));
   assert.ok(
     appRow.tooltip.indexOf("shared: react@18.2.0 singleton") >
@@ -530,8 +530,8 @@ test("each row tooltip uses that row's manifest modules", () => {
   assert.equal(appRow.tooltip.includes("./Link"), false);
 
   assert.equal(link.kind, "listen");
-  assert.equal(link.description, ":4200 · " + terms.listen);
-  assert.ok(link.tooltip.indexOf("exposes: ./Link") > link.tooltip.indexOf(terms.typesUnknown));
+  assert.equal(link.description, ":4200");
+  assert.ok(link.tooltip.indexOf("exposes: ./Link") > link.tooltip.indexOf(terms.listen));
   assert.equal(link.tooltip.includes("shared:"), false);
   assert.equal(link.tooltip.includes("./Producer"), false);
   assert.equal(link.tooltip.includes("./App"), false);

@@ -1,3 +1,4 @@
+import { terms, type DashboardTerms } from "../../../shared/config/index.ts";
 import { isTimeoutError } from "../../../shared/lib/errors.ts";
 export function manifestDocumentPath(name: string): string {
   const safe = name.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
@@ -10,8 +11,11 @@ export function manifestPreviewText(json: unknown, body: Uint8Array | null): str
   return "";
 }
 
-export function manifestFailureMessage(error: unknown, status?: number): string {
-  if (status) return `MF dashboard: manifest is not reachable (HTTP ${status})`;
-  if (isTimeoutError(error)) return "MF dashboard: manifest request timed out";
-  return "MF dashboard: manifest network error";
+export function manifestFailureMessage(
+  error: unknown,
+  status?: number,
+  vocabulary: DashboardTerms = terms,
+): string {
+  if (status) return vocabulary.manifestHttpError.replace("{0}", String(status));
+  return isTimeoutError(error) ? vocabulary.manifestTimeout : vocabulary.manifestNetworkError;
 }

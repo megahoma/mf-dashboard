@@ -1,4 +1,7 @@
-import type { describeLink, InstalledEvidence } from "../../../entities/federated-types/index.ts";
+import type {
+  InstalledEvidence,
+  LinkTypeObservation,
+} from "../../../entities/federated-types/index.ts";
 import type { ProducerSnapshot } from "../../../features/rebuild-types/index.ts";
 
 export type TypeEvidence = {
@@ -8,7 +11,7 @@ export type TypeEvidence = {
 };
 
 export type TypeSnapshot = {
-  status: ReturnType<typeof describeLink>;
+  observation: LinkTypeObservation;
   checkedAt: number;
   signature: string;
 };

@@ -5,7 +5,7 @@ export const WORKSPACE_DEFAULTS = {
   "mf-dashboard.packageManager": "auto",
   "mf-dashboard.probeIntervalMs": 5000,
   "mf-dashboard.typesSettleMs": 15000,
-  "mf-dashboard.types.autoCheck": true,
+  "mf-dashboard.types.autoCheck": false,
   "mf-dashboard.terminal.reveal": true,
   "mf-dashboard.commands.rebuildTypes": "",
   "mf-dashboard.commands.refetchTypes": "",

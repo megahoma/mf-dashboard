@@ -5,6 +5,7 @@ import {
   readInstalledEvidenceAsync,
   type ConfirmationStore,
   type InstalledEvidence,
+  type LinkTypeObservation,
 } from "../../../entities/federated-types/index.ts";
 import {
   appsByName,
@@ -17,6 +18,7 @@ import type { InstallCheck } from "../../../features/observe-types/index.ts";
 import {
   collectProducerEvidence,
   collectProducerEvidenceAsync,
+  createPublishedZipComparison,
   type ProducerSnapshot,
 } from "../../../features/rebuild-types/index.ts";
 import { refetchTarget } from "../../../features/refetch-types/index.ts";
@@ -27,6 +29,7 @@ import type { DashboardSession } from "./session.ts";
 import type { TypeEvidence, TypeSnapshot } from "./type-observation-types.ts";
 
 export class DashboardTypeObservation {
+  private readonly compareZip = createPublishedZipComparison();
   private readonly producerCache = new Map<string, ProducerSnapshot>();
   private readonly installedCache = new Map<string, InstalledEvidence>();
   private readonly sourceErrors = new Map<string, unknown>();
@@ -96,19 +99,21 @@ export class DashboardTypeObservation {
     for (const key of this.warnings) if (!active.has(key)) this.warnings.delete(key);
   }
 
-  statusFor(link: RemoteLink): ReturnType<typeof describeLink> {
+  detailsFor(link: RemoteLink): LinkTypeObservation {
     const consumer = this.session.loaded.find((app) => app.name === link.consumer);
-    if (consumer?.consumeTypes === false) return "none";
+    if (consumer?.consumeTypes === false)
+      return { status: "none", archiveMatch: "unknown", sourceFreshness: "unknown" };
     const cached = this.typeSnapshot(link);
-    if (cached) return cached.status;
-    if (!this.canCheck(link) || this.preparing) return "unchecked";
-    const status = this.observe(link);
+    if (cached) return cached.observation;
+    if (!this.canCheck(link) || this.preparing || this.session.probeRunning)
+      return { status: "unchecked", archiveMatch: "unknown", sourceFreshness: "unknown" };
+    const observation = this.observe(link);
     this.typeCache.set(linkProbeId(link), {
-      status,
+      observation,
       checkedAt: Date.now(),
       signature: this.typeSignature(link),
     });
-    return status;
+    return observation;
   }
 
   private typeSignature(link: RemoteLink): string {
@@ -143,9 +148,13 @@ export class DashboardTypeObservation {
     apps: readonly LocalApp[],
     links: readonly RemoteLink[],
     book: ProbeBook,
-    installed = new Map<string, InstalledEvidence>(),
-    log: LogContext = this.log,
+    options: {
+      installed?: Map<string, InstalledEvidence>;
+      log?: LogContext;
+      allowDownload?: boolean;
+    } = {},
   ): Promise<TypeEvidence> {
+    const { installed = new Map(), log = this.log, allowDownload = true } = options;
     const producers = new Map<string, ProducerSnapshot>();
     const errors = new Map<string, unknown>();
     const byName = appsByName(apps);
@@ -159,7 +168,15 @@ export class DashboardTypeObservation {
         try {
           producers.set(
             producer.name,
-            await collectProducerEvidenceAsync(producer, apps, book, this.confirmations, log),
+            await collectProducerEvidenceAsync(
+              producer,
+              apps,
+              book,
+              this.confirmations,
+              this.compareZip,
+              log,
+              allowDownload,
+            ),
           );
         } catch (error) {
           errors.set(producer.name, error);
@@ -190,12 +207,13 @@ export class DashboardTypeObservation {
     this.log.event("warn", event, fields);
   }
 
-  private observe(link: RemoteLink): ReturnType<typeof describeLink> {
+  private observe(link: RemoteLink): LinkTypeObservation {
     const consumer = this.session.loaded.find((app) => app.name === link.consumer);
     const producer = this.session.loaded.find(
       (app) => app.name === link.remoteName && app.port != null,
     );
-    if (!consumer) return "unknown";
+    if (!consumer)
+      return { status: "unknown", archiveMatch: "unknown", sourceFreshness: "unknown" };
     const probe = this.session.book.links.get(linkProbeId(link));
     let evidence: ProducerSnapshot | undefined;
     if (producer && producer.generateTypes && consumer.consumeTypes) {
@@ -204,27 +222,26 @@ export class DashboardTypeObservation {
           producer: producer.name,
           ...safeError(this.sourceErrors.get(producer.name)),
         });
-        return "unknown";
-      }
-      evidence = this.producerCache.get(producer.name);
-      if (!evidence) {
-        try {
-          evidence = collectProducerEvidence(
-            producer,
-            this.session.loaded,
-            this.session.book,
-            this.confirmations,
-            this.log,
-          );
-          this.warnings.delete(`${producer.name}\0source`);
-        } catch (error) {
-          this.warnOnce(`${producer.name}\0source`, "types.sources.unreadable", {
-            producer: producer.name,
-            ...safeError(error),
-          });
-          return "unknown";
+      } else {
+        evidence = this.producerCache.get(producer.name);
+        if (!evidence) {
+          try {
+            evidence = collectProducerEvidence(
+              producer,
+              this.session.loaded,
+              this.session.book,
+              this.confirmations,
+              this.log,
+            );
+            this.warnings.delete(`${producer.name}\0source`);
+            this.producerCache.set(producer.name, evidence);
+          } catch (error) {
+            this.warnOnce(`${producer.name}\0source`, "types.sources.unreadable", {
+              producer: producer.name,
+              ...safeError(error),
+            });
+          }
         }
-        this.producerCache.set(producer.name, evidence);
       }
     }
     let destination: string | null = null;
@@ -267,7 +284,7 @@ export class DashboardTypeObservation {
       check?.filesFingerprint === installed.filesFingerprint
         ? check?.matches
         : undefined;
-    return describeLink(
+    const observation = describeLink(
       {
         consumeTypes: consumer.consumeTypes,
         producer: producer
@@ -276,6 +293,7 @@ export class DashboardTypeObservation {
               sourceSavedAt: evidence?.sourceSavedAt ?? null,
             }
           : null,
+        sourceUnavailable: producer?.generateTypes === true && evidence === undefined,
         producerZipMtime: evidence?.zipMtime ?? null,
         linkZipHash: probe?.zipHash ?? null,
         linkZipReachable: probe?.zipUrl != null && probe.zipHash != null,
@@ -298,5 +316,12 @@ export class DashboardTypeObservation {
           })),
       },
     );
+    // The producer's local manifest and the consumer's remote can serve different ZIPs.
+    const sameZip = probe?.zipHash != null && probe.zipHash === evidence?.zipHash;
+    return {
+      ...observation,
+      archiveMatch: destination ? observation.archiveMatch : "unknown",
+      sourceFreshness: sameZip ? observation.sourceFreshness : "unknown",
+    };
   }
 }

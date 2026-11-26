@@ -1,4 +1,5 @@
 export const icons = {
+  checking: "loading~spin",
   listen: "pass",
   silent: "error",
   unknownPort: "question",

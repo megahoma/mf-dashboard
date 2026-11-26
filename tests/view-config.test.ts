@@ -11,10 +11,14 @@ const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url),
   scripts?: Record<string, string>;
   contributes: {
     commands?: { command: string; title: string; icon?: string; enablement?: string }[];
-    viewsWelcome?: { view: string; contents: string }[];
+    submenus?: { id: string; label: string }[];
+    views?: Record<
+      string,
+      { id: string; name: string; type?: string; visibility?: string; when?: string }[]
+    >;
     menus?: {
       commandPalette?: { command: string; when?: string }[];
-      "view/title"?: { command: string; when?: string; group?: string }[];
+      "view/title"?: { command?: string; submenu?: string; when?: string; group?: string }[];
       "view/item/context"?: { command: string; when?: string; group?: string }[];
     };
   };
@@ -58,12 +62,6 @@ test("the extension bundle loads without project dependencies or extra implement
   assert.equal(result.status, 0, result.stderr);
 });
 
-function welcomeContents(): string {
-  const entry = pkg.contributes.viewsWelcome?.find((item) => item.view === "mf-dashboard");
-  assert.ok(entry, "viewsWelcome for mf-dashboard");
-  return entry.contents;
-}
-
 test("commands requiring a row stay out of the command palette", () => {
   for (const name of [
     "openConfig",
@@ -83,18 +81,39 @@ test("commands requiring a row stay out of the command palette", () => {
   }
 });
 
-test("viewsWelcome localizes the entire contents with a discover link", () => {
-  const contents = welcomeContents();
-  assert.match(contents, /^%[^%]+%$/);
-  const key = contents.slice(1, -1);
-  assert.equal(
-    en[key],
-    "No Module Federation configs found\n[Find microfrontends](command:mf-dashboard.discover)",
-  );
-  assert.equal(
-    ru[key],
-    "Конфиги Module Federation не найдены\n[Найти микрофронты](command:mf-dashboard.discover)",
-  );
+test("only the first-search screen uses a webview in place of the microfrontend tree", () => {
+  const views = pkg.contributes.views?.["mf-dashboard"] ?? [];
+  const welcome = views.find(({ id }) => id === "mf-dashboard.welcome");
+  const tree = views.find(({ id }) => id === "mf-dashboard");
+  assert.equal(welcome?.type, "webview");
+  assert.equal(welcome?.when, "!mf-dashboard.searching && mf-dashboard.welcomeVisible");
+  assert.equal(tree?.type, undefined);
+  assert.equal(tree?.when, "!mf-dashboard.searching && !mf-dashboard.welcomeVisible");
+});
+
+test("details have a localized title whenever the dashboard tree is visible", () => {
+  const views = pkg.contributes.views?.["mf-dashboard"] ?? [];
+  for (const [suffix, name, condition] of [
+    [
+      "",
+      "%view.details%",
+      "config.mf-dashboard.language != en && config.mf-dashboard.language != ru",
+    ],
+    [".en", "Details", "config.mf-dashboard.language == en"],
+    [".ru", "Подробности", "config.mf-dashboard.language == ru"],
+  ]) {
+    const view = views.find((entry) => entry.id === `mf-dashboard.details${suffix}`);
+    assert.equal(view?.name, name);
+    assert.equal(view?.type, "webview");
+    assert.equal(
+      view?.when,
+      `!mf-dashboard.searching && !mf-dashboard.welcomeVisible && ${condition}`,
+    );
+    assert.equal(view?.visibility, "collapsed");
+  }
+  const types = views.find((entry) => entry.id === "mf-dashboard.typesBuild");
+  assert.equal(types?.when, "mf-dashboard.appsVisible");
+  assert.equal(types?.visibility, "collapsed");
 });
 
 test("refresh and discover are declared commands", () => {
@@ -115,45 +134,116 @@ test("refresh and the localized workspace types update are available in the view
     title.find((item) => item.command === "mf-dashboard.refresh"),
     {
       command: "mf-dashboard.refresh",
-      when: "view == mf-dashboard && !mf-dashboard.discovering",
+      when: "view == mf-dashboard && !mf-dashboard.discovering && config.mf-dashboard.language != en && config.mf-dashboard.language != ru",
       group: "navigation",
     },
   );
+  for (const name of ["discover", "useFlat", "useTree"]) {
+    const action = title.find((item) => item.command === `mf-dashboard.${name}`);
+    assert.match(action?.when ?? "", /^view == mf-dashboard && !mf-dashboard\.discovering/);
+    assert.doesNotMatch(action?.when ?? "", /mf-dashboard\.appsVisible/);
+  }
   const update = title.find((item) => item.command === "mf-dashboard.rebuildAllTypes");
-  assert.equal(update?.when, "view == mf-dashboard && mf-dashboard.canUpdateTypes");
+  assert.equal(
+    update?.when,
+    "view == mf-dashboard && mf-dashboard.canUpdateTypes && config.mf-dashboard.language != en && config.mf-dashboard.language != ru",
+  );
   assert.match(update?.group ?? "", /^navigation/);
   const command = pkg.contributes.commands?.find((item) => item.command === update?.command);
   assert.equal(command?.title, "%command.rebuildAllTypes%");
   assert.equal(command?.enablement, "isWorkspaceTrusted && mf-dashboard.canUpdateTypes");
   assert.equal(en["command.rebuildAllTypes"], "Update all @mf-types");
   assert.equal(ru["command.rebuildAllTypes"], "Обновить все @mf-types");
+  const items = pkg.contributes.menus?.["view/item/context"] ?? [];
+  const declared = new Map(pkg.contributes.commands?.map((entry) => [entry.command, entry]));
+  for (const name of ["refresh", "discover", "useFlat", "useTree", "rebuildAllTypes", "start"]) {
+    const command = `mf-dashboard.${name}`;
+    const menu = name === "start" ? items : title;
+    const original = menu.find((entry) => entry.command === command);
+    const condition = original?.when?.replace(
+      / && config\.mf-dashboard\.language != en && config\.mf-dashboard\.language != ru$/,
+      "",
+    );
+    assert.ok(condition, name);
+    for (const [locale, alphabet] of [
+      ["en", /^[A-Z]/],
+      ["ru", /^[А-Я]/],
+    ] as const) {
+      const id = `${command}.${locale}`;
+      assert.deepEqual(
+        menu.find((entry) => entry.command === id),
+        {
+          command: id,
+          when: `${condition} && config.mf-dashboard.language == ${locale}`,
+          group: original?.group,
+        },
+      );
+      assert.match(declared.get(id)?.title ?? "", alphabet);
+      assert.equal(declared.get(id)?.icon, declared.get(command)?.icon);
+      assert.equal(declared.get(id)?.enablement, declared.get(command)?.enablement);
+    }
+  }
+});
+
+test("the dashboard view menu marks the selected sort in flat mode", () => {
+  const menus = pkg.contributes.menus!;
+  const sortMenus = menus as Record<string, { command: string; when?: string; group?: string }[]>;
+  for (const suffix of ["", ".en", ".ru"]) {
+    const submenu = `mf-dashboard.viewSort${suffix}`;
+    assert.ok(pkg.contributes.submenus?.some(({ id }) => id === submenu));
+    const entry = menus["view/title"]?.find((item) => item.submenu === submenu);
+    assert.match(entry?.when ?? "", /^view == mf-dashboard && /);
+    for (const order of ["Name", "Port"]) {
+      const id = `mf-dashboard.sortBy${order}`;
+      const normal = sortMenus[submenu]?.find(({ command }) => command === id + suffix);
+      const checked = sortMenus[submenu]?.find(
+        ({ command }) => command === id + "Checked" + suffix,
+      );
+      assert.equal(normal?.when, `mf-dashboard.flatSort != ${order.toLowerCase()}`);
+      assert.equal(checked?.when, `mf-dashboard.flatSort == ${order.toLowerCase()}`);
+      assert.equal(checked?.group, normal?.group);
+      for (const item of [normal, checked]) {
+        assert.equal(
+          pkg.contributes.commands?.find(({ command }) => command === item?.command)?.enablement,
+          "mf-dashboard.flat && !mf-dashboard.discovering",
+        );
+      }
+    }
+  }
 });
 
 test("mf-types offers a layout switch and a rebuild action on app rows", () => {
   const menus = pkg.contributes.menus!;
-  for (const [suffix, operator] of [
-    ["Flat", "!"],
-    ["Tree", ""],
-  ]) {
-    assert.equal(
-      menus["view/title"]?.find((entry) => entry.command === `mf-dashboard.typesUse${suffix}`)
-        ?.when,
-      `view == mf-dashboard.typesBuild && ${operator}mf-dashboard.typesFlat`,
-    );
+  for (const [name, surface, condition] of [
+    ["typesUseFlat", "view/title", " && !mf-dashboard.typesFlat"],
+    ["typesUseTree", "view/title", " && mf-dashboard.typesFlat"],
+    ["rebuildAllTypes", "view/title", " && mf-dashboard.canUpdateTypes"],
+    ["openTypesBuildReport", "view/title", ""],
+    ["rebuildAppTypes", "view/item/context", " && viewItem == typesBuildApp"],
+  ] as const) {
+    const prefix = `view == mf-dashboard.typesBuild${condition}`;
+    const entries = menus[surface]?.filter((entry) => entry.when?.startsWith(prefix));
+    for (const [suffix, locale] of [
+      ["", "!= en && config.mf-dashboard.language != ru"],
+      [".en", "== en"],
+      [".ru", "== ru"],
+    ]) {
+      assert.equal(
+        entries?.find((entry) => entry.command === `mf-dashboard.${name}${suffix}`)?.when,
+        `${prefix} && config.mf-dashboard.language ${locale}`,
+      );
+    }
   }
-  const action = "mf-dashboard.rebuildAppTypes";
   assert.equal(
-    menus["view/item/context"]?.find((entry) => entry.command === action)?.when,
-    "view == mf-dashboard.typesBuild && viewItem == typesBuildApp",
-  );
-  assert.equal(
-    pkg.contributes.commands?.find((entry) => entry.command === action)?.enablement,
+    pkg.contributes.commands?.find((entry) => entry.command === "mf-dashboard.rebuildAppTypes.ru")
+      ?.enablement,
     "isWorkspaceTrusted && mf-dashboard.canUpdateTypes",
   );
-  for (const bundle of [en, ru]) {
-    assert.equal(bundle["view.typesBuild"], "mf-types");
-    assert.doesNotMatch(bundle["viewsWelcome.typesBuild"], /command:mf-dashboard.rebuildAllTypes/);
-  }
+  const titles = new Map(pkg.contributes.commands?.map(({ command, title }) => [command, title]));
+  assert.equal(titles.get("mf-dashboard.useFlat.ru"), "Показывать плоским списком");
+  assert.equal(titles.get("mf-dashboard.typesUseFlat.ru"), "Показывать плоским списком");
+  assert.equal(en["view.typesBuild"], "@mf-types Build");
+  assert.equal(ru["view.typesBuild"], "Сборка @mf-types");
 });
 
 test("a package and a launch compile the extension before the host starts", () => {
@@ -191,17 +281,17 @@ test("Start stays inline while Rebuild and Fetch use the types context menu", ()
   const byCommand = new Map(items.map((item) => [item.command, item]));
   assert.deepEqual(byCommand.get("mf-dashboard.start"), {
     command: "mf-dashboard.start",
-    when: "view == mf-dashboard && viewItem =~ /^(silent|unknownPort)($| )/",
+    when: "view == mf-dashboard && !mf-dashboard.discovering && viewItem =~ /^(silent|unknownPort)($| )/ && config.mf-dashboard.language != en && config.mf-dashboard.language != ru",
     group: "inline",
   });
   assert.deepEqual(byCommand.get("mf-dashboard.rebuildTypes"), {
     command: "mf-dashboard.rebuildTypes",
-    when: "view == mf-dashboard && viewItem =~ /^stale($| )/",
+    when: "view == mf-dashboard && !mf-dashboard.discovering && viewItem =~ /^stale($| )/ && config.mf-dashboard.language != en && config.mf-dashboard.language != ru",
     group: "1_types@2",
   });
   assert.deepEqual(byCommand.get("mf-dashboard.refetchTypes"), {
     command: "mf-dashboard.refetchTypes",
-    when: "view == mf-dashboard && viewItem =~ /^unfetched($| )/",
+    when: "view == mf-dashboard && !mf-dashboard.discovering && viewItem =~ /^unfetched($| )/ && config.mf-dashboard.language != en && config.mf-dashboard.language != ru",
     group: "1_types@3",
   });
 });
@@ -220,7 +310,7 @@ test("row actions use navigation menus with token boundaries and no inline icons
       [
         {
           command,
-          when: `view == mf-dashboard && viewItem =~ /(^| )${token}($| )/`,
+          when: `view == mf-dashboard && viewItem =~ /(^| )${token}($| )/ && config.mf-dashboard.language != en && config.mf-dashboard.language != ru`,
           group: "navigation",
         },
       ],
@@ -231,6 +321,24 @@ test("row actions use navigation menus with token boundaries and no inline icons
     const key = declared.title.slice(1, -1);
     assert.ok(en[key]);
     assert.ok(ru[key]);
+    for (const [language, bundle] of [
+      ["en", en],
+      ["ru", ru],
+    ] as const) {
+      const translated = `${command}.${language}`;
+      assert.deepEqual(
+        menus.find((item) => item.command === translated),
+        {
+          command: translated,
+          when: `view == mf-dashboard && viewItem =~ /(^| )${token}($| )/ && config.mf-dashboard.language == ${language}`,
+          group: "navigation",
+        },
+      );
+      assert.equal(
+        pkg.contributes.commands?.find((item) => item.command === translated)?.title,
+        bundle[key],
+      );
+    }
   }
 });
 
@@ -246,5 +354,11 @@ test("Show Logs is localized and available in the palette", () => {
       (item) => item.command === "mf-dashboard.showLogs" && item.when === "false",
     ),
     false,
+  );
+  assert.equal(
+    pkg.contributes.menus?.commandPalette?.find(
+      (item) => item.command === "mf-dashboard.showLogs.ru",
+    )?.when,
+    "config.mf-dashboard.language == ru",
   );
 });

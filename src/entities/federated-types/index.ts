@@ -1,11 +1,12 @@
 export { describeLink, readInstalledEvidence } from "./lib/observe.ts";
-export type { InstalledEvidence, ProducerEvidence } from "./models/observe.ts";
+export type { InstalledEvidence, LinkTypeObservation, ProducerEvidence } from "./models/observe.ts";
 export {
   compareInstalledArchive,
   confirmInstalledArchive,
   createArchiveComparisonBatch,
   installLocalTypesArchive,
   installTypesArchive,
+  publishedArchiveMatchesLocal,
 } from "./lib/install.ts";
 export { readTree } from "./lib/types-tree.ts";
 export type { ArchiveComparison, InstallTypesInput, InstallTypesResult } from "./models/install.ts";

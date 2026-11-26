@@ -1,4 +1,5 @@
 export type StatusKind =
+  | "checking"
   | "listen"
   | "silent"
   | "unknownPort"
@@ -14,6 +15,7 @@ export type StatusInput = {
   role: "app" | "link" | "external";
   port: number | null;
   portOpen: boolean;
+  checking?: boolean;
   manifestEnabled: boolean;
   buildVersion: string | null;
   url: string | null;
@@ -26,4 +28,5 @@ export type RowModel = {
   kind: StatusKind;
   description: string;
   tooltip: string;
+  urlIssue: string | null;
 };

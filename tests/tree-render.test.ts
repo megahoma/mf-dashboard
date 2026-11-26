@@ -6,11 +6,16 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { developmentFederationConfig, localApp } from "./support/app.ts";
-import { putAppResult } from "../src/entities/microfrontend/index.ts";
+import {
+  createLoopbackNet,
+  createProbeCycle,
+  probeApp,
+  putAppResult,
+  remoteLink,
+} from "../src/entities/microfrontend/index.ts";
 import { shellQuote } from "../src/shared/lib/shell.ts";
 import * as vscode from "./support/vscode.ts";
 import { terms, type DashboardTerms } from "../src/shared/config/index.ts";
-import { DashboardDetails } from "../src/widgets/mf-dashboard-tree/models/details.ts";
 import { KnownAppsWorker } from "../src/widgets/mf-dashboard-tree/lib/known-apps-worker.mts";
 import type { DashboardNode } from "../src/widgets/mf-dashboard-tree/models/presentation.ts";
 import type { TreeView, TreeViewSelectionChangeEvent, WebviewView } from "vscode";
@@ -25,6 +30,7 @@ registerHooks({
 });
 const { linkRowId } = await import("../src/widgets/mf-dashboard-tree/lib/presentation.ts");
 const { MfDashboardProvider } = await import("../src/widgets/mf-dashboard-tree/models/provider.ts");
+const { DashboardDetails } = await import("../src/widgets/mf-dashboard-tree/models/details.ts");
 
 const workspace = vscode.workspace as typeof vscode.workspace & {
   workspaceFolders?: { name: string; uri: vscode.Uri }[];
@@ -67,6 +73,9 @@ test("a local intermediate app with an unknown port retains its dependency subtr
   assert.equal(leaf?.name, "leaf");
   assert.equal(leaf.children[0].name, "entry");
   assert.equal(leaf.children[0].children.length, 0);
+  assert.equal(provider.findAppRow("leaf"), leaf);
+  assert.equal(provider.getParent(leaf), middle);
+  assert.equal(provider.getParent(root), undefined);
   provider.setStructure("flat");
   assert.deepEqual(
     provider.getChildren().map((row) => row.name),
@@ -74,7 +83,7 @@ test("a local intermediate app with an unknown port retains its dependency subtr
   );
 });
 
-test("details follow the selected row through refreshes and escape manifest text", (t) => {
+test("details follow the selected row and link to its direct consumers", async (t) => {
   const provider = providerFor();
   t.after(() => provider.dispose());
   const app: DashboardNode = {
@@ -82,7 +91,7 @@ test("details follow the selected row through refreshes and escape manifest text
     name: "gallery",
     kind: "listen",
     description: "listening",
-    tooltip: "local port: 4200",
+    tooltip: "Port: 4200",
     contextValue: "listen",
     linkId: null,
     children: [],
@@ -91,14 +100,63 @@ test("details follow the selected row through refreshes and escape manifest text
     ...app,
     id: "gallery-link",
     linkId: "portal\0gallery\0gallery",
-    tooltip: "connection: portal → gallery\nexposes: <img src=x>&",
+    contextValue: "listen config producer manifest types",
+    manifest: {
+      url: "https://example.test/mf-manifest.json?x=1&y=2",
+      status: "noAnswer",
+      label: terms.requestNetworkError,
+    },
+    tooltip: [
+      "connection: portal → gallery",
+      "URL: https://example.test/mf-manifest.json?x=1&y=2",
+      terms.requestNetworkError,
+      "types last checked: 10:30",
+      "exposes: <img src=x>&",
+      terms.treeReference,
+    ].join("\n"),
   };
+  const editor: DashboardNode = { ...app, id: "app:editor", name: "editor" };
+  const portal: DashboardNode = { ...app, id: "app:portal", name: "portal" };
+  const remote = { alias: "gallery", name: "gallery", url: null };
+  provider.session.loaded = [
+    localApp("portal", "/portal", {
+      consumeTypes: true,
+      remotes: [
+        remote,
+        { ...remote, alias: "preview" },
+        { alias: "menu", name: "menu", url: null },
+      ],
+    }),
+    localApp("editor", "/editor", { remotes: [remote] }),
+    localApp("shell", "/shell", { remotes: [{ alias: "portal", name: "portal", url: null }] }),
+    localApp("gallery", "/gallery"),
+  ];
+  let typeDetails: NonNullable<ReturnType<Provider["typeDetails"]>> = {
+    status: "unknown",
+    archiveMatch: "matches",
+    sourceFreshness: "unknown",
+  };
+  t.mock.method(provider, "typeDetails", (id: string) => {
+    if (id === "portal\0preview\0gallery")
+      return { status: "unfetched", archiveMatch: "differs", sourceFreshness: "unknown" };
+    if (id === "portal\0menu\0menu")
+      return { status: "unchecked", archiveMatch: "unknown", sourceFreshness: "unknown" };
+    return typeDetails;
+  });
   let rows = [{ ...app, children: [link] }];
   t.mock.method(provider.session, "nodes", () => rows);
   const selection = new vscode.EventEmitter<TreeViewSelectionChangeEvent<DashboardNode>>();
   const visibility = new vscode.EventEmitter<void>();
   const disposal = new vscode.EventEmitter<void>();
-  const tree = { selection: [] as DashboardNode[], onDidChangeSelection: selection.event };
+  const tree = {
+    selection: [] as DashboardNode[],
+    onDidChangeSelection: selection.event,
+    async reveal(node: DashboardNode, options: { select: boolean }) {
+      assert.equal(options.select, true);
+      this.selection = [node];
+      selection.fire({ selection: this.selection });
+    },
+  };
   const view = {
     webview: { html: "" },
     visible: true,
@@ -110,27 +168,154 @@ test("details follow the selected row through refreshes and escape manifest text
   details.resolveWebviewView(view as unknown as WebviewView);
   assert.match(view.webview.html, /Select a microfrontend/);
   assert.equal(provider.getTreeItem(link).tooltip, undefined);
+  assert.match(provider.getTreeItem(link).accessibilityInformation?.label ?? "", /listening/);
 
   tree.selection = [link];
   selection.fire({ selection: tree.selection });
-  assert.match(view.webview.html, /connection: portal → gallery\nexposes: &lt;img src=x&gt;&amp;/);
-  assert.doesNotMatch(view.webview.html, /local port: 4200|<img/);
-
-  rows = [{ ...app, children: [{ ...link, tooltip: "types up to date" }] }];
+  assert.match(view.webview.html, /<th scope="col">Server comparison<\/th>/);
+  assert.match(view.webview.html, /<th scope="col">Source check<\/th>/);
+  assert.match(
+    view.webview.html,
+    /<th scope="row">gallery<\/th><td>Types match<\/td><td>Freshness unknown<\/td>/,
+  );
+  assert.match(view.webview.html, /<h2 id="consumers-title">Consumers<\/h2>/);
+  assert.deepEqual(
+    [
+      ...view.webview.html.matchAll(
+        /<li><a class="navigation-link" href="command:mf-dashboard\.openConsumerDetails\?[^"\n]+"[^>]*>.*?<span>([^<]+)<\/span><\/a><\/li>/g,
+      ),
+    ].map(([, name]) => name),
+    ["editor", "portal"],
+  );
+  assert.match(view.webview.html, /<p class="context">For portal<\/p>/);
+  assert.ok(
+    view.webview.html.indexOf('id="consumers-title"') <
+      view.webview.html.indexOf('id="types-title"'),
+  );
+  assert.ok(
+    view.webview.html.indexOf('id="manifest-title"') <
+      view.webview.html.indexOf('id="types-title"'),
+  );
+  assert.doesNotMatch(String(provider.getTreeItem(link).description), /@mf-types/);
+  assert.match(view.webview.html, /<dt>types last checked<\/dt><dd>10:30<\/dd>/);
+  assert.match(view.webview.html, /<dt>connection<\/dt><dd>portal → gallery<\/dd>/);
+  assert.match(
+    view.webview.html,
+    /<dt>URL<\/dt><dd><div class="url-value">.*<span>https:\/\/example\.test\/mf-manifest\.json\?x=1&amp;y=2<\/span>/,
+  );
+  assert.match(
+    view.webview.html,
+    /class="url-status noAnswer" role="img" aria-label="network error"/,
+  );
+  assert.match(view.webview.html, /<dt>Status<\/dt><dd>listening<\/dd>/);
+  assert.doesNotMatch(view.webview.html, /title="Open manifest"/);
+  assert.match(view.webview.html, /<dt>exposes<\/dt><dd>&lt;img src=x&gt;&amp;<\/dd>/);
+  assert.doesNotMatch(view.webview.html, /Reference:|<p class="notes">network error/);
+  assert.doesNotMatch(view.webview.html, /<dt>Port<\/dt>|<img/);
+  const actionLinks = [
+    ...view.webview.html.matchAll(
+      /href="command:mf-dashboard\.details\.runConnectionAction\?([^"]+)" title="([^"]+)"/g,
+    ),
+  ];
+  assert.deepEqual(
+    actionLinks.map(([, , label]) => label),
+    ["Open config", "Open producer config", "Reveal types"],
+  );
+  const execute = t.mock.method(vscode.commands, "executeCommand");
+  const runAction = vscode.registeredCommands.get("mf-dashboard.details.runConnectionAction");
+  assert.ok(runAction);
+  await runAction(...(JSON.parse(decodeURIComponent(actionLinks[0][1])) as unknown[]));
+  await runAction(link.id, "unrelatedCommand");
+  await runAction(link.id, "openManifest");
+  await runAction(app.id, "openConfig");
+  assert.deepEqual(
+    execute.mock.calls.map(({ arguments: args }) => args),
+    [["mf-dashboard.openConfig", link]],
+  );
+  const clipboard = t.mock.method(vscode.env.clipboard, "writeText", async () => {});
+  const copyUrl = vscode.registeredCommands.get("mf-dashboard.copyManifestUrl");
+  assert.ok(copyUrl);
+  await copyUrl(link.id);
+  await copyUrl("missing");
+  assert.deepEqual(
+    clipboard.mock.calls.map(({ arguments: args }) => args),
+    [[link.manifest?.url]],
+  );
+  rows = [
+    {
+      ...app,
+      children: [
+        { ...link, manifest: { url: link.manifest!.url, status: "answers", label: terms.answers } },
+      ],
+    },
+  ];
   provider.relabel();
-  assert.match(view.webview.html, /types up to date/);
-  assert.doesNotMatch(view.webview.html, /exposes:/);
+  assert.match(view.webview.html, /class="icon-action"[^>]+aria-label="Open manifest"/);
+  assert.match(view.webview.html, /class="navigation-link"[^>]+title="Open manifest"/);
+  await runAction(link.id, "openManifest");
+  assert.equal(execute.mock.calls.at(-1)?.arguments[0], "mf-dashboard.openManifest");
+
+  assert.doesNotMatch(view.webview.html, /Open microfrontend in browser/);
+  const openApp = vscode.registeredCommands.get("mf-dashboard.details.openApp");
+  assert.ok(openApp);
+  const browser = t.mock.method(vscode.env, "openExternal");
+  await openApp(link.id);
+  assert.equal(browser.mock.callCount(), 0);
+  putAppResult(provider.session.book, "gallery", {
+    portOpen: true,
+    manifestReachable: false,
+    buildVersion: null,
+    zipMtime: null,
+    zipHash: null,
+    zipUrl: null,
+    exposes: [],
+    shared: [],
+  });
+  provider.relabel();
+  assert.match(
+    view.webview.html,
+    /<header>.*Open microfrontend in browser \(http:\/\/127\.0\.0\.1:4100\/\)/,
+  );
+  await openApp(link.id);
+  assert.equal(browser.mock.calls[0]?.arguments[0].path, "//127.0.0.1:4100/");
+  provider.session.book.apps.clear();
+
+  typeDetails = {
+    status: "unknown",
+    archiveMatch: "unknown",
+    sourceFreshness: "unknown",
+    startToCheck: true,
+  };
+  rows = [{ ...app, children: [{ ...link, kind: "silent", tooltip: "network error\nstopped" }] }];
+  provider.relabel();
+  assert.match(view.webview.html, /Start this microfrontend to check @mf-types\./);
+  assert.match(view.webview.html, /<dt>Status<\/dt><dd>stopped<\/dd>/);
+  assert.doesNotMatch(view.webview.html, /Open microfrontend in browser|title="Open manifest"/);
+  assert.doesNotMatch(
+    view.webview.html,
+    /Comparison unavailable|Freshness unknown|<h2 id="manifest-title"/,
+  );
+  typeDetails = { ...typeDetails, status: "unfetched", archiveMatch: "missing" };
+  provider.relabel();
+  assert.match(
+    view.webview.html,
+    /<td>Types not installed<\/td><td class="start-hint">Start this microfrontend to check @mf-types\.<\/td>/,
+  );
 
   // A collapsed tree can drop its cached elements without changing the selection.
   tree.selection = [];
-  rows = [{ ...app, children: [{ ...link, tooltip: "types changed" }] }];
+  typeDetails = { ...typeDetails, status: "changed", archiveMatch: "unknown" };
+  rows = [{ ...app, children: [{ ...link, kind: "silent", tooltip: terms.typesChanged }] }];
   provider.relabel();
-  assert.match(view.webview.html, /types changed/);
+  assert.doesNotMatch(view.webview.html, /<p class="notes">/);
+  const changedTypes =
+    /<td>Installed types changed<\/td><td class="start-hint">Start this microfrontend to check @mf-types\.<\/td>/;
+  assert.match(view.webview.html, changedTypes);
 
   view.visible = false;
-  rows = [app];
+  rows = [app, editor];
   provider.relabel();
-  assert.match(view.webview.html, /types changed/);
+  assert.match(view.webview.html, changedTypes);
   view.visible = true;
   visibility.fire();
   assert.match(view.webview.html, /Select a microfrontend/);
@@ -143,10 +328,214 @@ test("details follow the selected row through refreshes and escape manifest text
   tree.selection = [];
   const reopened = { ...view, webview: { html: "" } };
   details.resolveWebviewView(reopened as unknown as WebviewView);
-  assert.match(reopened.webview.html, /local port: 4200/);
+  assert.match(reopened.webview.html, /<dt>Port<\/dt><dd>4200<\/dd>/);
+  assert.match(reopened.webview.html, /<h2 id="consumers-title">Consumers<\/h2>/);
+  assert.doesNotMatch(reopened.webview.html, /<ul class="connection-actions">/);
+  assert.doesNotMatch(reopened.webview.html, /For portal/);
+
+  const href = reopened.webview.html
+    .match(/href="command:([^?]+)\?([^"]+)"[^>]*>.*?<span>editor<\/span>/)
+    ?.slice(1);
+  assert.ok(href);
+  const [command, encodedArgs] = href;
+  const openConsumer = vscode.registeredCommands.get(command);
+  assert.ok(openConsumer);
+  await openConsumer(...(JSON.parse(decodeURIComponent(encodedArgs)) as unknown[]));
+  assert.deepEqual(tree.selection, [editor]);
+  assert.match(reopened.webview.html, /<h1>editor<\/h1>/);
+  await openConsumer("missing");
+  assert.deepEqual(tree.selection, [editor]);
+
+  typeDetails = { status: "ok", archiveMatch: "matches", sourceFreshness: "fresh" };
+  rows = [app, portal, editor];
+  provider.setStructure("flat");
+  selection.fire({ selection: [portal] });
+  assert.match(
+    reopened.webview.html,
+    /<th scope="row">gallery<\/th><td>Types match<\/td><td>Archive is up to date<\/td>/,
+  );
+  assert.match(
+    reopened.webview.html,
+    /<th scope="row">gallery \(preview\)<\/th><td>Types differ<\/td><td>Freshness unknown<\/td>/,
+  );
+  assert.match(
+    reopened.webview.html,
+    /<th scope="row">menu<\/th><td colspan="2">types not checked<\/td>/,
+  );
+  assert.doesNotMatch(reopened.webview.html, /For portal/);
 
   selection.fire({ selection: [] });
   assert.match(reopened.webview.html, /Select a microfrontend/);
+});
+
+test("Details opens recognized manifests even without a types ZIP", async (t) => {
+  const provider = providerFor();
+  const app = localApp("catalog", "/catalog", {
+    port: 4500,
+    manifest: true,
+    manifestPath: "/metadata",
+  });
+  provider.session.loaded = [app];
+  const selection = new vscode.EventEmitter<void>();
+  const visibility = new vscode.EventEmitter<void>();
+  const disposal = new vscode.EventEmitter<void>();
+  const tree = {
+    selection: [provider.getChildren()[0]],
+    onDidChangeSelection: selection.event,
+  };
+  const view = {
+    visible: true,
+    webview: { html: "" },
+    onDidChangeVisibility: visibility.event,
+    onDidDispose: disposal.event,
+  };
+  const details = new DashboardDetails(tree as unknown as TreeView<DashboardNode>, provider);
+  t.after(() => {
+    details.dispose();
+    provider.dispose();
+  });
+  details.resolveWebviewView(view as unknown as WebviewView);
+  const net = { ...createLoopbackNet(), connect: async () => true };
+  let response = new Response("<!doctype html><div id='app'></div>", {
+    headers: { "content-type": "text/html" },
+  });
+  t.mock.method(globalThis, "fetch", async () => response.clone());
+
+  for (const fallback of [
+    response,
+    Response.json({ id: "catalog", name: "catalog", metaData: {} }),
+  ]) {
+    response = fallback;
+    putAppResult(provider.session.book, app.name, await probeApp(app, net));
+    provider.relabel();
+    assert.match(view.webview.html, /<dt>Status<\/dt><dd>listening<\/dd>/);
+    assert.match(
+      view.webview.html,
+      /class="url-status noAnswer" role="img" aria-label="Expected a Module Federation manifest"/,
+    );
+    assert.match(view.webview.html, /title="Copy URL"/);
+    assert.doesNotMatch(view.webview.html, /title="Open manifest"/);
+  }
+
+  const manifest = {
+    id: "catalog",
+    name: "catalog",
+    metaData: {
+      name: "catalog",
+      globalName: "catalog",
+      type: "APP",
+      buildInfo: { buildVersion: "local", buildName: "catalog" },
+      publicPath: "auto",
+      remoteEntry: { name: "remoteEntry.js", path: "", type: "global" },
+    },
+    remotes: [],
+  };
+  response = new Response(JSON.stringify(manifest), { headers: { "content-type": "text/plain" } });
+  const valid = await probeApp(app, net);
+  assert.equal(valid.zipUrl, null);
+  putAppResult(provider.session.book, app.name, valid);
+  provider.relabel();
+  assert.match(view.webview.html, /class="url-status answers" role="img" aria-label="reachable"/);
+  assert.match(view.webview.html, /class="icon-action"[^>]+aria-label="Open manifest"/);
+  assert.match(view.webview.html, /class="navigation-link"[^>]+title="Open manifest"/);
+});
+
+test("external manifest status distinguishes HTML from Vite import-map manifests", async (t) => {
+  const provider = providerFor();
+  t.after(() => provider.dispose());
+  const url = "https://catalog.example.test/mf-manifest.json";
+  const remote = { alias: "catalog", name: "catalog", url };
+  const { session } = provider;
+  session.loaded = [localApp("portal", "/portal", { remotes: [remote] })];
+  session.extraUrls = [url];
+  let body = new Response("<!doctype html><title>App</title>");
+  t.mock.method(globalThis, "fetch", async () => body.clone());
+  const cycle = createProbeCycle(createLoopbackNet(), session.book);
+  const input = {
+    apps: [],
+    links: [remoteLink("portal", remote)],
+    extraManifestUrls: [url],
+    checkTypes: false,
+  };
+  await cycle.start(input);
+
+  const [portal, external] = session.nodes();
+  const settingsFile = "/workspace/.vscode/settings.json";
+  assert.equal(portal.children[0].kind, "noAnswer");
+  assert.equal(external.kind, "noAnswer");
+  assert.equal(external.manifest?.label, terms.invalidManifest);
+  assert.deepEqual(
+    session.problemDrafts(settingsFile).map(({ kind, severity }) => [kind, severity]),
+    [
+      ["noAnswer", "warning"],
+      ["noAnswer", "warning"],
+    ],
+  );
+
+  body = Response.json({
+    id: "catalog",
+    name: "catalog",
+    metaData: { name: "catalog", type: "app", publicPath: "auto" },
+    shared: [],
+    remotes: [],
+    exposes: [
+      {
+        id: "catalog:Button",
+        name: "Button",
+        path: "./Button",
+        assets: { js: { sync: ["Button.js"], async: [] }, css: { sync: [], async: [] } },
+      },
+    ],
+  });
+  await cycle.start(input);
+  const [connected, reachable] = session.nodes();
+  assert.equal(connected.children[0].kind, "answers");
+  assert.equal(reachable.kind, "answers");
+  assert.equal(reachable.manifest?.status, "answers");
+  assert.deepEqual(session.problemDrafts(settingsFile), []);
+});
+
+test("Details suggests starting only the stopped dev server that provides the manifest", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-details-start-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configured = vscode.workspace.getConfiguration;
+  t.mock.method(vscode.workspace, "getConfiguration", () => ({
+    ...configured(),
+    get: (key: string) => (key === "types.autoCheck" ? true : configured().get(key)),
+  }));
+  const provider = providerFor();
+  t.after(() => provider.dispose());
+  const remote = {
+    alias: "catalog",
+    name: "catalog",
+    url: "http://127.0.0.1:4410/mf-manifest.json",
+  };
+  provider.session.loaded = [
+    localApp("portal", root, { consumeTypes: true, remotes: [remote] }),
+    localApp("catalog", root, { port: 4410 }),
+  ];
+  const probe = {
+    portOpen: false,
+    manifestReachable: false,
+    buildVersion: null,
+    zipUrl: null,
+    zipMtime: null,
+    zipHash: null,
+    exposes: [],
+    shared: [],
+  };
+  const linkId = linkRowId({ consumer: "portal", alias: "catalog", remoteName: "catalog" });
+  putAppResult(provider.session.book, "catalog", probe);
+  assert.equal(provider.typeDetails(linkId)?.archiveMatch, "missing");
+  assert.equal(provider.typeDetails(linkId)?.startToCheck, true);
+
+  remote.url = "https://staging.example/mf-manifest.json";
+  assert.equal(provider.typeDetails(linkId)?.startToCheck, undefined);
+  remote.url = "http://127.0.0.1:4410/another-manifest.json";
+  assert.equal(provider.typeDetails(linkId)?.startToCheck, undefined);
+  remote.url = "http://127.0.0.1:4410/mf-manifest.json";
+  putAppResult(provider.session.book, "catalog", { ...probe, portOpen: true });
+  assert.equal(provider.typeDetails(linkId)?.startToCheck, undefined);
 });
 
 function countBuilds(provider: Provider): { count: number } {
@@ -661,6 +1050,11 @@ test("a failed refresh keeps the previous rows", async (t) => {
 });
 
 test("saving a source and the settle timer each rebuild the tree once", async (t) => {
+  const configured = vscode.workspace.getConfiguration;
+  t.mock.method(vscode.workspace, "getConfiguration", () => ({
+    ...configured(),
+    get: (key: string) => (key === "types.autoCheck" ? true : configured().get(key)),
+  }));
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-tree-save-"));
   const folder = path.join(root, "shell");

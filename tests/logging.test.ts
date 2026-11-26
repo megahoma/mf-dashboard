@@ -299,7 +299,7 @@ test("type diagnostics explain fingerprint mismatch without recording evidence b
     },
     log,
   );
-  assert.equal(status, "unfetched");
+  assert.equal(status.status, "unfetched");
   assert.match(messages[0], /sourceFreshness=fresh installedFreshness=stale/);
   assert.match(messages[0], /zipMatches=true filesMatch=false urlMatches=true/);
   assert.equal(messages[0].includes("SECRET"), false);

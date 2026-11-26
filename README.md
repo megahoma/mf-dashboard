@@ -4,7 +4,7 @@
 
 MF Dashboard is a VS Code extension for working with Module Federation microfrontends. From the MF Dashboard panel, you can monitor applications and their remote dependencies, start local applications, update types, and open configurations and manifests.
 
-![MF Dashboard showing application statuses, remote dependencies, and a manifest preview](media/dashboard.png)
+![MF Dashboard showing the dependency tree, connection details, consumers, and @mf-types checks](media/dashboard.png)
 
 ## Installation
 
@@ -14,15 +14,15 @@ MF Dashboard is a VS Code extension for working with Module Federation microfron
 
 1. **Local graph** of discovered microfrontend configurations.
 2. **Work with multiple projects** in one VS Code window.
-3. **Tree or flat list** of applications and remote dependencies.
+3. **Tree or flat list** of microfrontends. In the flat list, use **View & Sort** to sort by name or port. The selected sort is checked and saved for the workspace.
 4. **Periodic checks** of ports, manifests, and types ZIP archives.
 5. **Availability checks** for external manifests.
 6. **Start local applications** through `package.json` scripts.
 7. **Update and rebuild types**: download consumer `@mf-types` and generate types for local producers.
-8. **Context-menu navigation** to configurations, the types directory, and the JSON manifest.
+8. **Navigation from Details or the context menu** to configurations, the types directory, and the JSON manifest.
 9. **URL and types diagnostics in Problems** with links to the consumer configuration or workspace settings.
 
-### Statuses
+### Statuses and diagnostics
 
 | Status                      | Meaning                                                                          |
 | --------------------------- | -------------------------------------------------------------------------------- |
@@ -36,15 +36,13 @@ MF Dashboard is a VS Code extension for working with Module Federation microfron
 | `different port`            | The link URL points to a different port.                                         |
 | `reachable` / `unreachable` | An external manifest answered or failed to answer.                               |
 
-A root app's status comes from its local port. A link also checks types and its URL, so the same app can have different statuses in different rows. Closed local ports take priority, followed by types issues, then URL issues. With `consumeTypes: false`, types issues do not affect the link status.
+The tree shows the local port and connection status. Selecting a microfrontend updates **Details**. If the section is collapsed, expand it manually. You can see the manifest's availability, copy its URL, and open the manifest preview once it responds. **Consumers** lists all detected microfrontends that directly depend on the selected one. Select a consumer to see its details.
 
-Stopped links also show their `@mf-types` state beside the port status. Missing or empty type directories are reported even offline. Files changed since their last verified install show “types changed; freshness unknown” until the published archive can be checked; unchanged local files alone do not prove remote freshness.
+The **@mf-types** section at the bottom shows two checks for each dependency. **Server comparison** tells you whether the installed types match the ZIP served by the remote. **Source check** tells you whether the ZIP is current with the local producer's sources. If the local microfrontend is stopped, the panel prompts you to start it. Disabling a producer's `generateTypes` disables its source check and rebuild. Consumer types can still be checked, and **Fetch @mf-types** works while the consumer is stopped.
 
-Disabling a producer's `generateTypes` disables source-to-archive freshness checks and rebuilding. Missing, changed and verified consumer types are still reported. Fetch works while the consumer is stopped. Start, Rebuild and Fetch belong to a dashboard row and are available from that row, rather than the command palette.
+**Update @mf-types across the workspace** opens **@mf-types Build** and runs the workspace build. To rebuild a single microfrontend, use its row action. This prepares its dependencies and rebuilds its own types where applicable. Use the workspace action to also install updated types in its consumers. If the remote manifest is unavailable, the build can use a freshly built ZIP from a unique local producer with the same name. Rows show progress and errors, and independent builds continue after a failure. **Show results from the last @mf-types update** opens the latest report for this workspace.
 
-**Update all @mf-types** opens the **mf-types** view. After discovery, switch between the dependency tree and the flat list in its toolbar. The tree follows the workspace dependencies shown in MF Dashboard. If a manifest URL is missing or its manifest is unavailable, the build can use a freshly built archive from a unique local producer with the same name. Use the rebuild action on a microfrontend’s row to rebuild it and prepare its required dependencies. Each row shows the project's progress and result. Select an error to open its source, or use **Show @mf-types Report** to open the latest report for this workspace. TypeScript and configuration errors with a known file appear in Problems. Independent projects continue when a build fails.
-
-URL issues and unreachable external manifests appear as warnings in Problems. Types issues appear as information; listening, stopped, and reachable rows do not add diagnostics.
+URL issues and unreachable external manifests appear as warnings in Problems. Types issues appear as information. Build errors with a known source file also appear in Problems.
 
 ## Detection
 
@@ -78,13 +76,13 @@ The graph stores relative paths, resolved URLs and checksums of relevant inputs,
 
 Discovery skips `node_modules`, `.git`, `dist`, `.mf-dashboard`, and `mf-dashboard.ignorePaths`. It writes one graph per workspace folder. Federation names and workspace-folder names must be unique. A conflicting search preserves the saved graph. The dashboard marks an outdated graph when it detects changes to discovery settings, tracked inputs, or candidate files, including custom configs selected by the start script.
 
-Probe cycles share ZIP downloads by URL. Later cycles use `If-Modified-Since` when available and reuse hashes on 304. Manifests are requested separately for each row.
+Probe cycles share manifest requests and ZIP downloads by URL. Later cycles use `If-Modified-Since` when available and reuse ZIP hashes on 304.
 
-Types installed by Rsbuild watch or another tool are verified automatically against the published ZIP. This read-only comparison may download the archive once more when its hash or the installed files change. Matching files receive an install confirmation; unchanged matches and mismatches are reused without repeating the comparison. The consumer's type files are never replaced by this check.
+When you check `@mf-types`, the extension compares types installed by Rsbuild in watch mode or by another tool against the published ZIP. Run **Refresh** or **Check @mf-types** to check manually, or set `mf-dashboard.types.autoCheck` to `true` for automatic checks. The comparison may download the archive again when its hash or the installed files change. It records a match as a confirmed installation, reuses unchanged results and leaves the consumer's type files intact.
 
 Producer sources follow `files`, `include`, `exclude`, and inherited settings from the selected tsconfig. Explicit `files` entries are included even with an empty `include`. Declaration files, downloaded types, output directories, and files outside the app or reached through symlinks are omitted. An unreadable or invalid tsconfig leaves the type estimate unknown.
 
-Saving a producer's included `.ts` or `.tsx` source in VS Code refreshes the local types estimate immediately and after `typesSettleMs`, without network requests. Periodic probes also cover changes outside the editor. Cache entries use file size and mtime; an edit preserving both may leave the previous result cached.
+With automatic type checks enabled, saving an included `.ts` or `.tsx` source in VS Code refreshes the local types estimate immediately and after `typesSettleMs`. The save check uses local files and archive comparisons already in memory. Periodic probes also cover changes outside the editor. Cache entries use file size and mtime, so an edit preserving both may leave the previous result cached.
 
 ## Supported package versions
 
@@ -102,39 +100,44 @@ Package versions are not checked against a semver matrix at runtime. Compatibili
 
 All settings use the `mf-dashboard.*` namespace.
 
-| Setting                              | Default       | Description                                                                                                                                |
-| ------------------------------------ | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `mf-dashboard.envMode`               | `development` | Mode for `.env.<mode>` and `.env.<mode>.local`.                                                                                            |
-| `mf-dashboard.structure`             | `tree`        | `tree` or `flat`; also controlled by the view-title button.                                                                                |
-| `mf-dashboard.types.structure`       | `tree`        | Layout of the mf-types view. Its toolbar switches between `tree` and `flat`.                                                               |
-| `mf-dashboard.language`              | `auto`        | Tree labels and details: `auto`, `en`, or `ru`. Command titles follow VS Code.                                                             |
-| `mf-dashboard.ignorePaths`           | `[]`          | Additional scan exclusions. A name matches at any depth; a relative path excludes that subtree. Explicit legacy selections are still read. |
-| `mf-dashboard.extraManifestUrls`     | `[]`          | External manifest URLs shown as root rows. Only valid HTTP(S) URLs are requested.                                                          |
-| `mf-dashboard.packageManager`        | `auto`        | Start command manager: `auto`, `npm`, `pnpm`, `yarn`, or `bun`.                                                                            |
-| `mf-dashboard.probeIntervalMs`       | `5000`        | Interval between port, manifest, and ZIP checks in milliseconds; minimum `1000`.                                                           |
-| `mf-dashboard.types.autoCheck`       | `true`        | Automatically check types; disable for manual checks while ports and manifests keep updating.                                              |
-| `mf-dashboard.typesSettleMs`         | `15000`       | Delay after saving source before types can count as stale, in milliseconds.                                                                |
-| `mf-dashboard.terminal.reveal`       | `true`        | Show the terminal when starting an app.                                                                                                    |
-| `mf-dashboard.scripts.start`         | `dev`         | `package.json` script key for Start when the app has no override.                                                                          |
-| `mf-dashboard.commands.rebuildTypes` | `""`          | Command replacing built-in type generation. Empty uses the plugin API.                                                                     |
-| `mf-dashboard.commands.refetchTypes` | `""`          | Command replacing built-in types download. The 60-second timeout and result checks still apply.                                            |
-| `mf-dashboard.apps`                  | absent        | Legacy app selections and overrides read by Find microfrontends.                                                                           |
+| Setting                              | Default       | Description                                                                                                                                                                                                                  |
+| ------------------------------------ | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mf-dashboard.envMode`               | `development` | Selects `.env.<mode>` and `.env.<mode>.local` during discovery. A mode from a recognized start script can take precedence.                                                                                                   |
+| `mf-dashboard.structure`             | `tree`        | Default layout of the main tree. Values are `tree` and `flat`.                                                                                                                                                               |
+| `mf-dashboard.types.structure`       | `tree`        | Default layout of the build view. Values are `tree` and `flat`.                                                                                                                                                              |
+| `mf-dashboard.language`              | `auto`        | Language of the extension's labels, Details, action tooltips, and context menu. `auto` follows the VS Code display language. Set `en` or `ru` to override it.                                                                |
+| `mf-dashboard.ignorePaths`           | `[]`          | Additional scan exclusions. A folder name matches at any depth. A relative path excludes that subtree. An explicit `apps` entry can include an excluded folder.                                                              |
+| `mf-dashboard.extraManifestUrls`     | `[]`          | External manifest URLs shown as root rows. Only valid HTTP(S) URLs are requested.                                                                                                                                            |
+| `mf-dashboard.packageManager`        | `auto`        | Start command manager: `auto`, `npm`, `pnpm`, `yarn`, or `bun`.                                                                                                                                                              |
+| `mf-dashboard.probeIntervalMs`       | `5000`        | Delay in milliseconds between background checks. Minimum `1000`.                                                                                                                                                             |
+| `mf-dashboard.types.autoCheck`       | `false`       | Set to `true` to check types automatically. By default, ports and manifests update in the background and types are checked on **Refresh** or **Check @mf-types**.                                                            |
+| `mf-dashboard.typesSettleMs`         | `15000`       | Grace period in milliseconds after a source edit before stale types are reported. Set `0` to report immediately.                                                                                                             |
+| `mf-dashboard.terminal.reveal`       | `true`        | Show the terminal when starting an app. With `false`, the script still runs.                                                                                                                                                 |
+| `mf-dashboard.scripts.start`         | `dev`         | `package.json` script key for Start when the app has no override.                                                                                                                                                            |
+| `mf-dashboard.commands.rebuildTypes` | `""`          | Custom type generation command. An empty string uses the plugin API. Supports `{folder}`, `{name}`, `{port}`, and `{tsconfig}`.                                                                                              |
+| `mf-dashboard.commands.refetchTypes` | `""`          | Custom remote types download command. An empty string uses the built-in download. Use `{typesFolder}` for the consumer's types directory. The result is checked against the ZIP, and the command times out after 60 seconds. |
+| `mf-dashboard.apps`                  | unset         | Optional per-app overrides read by **Find microfrontends**. Discovery can populate the graph automatically.                                                                                                                  |
 
-Example legacy override:
+Toolbar layout choices are saved for the workspace and take precedence over the defaults. Run **Find microfrontends** after changing a discovery setting such as `envMode`, `ignorePaths`, `scripts.start`, or `apps` to update the saved graph.
+
+Example manual override for a project with a custom config and types ZIP.
 
 ```json
 {
   "mf-dashboard.apps": {
     "shell": {
       "path": "apps/shell",
-      "manifestPath": "/mf-manifest.json",
+      "configFile": "build/rsbuild.custom.ts",
+      "typesZipPath": "dist/@mf-types.zip",
       "scripts": { "start": "dev" }
     }
   }
 }
 ```
 
-`path` is relative to the workspace folder. Discovery accepts paths inside that folder. Multi-root entries can specify `workspaceFolder` by name. Set `manifestPath` to override the route detected from the build config. If an older release filled in `manifestPath` automatically, remove the field to use the detected route. An app's `scripts.start` overrides the global setting.
+`path` is relative to the workspace folder. In a multi-root workspace, `workspaceFolder` selects that folder by name. `configFile` is relative to the app and takes precedence over the config selected by its start script. `manifestPath` overrides the detected manifest route. `typesZipPath` identifies the ZIP produced by a custom build command, relative to the app. An app's `scripts.start` overrides the global setting.
+
+`commands.refetchTypes` also accepts `{folder}`, `{name}`, `{port}`, and `{tsconfig}` for the consumer. The build installs ZIP archives from local builds directly.
 
 With `packageManager: auto`, Start reads the root `packageManager` field, then checks `pnpm-lock.yaml`, `yarn.lock`, `bun.lock` / `bun.lockb`, and `package-lock.json`, falling back to npm. The command is `<manager> run <script>`; a missing script or invalid script key starts no process.
 

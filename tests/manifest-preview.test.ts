@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { terms } from "../src/shared/config/terms.ts";
 import {
   manifestDocumentPath,
   manifestFailureMessage,
@@ -32,5 +33,12 @@ test("failure messages", () => {
   assert.equal(
     manifestFailureMessage(new Error("connect ECONNREFUSED")),
     "MF dashboard: manifest network error",
+  );
+  assert.equal(
+    manifestFailureMessage(new Error("ignored"), 503, {
+      ...terms,
+      manifestHttpError: "Манифест недоступен (HTTP {0}).",
+    }),
+    "Манифест недоступен (HTTP 503).",
   );
 });

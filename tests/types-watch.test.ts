@@ -172,7 +172,7 @@ test("stopped applications expose local type changes without inventing offline f
       installed: readInstalledEvidence(f.destination),
       checkedAt: Date.now(),
       typesSettleMs: 0,
-    });
+    }).status;
   assert.equal(
     status(),
     "unknown",
@@ -184,6 +184,7 @@ test("stopped applications expose local type changes without inventing offline f
     loaded: f.apps,
     extraUrls: [],
     structure: "tree",
+    flatSort: "name",
     terms,
     book: f.book,
     pending: new Set(),
@@ -196,8 +197,9 @@ test("stopped applications expose local type changes without inventing offline f
   const row = nodes.find((node) => node.name === "workshop")!.children[0];
   assert.equal(row.kind, "silent");
   assert.equal(row.contextValue, "silent");
-  assert.ok(row.description.includes(terms.silent));
-  assert.ok(row.description.includes(`@mf-types: ${terms.typesChanged}`));
+  assert.equal(row.description.includes(terms.silent), false);
+  assert.ok(row.tooltip.includes(terms.silent));
+  assert.doesNotMatch(row.description, /@mf-types/);
   assert.ok(row.tooltip.includes(terms.typesChanged));
   fs.unlinkSync(f.file);
   assert.equal(status(), "unfetched", "an empty directory is not an installed type set");

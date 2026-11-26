@@ -90,7 +90,8 @@ test("diamonds keep every edge and reference rows retain consumer actions and ty
   const translatedReference = rows(session.nodes()).find((node) => node.id === reference.id)!;
   assert.match(translatedReference.tooltip, /Зависимости показаны выше/);
   assert.doesNotMatch(translatedReference.tooltip, /Reference:/);
-  assert.equal(reference.kind, "unfetched");
+  assert.equal(reference.kind, "listen");
+  assert.match(reference.contextValue, /^unfetched\b/);
   assert.match(reference.contextValue, /producer/);
   assert.equal(session.actionFor(reference)?.configFile, "/workspace/right/rsbuild.config.ts");
   assert.equal(

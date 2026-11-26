@@ -1,4 +1,5 @@
 import net from "node:net";
+import { HTTP_CHECK_TIMEOUT_MS } from "../../../shared/config/http-body.ts";
 import { decodeJsonBody, readLimitedBody } from "../../../shared/lib/http-body.ts";
 import { CONNECT_TIMEOUT_MS } from "../config/net.ts";
 import type { Net, ProbeBook, ProbeCycleInput } from "../models/probe.ts";
@@ -25,7 +26,7 @@ export function createLoopbackNet(): Net {
     },
     async get(url, init) {
       const response = await fetch(url, {
-        signal: AbortSignal.timeout(10_000),
+        signal: AbortSignal.timeout(HTTP_CHECK_TIMEOUT_MS),
         headers:
           init?.ifModifiedSince != null
             ? { "If-Modified-Since": new Date(init.ifModifiedSince).toUTCString() }
@@ -39,7 +40,7 @@ export function createLoopbackNet(): Net {
       const body = await readLimitedBody(response);
       let json: unknown = null;
       const type = response.headers.get("content-type") ?? "";
-      if (type.includes("json") || url.includes(".json")) {
+      if (init?.parseJson || type.includes("json") || url.includes(".json")) {
         try {
           json = decodeJsonBody(body);
         } catch {

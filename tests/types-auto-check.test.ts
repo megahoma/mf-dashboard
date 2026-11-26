@@ -174,7 +174,9 @@ test("autoCheck false keeps ports and manifests live without type scans, ZIP req
   await f.provider.refresh("startup");
   const before = f.requests.length;
   assert.ok(before > 0);
-  assert.ok(f.row().children[0].description.includes(terms.typesUnchecked));
+  const link = f.row().children[0];
+  assert.doesNotMatch(link.description, /@mf-types|not checked/);
+  assert.equal(f.provider.typeDetails(link.linkId!)?.status, "unchecked");
   assert.ok(f.provider.getTreeItem(f.row()).contextValue?.includes("check-types"));
   await f.provider.fileSaved(f.sourceFile("palette"));
   await f.provider.refresh("timer");
@@ -202,6 +204,28 @@ test("a burst of source saves refreshes only the changed producer once", async (
   assert.equal(f.sourceScans("palette"), changed + 1);
   assert.equal(f.sourceScans("timeline"), unrelated);
   assert.equal(f.typeScans("studio", "track"), unrelatedTypes);
+});
+
+test("manual checks retain external type results before Details is opened", async (t) => {
+  const f = fixture(t);
+  fs.unlinkSync(path.join(f.root, "palette", "rsbuild.config.ts"));
+  await f.provider.refresh("startup");
+  assert.equal(
+    f.provider.session.loaded.some(({ name }) => name === "palette"),
+    false,
+  );
+  const selected = f.row().children.find((node) => node.name === "palette")!;
+  const otherConsumer = f.row("editor").children.find((node) => node.name === "palette")!;
+
+  await f.provider.checkTypes(selected);
+  assert.ok(f.zipRequests().length > 0);
+  assert.equal(f.provider.typeDetails(selected.linkId!)?.archiveMatch, "matches");
+  assert.equal(f.provider.typeDetails(otherConsumer.linkId!)?.status, "unchecked");
+
+  await f.provider.refresh();
+  assert.equal(f.provider.typeDetails(otherConsumer.linkId!)?.archiveMatch, "matches");
+  await f.provider.refresh("timer");
+  assert.equal(f.provider.typeDetails(otherConsumer.linkId!)?.archiveMatch, "matches");
 });
 
 test("manual checks inspect only the selected link or consumer and retain the dated snapshot", async (t) => {
@@ -243,7 +267,8 @@ test("manual checks inspect only the selected link or consumer and retain the da
   assert.ok(f.typeScans("studio", "track") > 0);
   assert.equal(f.typeScans("editor", "paint"), 0);
   const checked = f.row().children.find((node) => node.name === "palette")!;
-  assert.equal(checked.kind, "unfetched");
+  assert.equal(checked.kind, "listen");
+  assert.match(checked.contextValue, /^unfetched\b/);
   const requests = f.requests.length;
   await f.provider.checkTypes({ ...f.row(), id: "app:not-configured" });
   assert.equal(f.requests.length, requests);
@@ -383,7 +408,7 @@ test("a failed manual refresh retains the previous type result and check time", 
 test("the manual check is localized and appears in the context menu only when autoCheck is false", () => {
   const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   const setting = pkg.contributes.configuration.properties["mf-dashboard.types.autoCheck"];
-  assert.equal(setting.default, true);
+  assert.equal(setting.default, false);
   assert.equal(setting.type, "boolean");
   const item = pkg.contributes.menus["view/item/context"].find(
     (item: { command: string }) => item.command === "mf-dashboard.checkTypes",

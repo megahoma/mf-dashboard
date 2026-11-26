@@ -19,7 +19,7 @@ const base = {
 
 test("healthy link is listen with version", () => {
   assert.equal(classify(base), "listen");
-  assert.equal(grayLabel("listen", base), ":4100 · " + terms.listen + " · 1.0.0");
+  assert.equal(grayLabel("listen", base), ":4100 · 1.0.0");
 });
 
 test("a root with a foreign url stays listen and keeps the local gray line", () => {
@@ -29,7 +29,7 @@ test("a root with a foreign url stays listen and keeps the local gray line", () 
     url: "http://example.com/widget-1/mf-manifest.json",
   };
   assert.equal(classify(input), "listen");
-  assert.equal(grayLabel("listen", input), ":4100 · " + terms.listen + " · 1.0.0");
+  assert.equal(grayLabel("listen", input), ":4100 · 1.0.0");
 });
 
 test("stale-source classifies as stale", () => {
@@ -45,7 +45,8 @@ test("closed port wins over a foreign host", () => {
     url: "http://example.com/widget-1/mf-manifest.json",
   };
   assert.equal(classify(input), "silent");
-  assert.equal(grayLabel("silent", input), ":4400 · " + terms.silent);
+  assert.equal(grayLabel("silent", input), ":4400");
+  assert.match(rowModel(input).tooltip, /stopped$/);
 });
 
 test("stale types win over a foreign host", () => {
@@ -105,7 +106,7 @@ test("a root with a closed port is silent and ignores types and url", () => {
     typesState: "stale-source" as const,
   };
   assert.equal(classify(input), "silent");
-  assert.equal(grayLabel("silent", input), ":4100 · " + terms.silent);
+  assert.equal(grayLabel("silent", input), ":4100");
 });
 
 test("a root stays listen when types are stale or the url is not http", () => {
@@ -121,9 +122,9 @@ test("a root stays listen when types are stale or the url is not http", () => {
 });
 
 test("listen omits the version when the manifest is disabled or missing", () => {
-  assert.equal(grayLabel("listen", { ...base, manifestEnabled: false }), ":4100 · " + terms.listen);
-  assert.equal(grayLabel("listen", { ...base, buildVersion: null }), ":4100 · " + terms.listen);
-  assert.equal(grayLabel("listen", { ...base, buildVersion: "" }), ":4100 · " + terms.listen);
+  assert.equal(grayLabel("listen", { ...base, manifestEnabled: false }), ":4100");
+  assert.equal(grayLabel("listen", { ...base, buildVersion: null }), ":4100");
+  assert.equal(grayLabel("listen", { ...base, buildVersion: "" }), ":4100");
 });
 
 test("closed port wins over stale, unfetched, and an invalid url", () => {
@@ -243,12 +244,12 @@ test("an unknown local port is distinct from a stopped app or a mismatched port"
 test("implicit ports 80 and 443 are not written into the gray line", () => {
   const http = { ...base, port: 80, url: "http://127.0.0.1/mf-manifest.json" };
   assert.equal(classify(http), "listen");
-  assert.equal(grayLabel("listen", http), terms.listen + " · 1.0.0");
+  assert.equal(grayLabel("listen", http), "1.0.0");
   const https = { ...base, port: 443, url: "https://localhost/mf-manifest.json" };
   assert.equal(classify(https), "listen");
-  assert.equal(grayLabel("listen", https), terms.listen + " · 1.0.0");
-  assert.equal(grayLabel("silent", { ...https, portOpen: false }), terms.silent);
-  assert.equal(grayLabel("listen", { ...http, manifestEnabled: false }), terms.listen);
+  assert.equal(grayLabel("listen", https), "1.0.0");
+  assert.equal(grayLabel("silent", { ...https, portOpen: false }), "");
+  assert.equal(grayLabel("listen", { ...http, manifestEnabled: false }), "");
 });
 
 test("external checks the url before the manifest answer and ignores types", () => {
@@ -295,7 +296,7 @@ test("row model tooltip includes the folder, port, url, and status word", () => 
   const input = { ...base, folder: "widget-1" };
   const row = rowModel(input);
   assert.equal(row.description, grayLabel("listen", base));
-  assert.equal(row.description.split(terms.listen).length, 2);
+  assert.equal(row.description.includes(terms.listen), false);
   assert.match(row.tooltip, /widget-1/);
   assert.match(row.tooltip, /4100/);
   assert.match(row.tooltip, /http:\/\/127\.0\.0\.1:4100\/mf-manifest\.json/);
@@ -308,8 +309,8 @@ test("gray label and row model follow selected terms and keep the english defaul
     readFileSync(new URL("../l10n/bundle.l10n.ru.json", import.meta.url), "utf8"),
   ) as Record<string, string>;
   const selected = selectTerms("ru", () => "translated", russian);
-  assert.equal(grayLabel("listen", base, selected), ":4100 · " + selected.listen + " · 1.0.0");
-  assert.equal(grayLabel("listen", base), ":4100 · " + terms.listen + " · 1.0.0");
+  assert.equal(grayLabel("listen", base, selected), ":4100 · 1.0.0");
+  assert.equal(grayLabel("listen", base), ":4100 · 1.0.0");
   const row = rowModel({ ...base, folder: "widget-1" }, selected);
   assert.equal(row.kind, "listen");
   assert.equal(row.description, grayLabel("listen", base, selected));
