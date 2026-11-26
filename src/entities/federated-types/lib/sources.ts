@@ -13,14 +13,32 @@ export function sourceIdentity(
   folder: string,
   tsconfig: string | null,
   typesFolder: string,
+  log?: LogContext,
+): SourceIdentity;
+export function sourceIdentity(
+  folder: string,
+  tsconfig: string | null,
+  typesFolder: string,
+  log: LogContext,
+  file: string,
+): SourceIdentity | null;
+export function sourceIdentity(
+  folder: string,
+  tsconfig: string | null,
+  typesFolder: string,
   log: LogContext = noLog,
-): SourceIdentity {
+  file?: string,
+): SourceIdentity | null {
   let tsconfigFingerprint = "";
   const entries = sourceEntries(folder, tsconfig, typesFolder, (config) => {
     tsconfigFingerprint = filesFingerprint([
       { name: "tsconfig", bytes: Buffer.from(JSON.stringify(config)) },
     ]);
   });
+  if (file !== undefined) {
+    const full = path.resolve(file);
+    if (!entries.some((entry) => entry.fullPath === full)) return null;
+  }
   const stamp = entries
     .map((entry) => `${entry.name}\0${entry.size}\0${entry.savedAt}`)
     .sort()

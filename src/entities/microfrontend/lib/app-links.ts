@@ -5,6 +5,17 @@ export function appsByName(apps: readonly LocalApp[]): Map<string, LocalApp> {
   return new Map(apps.map((app) => [app.name, app]));
 }
 
+const indexes = new WeakMap<readonly LocalApp[], ReadonlyMap<string, LocalApp>>();
+
+export function indexedApps(apps: readonly LocalApp[]): ReadonlyMap<string, LocalApp> {
+  let index = indexes.get(apps);
+  if (!index) {
+    index = appsByName(apps);
+    indexes.set(apps, index);
+  }
+  return index;
+}
+
 export function remoteLink(consumer: string, remote: LocalApp["remotes"][number]): RemoteLink {
   return { consumer, alias: remote.alias, remoteName: remote.name, url: remote.url };
 }

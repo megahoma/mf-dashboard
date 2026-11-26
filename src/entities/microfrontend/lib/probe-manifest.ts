@@ -65,14 +65,16 @@ async function requestManifest(
     return blank;
   }
   const started = Date.now();
+  const previous = cache?.book.manifestFacts.get(url);
   log.event("trace", "manifest.request", { url });
   let response: Awaited<ReturnType<Net["get"]>>;
   try {
     if (cache) cache.manifestRequests++;
-    response = await request(() => net.get(url, { parseJson: true }), cache, {
-      kind: "manifest",
-      url,
-    });
+    response = await request(
+      () => net.get(url, { parseJson: true, ...(previous && { ifNoneMatch: previous.etag }) }),
+      cache,
+      { kind: "manifest", url },
+    );
   } catch (error) {
     const timeout = isTimeoutError(error);
     logDuration(
@@ -88,6 +90,7 @@ async function requestManifest(
     );
     return { ...blank, requestFailure: timeout ? "timeout" : "network" };
   }
+  const notModified = response.notModified || response.status === 304;
   logDuration(
     log,
     "manifest.response",
@@ -96,11 +99,13 @@ async function requestManifest(
       url,
       status: response.status,
       ok: response.ok,
-      validJson: response.json != null,
+      validJson: response.json != null || (notModified && previous !== undefined),
     },
     "trace",
   );
-  if (!response.ok)
+  if (notModified && previous) return previous.artifact;
+  cache?.book.manifestFacts.delete(url);
+  if (notModified || !response.ok)
     return {
       ...blank,
       requestFailure: response.status ? `HTTP ${response.status}` : "HTTP error",
@@ -114,7 +119,7 @@ async function requestManifest(
       reason: response.json == null ? "invalid-json" : "missing-or-invalid-types-metadata",
     });
   }
-  return {
+  const artifact: ArtifactProbe = {
     ...blank,
     manifestReachable: true,
     manifestValid: isFederationManifest(response.json),
@@ -122,6 +127,9 @@ async function requestManifest(
     zipUrl,
     ...modules,
   };
+  if (artifact.manifestValid && response.etag)
+    cache?.book.manifestFacts.set(url, { etag: response.etag, artifact });
+  return artifact;
 }
 
 function isFederationManifest(json: unknown): boolean {

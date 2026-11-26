@@ -604,6 +604,7 @@ function useWorkspace(
   root: string,
   apps: Record<string, { path: string; typesZipPath?: string }>,
   rebuildCommand?: string,
+  probeIntervalMs?: number,
 ): () => void {
   const previous = {
     getConfiguration: vscode.workspace.getConfiguration,
@@ -622,6 +623,7 @@ function useWorkspace(
       if (key === "structure") return "tree";
       if (key === "envMode") return "development";
       if (key === "commands.rebuildTypes") return rebuildCommand;
+      if (key === "probeIntervalMs") return probeIntervalMs;
       return undefined;
     },
   })) as unknown as typeof vscode.workspace.getConfiguration;
@@ -713,8 +715,10 @@ function writeTypesBuildFixture(appDir: string, root = appDir): string {
   return `${shellQuote(process.execPath)} rebuild.cjs`;
 }
 
-test("Rebuild All counts current consumers in its summary without changing the generation report", async (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-current-consumer-log-"));
+test("Rebuild All reveals installed types without a filesystem event and counts current consumers", async (t) => {
+  const root = fs.realpathSync.native(
+    fs.mkdtempSync(path.join(os.tmpdir(), "mf-current-consumer-log-")),
+  );
   const producer = path.join(root, "gallery");
   fs.mkdirSync(producer);
   fs.writeFileSync(
@@ -738,16 +742,26 @@ test("Rebuild All counts current consumers in its summary without changing the g
     root,
     { gallery: { path: "gallery", typesZipPath: "types.zip" }, shell: { path: "shell" } },
     writeTypesBuildFixture(producer, root),
+    0,
   );
   const events: { level: string; text: string }[] = [];
-  const provider = providerFor(events);
+  let persistFails = false;
+  const provider = providerFor(events, () => {
+    if (persistFails) throw new Error("fixture storage unavailable");
+  });
   t.after(() => {
     restore();
     provider.dispose();
     fs.rmSync(root, { recursive: true, force: true });
   });
+  await provider.refresh("settings");
+  const shell = () => provider.getChildren().find(({ name }) => name === "shell")!;
+  assert.ok(!shell().contextValue.split(" ").includes("types"));
+  assert.ok(!shell().children[0]?.contextValue.split(" ").includes("types"));
   const first = await provider.rebuildAll(() => {});
   assert.deepEqual(first?.installed, [{ consumer: "shell", alias: "gallery" }]);
+  assert.ok(shell().contextValue.split(" ").includes("types"));
+  assert.ok(shell().children[0]?.contextValue.split(" ").includes("types"));
   assert.match(
     events.find(({ text }) => text.startsWith("types.rebuild.all.completed"))?.text ?? "",
     /rebuilt=1 installed=1 current=0 /,
@@ -766,6 +780,84 @@ test("Rebuild All counts current consumers in its summary without changing the g
     events.find(({ text }) => text.startsWith("types.rebuild.all.completed"))?.text ?? "",
     /rebuilt=1 installed=0 current=1 /,
   );
+
+  const types = path.join(consumer, "@mf-types");
+  fs.rmSync(types, { recursive: true });
+  provider.typesWatcherSettingsChanged();
+  assert.ok(!shell().contextValue.split(" ").includes("types"));
+  assert.ok(!shell().children[0]?.contextValue.split(" ").includes("types"));
+  persistFails = true;
+  const change = t.mock.fn();
+  provider.onDidChangeTreeData(change);
+  await assert.rejects(() => provider.rebuildAll(() => {}), /fixture storage unavailable/);
+  assert.ok(change.mock.callCount() > 0);
+  assert.equal(fs.readFileSync(path.join(types, "gallery", "index.d.ts"), "utf8"), "types");
+  assert.ok(shell().contextValue.split(" ").includes("types"));
+  assert.ok(shell().children[0]?.contextValue.split(" ").includes("types"));
+});
+
+test("both rebuild commands reflect types directory changes after a failed generation", async (t) => {
+  const root = fs.realpathSync.native(
+    fs.mkdtempSync(path.join(os.tmpdir(), "mf-rebuild-types-dir-")),
+  );
+  const config = path.join(root, "module-federation.config.ts");
+  const source =
+    "export default { name: 'gallery', dts: true, exposes: { './index': './index.ts' } };";
+  fs.writeFileSync(config, source);
+  const command = writeTypesBuildFixture(root);
+  fs.writeFileSync(
+    path.join(root, "rebuild.cjs"),
+    'require("node:fs").mkdirSync("@mf-types"); process.exitCode = 1;',
+  );
+  const restore = useWorkspace(
+    root,
+    { gallery: { path: ".", typesZipPath: "types.zip" } },
+    command,
+    0,
+  );
+  const provider = providerFor();
+  t.after(() => {
+    restore();
+    provider.dispose();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  await provider.refresh("settings");
+  const gallery = () => provider.getChildren()[0];
+  const hasTypes = () => gallery().contextValue.split(" ").includes("types");
+  assert.equal(hasTypes(), false);
+  await provider.rebuild(gallery());
+  assert.match(provider.session.rebuildErrors.get("gallery") ?? "", /rebuild command exited 1/);
+  assert.equal(hasTypes(), true);
+
+  fs.rmdirSync(path.join(root, "@mf-types"));
+  provider.typesWatcherSettingsChanged();
+  assert.equal(hasTypes(), false);
+  const report = await provider.rebuildAll(() => {});
+  assert.deepEqual(report?.failed, [{ app: "gallery", reason: "rebuild command exited 1" }]);
+  assert.equal(hasTypes(), true);
+
+  const alias = path.join(root, "@mf-types", "widget");
+  fs.mkdirSync(alias);
+  fs.writeFileSync(path.join(alias, "index.d.ts"), "export {};");
+  fs.writeFileSync(
+    config,
+    source.replace(
+      "dts: true",
+      `dts: true, remotes: {widget:'widget@http://localhost:4321/mf-manifest.json'}`,
+    ),
+  );
+  fs.writeFileSync(
+    path.join(root, "rebuild.cjs"),
+    'require("node:fs").rmSync("@mf-types", {recursive:true}); process.exitCode = 1;',
+  );
+  await provider.refresh("settings");
+  const aliasHasTypes = () => gallery().children[0]?.contextValue.split(" ").includes("types");
+  assert.equal(aliasHasTypes(), true);
+  const removed = await provider.rebuildAll(() => {});
+  assert.deepEqual(removed?.installed, []);
+  assert.deepEqual(removed?.failed, [{ app: "gallery", reason: "rebuild command exited 1" }]);
+  assert.equal(hasTypes(), false);
+  assert.equal(aliasHasTypes(), false);
 });
 
 for (const phase of ["persist", "refresh"]) {
@@ -845,7 +937,7 @@ test("saving an Rslib config can restore a hidden, configured federation helper"
 });
 
 test("a successful refresh builds the tree once for logs and later row requests", async (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-tree-render-"));
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "mf-tree-render-")));
   const shell = path.join(root, "shell");
   writeApp(shell, "shell", 'widget: "widget"');
   const events: { level: string; text: string }[] = [];
@@ -897,7 +989,7 @@ test("a successful refresh builds the tree once for logs and later row requests"
   provider.getChildren(child);
   assert.equal(builds.count, built);
   assert.equal(read.mock.callCount(), readBefore);
-  assert.equal(stat.mock.callCount() - statBefore, 2);
+  assert.equal(stat.mock.callCount() - statBefore, 0);
 });
 
 test("flat row reads skip hidden remote types paths and tree mode sees their changes", (t) => {
@@ -1030,9 +1122,15 @@ test("a types directory change updates Reveal types without a new probe", () => 
 });
 
 test("workspace events update Reveal types in cached rows when a types directory appears or disappears", async (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-tree-watch-types-"));
+  const root = fs.realpathSync.native(
+    fs.mkdtempSync(path.join(os.tmpdir(), "mf-tree-watch-types-")),
+  );
   const folder = path.join(root, "shell");
+  const studio = path.join(root, "studio");
+  const library = path.join(root, "library");
   fs.mkdirSync(folder);
+  fs.mkdirSync(studio);
+  fs.mkdirSync(library);
   const restore = useWorkspace(root, {});
   const creates = new vscode.EventEmitter<vscode.Uri>();
   const changes = new vscode.EventEmitter<vscode.Uri>();
@@ -1059,10 +1157,12 @@ test("workspace events update Reveal types in cached rows when a types directory
       typesFolder: "generated/types",
       remotes: [{ alias: "@team/widget", name: "widget", url: null }],
     }),
+    localApp("studio", studio),
+    localApp("library", library),
   ];
   provider.relabel();
   assert.match(String(watch.mock.calls[0].arguments[0]), /types/);
-  const appId = provider.getChildren()[0].id;
+  const appId = "app:shell";
   const hasTypes = () =>
     provider.findRow(appId)?.children[0]?.contextValue.split(" ").includes("types");
   const changed = t.mock.fn();
@@ -1074,11 +1174,17 @@ test("workspace events update Reveal types in cached rows when a types directory
   await Promise.resolve();
   assert.equal(changed.mock.callCount(), 0);
   assert.equal(hasTypes(), false);
+  const studioTypes = path.join(studio, "@mf-types");
+  fs.mkdirSync(studioTypes);
+  const stat = t.mock.method(fs, "statSync");
   creates.fire(vscode.Uri.file(path.join(folder, "generated")));
+  creates.fire(vscode.Uri.file(studioTypes));
   creates.fire(vscode.Uri.file(target));
   await Promise.resolve();
   assert.equal(changed.mock.callCount(), 1);
   assert.equal(hasTypes(), true);
+  assert.ok(provider.findRow("app:studio")?.contextValue.split(" ").includes("types"));
+  assert.ok(!stat.mock.calls.some(({ arguments: [file] }) => String(file).startsWith(library)));
   assert.equal(watch.mock.callCount(), 1);
 
   fs.rmdirSync(target);
@@ -1104,7 +1210,9 @@ test("workspace events update Reveal types in cached rows when a types directory
 });
 
 test("types watches follow internal links, including a chain whose final directory disappears", async (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-tree-watch-link-"));
+  const root = fs.realpathSync.native(
+    fs.mkdtempSync(path.join(os.tmpdir(), "mf-tree-watch-link-")),
+  );
   const restore = useWorkspace(root, {});
   const creates = new vscode.EventEmitter<vscode.Uri>();
   const changes = new vscode.EventEmitter<vscode.Uri>();
@@ -1159,6 +1267,75 @@ test("types watches follow internal links, including a chain whose final directo
   creates.fire(vscode.Uri.file(path.join(second, "types")));
   await Promise.resolve();
   assert.equal(hasTypes(), true);
+});
+
+for (const [pattern, typesFolder] of [
+  ["**/.generated/**", ".generated/types"],
+  ["generated/[!x]ypes/**", "generated/types"],
+  ["**/a(b)/**", "a(b)/types"],
+  ["generated/** ", "generated/types"],
+  ["generated/", "generated/types"],
+])
+  test(`Reveal types rechecks paths excluded by ${JSON.stringify(pattern)}`, (t) => {
+    const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "mf-tree-exclude-")));
+    const restore = useWorkspace(root, {});
+    const config = vscode.workspace.getConfiguration();
+    let excluded = false;
+    t.mock.method(vscode.workspace, "getConfiguration", () => ({
+      ...config,
+      get: (key: string) => (key === "watcherExclude" ? { [pattern]: excluded } : config.get(key)),
+    }));
+    const provider = providerFor();
+    t.after(() => {
+      provider.dispose();
+      restore();
+      fs.rmSync(root, { recursive: true, force: true });
+    });
+    const target = path.join(root, typesFolder, "@demo", "widget");
+    provider.session.loaded = [
+      localApp("studio", root, {
+        typesFolder,
+        remotes: [{ alias: "@demo/widget", name: "widget", url: null }],
+      }),
+    ];
+    const hasTypes = () =>
+      provider.getChildren()[0]?.children[0]?.contextValue.split(" ").includes("types");
+    assert.equal(hasTypes(), false);
+    fs.mkdirSync(target, { recursive: true });
+    assert.equal(hasTypes(), false);
+    excluded = true;
+    provider.typesWatcherSettingsChanged();
+    assert.equal(hasTypes(), true);
+    fs.rmdirSync(target);
+    assert.equal(hasTypes(), false);
+    fs.mkdirSync(target);
+    provider.relabel();
+    assert.equal(hasTypes(), true);
+  });
+
+test("Reveal types rechecks an unresolved symlink route outside the workspace", (t) => {
+  const temporary = fs.realpathSync.native(
+    fs.mkdtempSync(path.join(os.tmpdir(), "mf-tree-external-")),
+  );
+  const root = path.join(temporary, "workspace");
+  const backing = path.join(root, "backing");
+  const external = path.join(temporary, "external");
+  fs.mkdirSync(backing, { recursive: true });
+  fs.symlinkSync(external, path.join(root, "generated"), "junction");
+  const restore = useWorkspace(root, {});
+  const provider = providerFor();
+  t.after(() => {
+    provider.dispose();
+    restore();
+    fs.rmSync(temporary, { recursive: true, force: true });
+  });
+  provider.session.loaded = [localApp("studio", root, { typesFolder: "generated" })];
+  const hasTypes = () => provider.getChildren()[0]?.contextValue.split(" ").includes("types");
+  assert.equal(hasTypes(), false);
+  fs.symlinkSync(backing, external, "junction");
+  assert.equal(hasTypes(), true);
+  fs.unlinkSync(external);
+  assert.equal(hasTypes(), false);
 });
 
 test("moving an extra URL to user settings clears the old diagnostic without rebuilding rows", async (t) => {

@@ -11,6 +11,7 @@ import { EventEmitter } from "node:events";
 import { createConfirmationStore } from "../src/entities/federated-types/index.ts";
 import * as vscode from "./support/vscode.ts";
 import { terms } from "../src/shared/config/index.ts";
+import { shellQuote } from "../src/shared/lib/shell.ts";
 import { zipFixture } from "./support/zip.ts";
 
 registerHooks({
@@ -156,8 +157,8 @@ test("saving a nested launch config or its JSON import refreshes the first disco
   assert.equal(loaded()?.port, 4677);
 });
 
-test("refresh and Fetch confirm published types and keep offline type changes visible", async (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-watch-refresh-"));
+test("Fetch and Rebuild reveal installed types without a filesystem event", async (t) => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "mf-watch-refresh-")));
   const consumer = path.join(root, "workshop");
   const producer = path.join(root, "palette");
   const destination = path.join(consumer, "@mf-types", "paint");
@@ -168,11 +169,20 @@ test("refresh and Fetch confirm published types and keep offline type changes vi
   let online = true;
   let consumerOnline = true;
   let probeIntervalMs = 5000;
+  let zipAgeMs = 60_000;
+  let includeAnnex = false;
+  const rebuildCommand = `${shellQuote(process.execPath)} --version`;
   let downloads = 0;
   fs.writeFileSync(path.join(consumer, "package.json"), "{}");
   fs.writeFileSync(
     path.join(consumer, "rsbuild.config.ts"),
     `export default defineConfig({server:{port:4400},plugins:[pluginModuleFederation({name:'workshop',dts:true,remotes:{paint:'palette@http://localhost:4401/mf-manifest.json'}})]});`,
+  );
+  fs.writeFileSync(
+    path.join(consumer, "annex.config.ts"),
+    fs
+      .readFileSync(path.join(consumer, "rsbuild.config.ts"), "utf8")
+      .replace("name:'workshop'", "name:'annex'"),
   );
   fs.writeFileSync(
     path.join(producer, "rsbuild.config.ts"),
@@ -201,11 +211,20 @@ test("refresh and Fetch confirm published types and keep offline type changes vi
   t.mock.method(vscode.workspace, "getConfiguration", () => ({
     async update() {},
     inspect: () => ({
-      workspaceValue: { workshop: { path: "workshop" }, palette: { path: "palette" } },
+      workspaceValue: {
+        workshop: { path: "workshop" },
+        palette: { path: "palette" },
+        ...(includeAnnex && { annex: { path: "workshop", configFile: "annex.config.ts" } }),
+      },
     }),
     get: <T>(key: string): T | undefined =>
-      (key === "structure" ? "tree" : key === "probeIntervalMs" ? probeIntervalMs : undefined) as
-        T | undefined,
+      (key === "structure"
+        ? "tree"
+        : key === "probeIntervalMs"
+          ? probeIntervalMs
+          : key === "commands.rebuildTypes"
+            ? rebuildCommand
+            : undefined) as T | undefined,
   }));
   t.mock.method(net, "connect", (options: net.NetConnectOpts) => {
     const socket = Object.assign(new EventEmitter(), { setTimeout() {}, destroy() {} });
@@ -227,22 +246,26 @@ test("refresh and Fetch confirm published types and keep offline type changes vi
     downloads++;
     const bytes = zipFixture([{ file: "index.d.ts", text }]);
     return new Response(bytes, {
-      headers: { "last-modified": new Date(Date.now() + 60_000).toUTCString() },
+      headers: { "last-modified": new Date(Date.now() + zipAgeMs).toUTCString() },
     });
   });
   const store = createConfirmationStore();
   const link = { consumer: "workshop", alias: "paint", remoteName: "palette" };
   const persisted: (boolean | undefined)[] = [];
+  let persistFails = false;
   const provider = new MfDashboardProvider(
     () => terms,
     store,
     () => {
+      if (persistFails && fs.existsSync(path.join(destination, "index.d.ts")))
+        throw new Error("fixture storage unavailable");
       persisted.push(store.install(link)?.fromManifest);
     },
   );
   t.after(() => provider.dispose());
   await provider.refresh();
-  const row = () => provider.getChildren().find((node) => node.name === "workshop")!.children[0];
+  const workshop = () => provider.getChildren().find((node) => node.name === "workshop")!;
+  const row = () => workshop().children[0];
   const initial = store.install(link);
   assert.ok(initial);
   assert.equal(
@@ -281,10 +304,12 @@ test("refresh and Fetch confirm published types and keep offline type changes vi
   assert.equal(persisted[beforeFetch], true, "Fetch saves the proof before refreshing the tree");
 
   probeIntervalMs = 0;
-  fs.rmSync(destination, { recursive: true });
+  fs.rmSync(path.dirname(destination), { recursive: true });
   await provider.refresh();
   assert.equal(provider.typeDetails(linkId)?.archiveMatch, "missing");
   assert.match(row().contextValue, /^unfetched\b/);
+  assert.ok(!workshop().contextValue.split(" ").includes("types"));
+  assert.ok(!row().contextValue.split(" ").includes("types"));
   const requests = t.mock.method(provider.session["ports"], "probe");
   text = "export type Pigment = 'amber';";
   assert.equal(provider.refetch(linkId), true);
@@ -292,7 +317,50 @@ test("refresh and Fetch confirm published types and keep offline type changes vi
   assert.equal(fs.readFileSync(path.join(destination, "index.d.ts"), "utf8"), text);
   assert.equal(provider.typeDetails(linkId)?.archiveMatch, "matches");
   assert.doesNotMatch(row().contextValue, /^unfetched\b/);
+  assert.ok(workshop().contextValue.split(" ").includes("types"));
+  assert.ok(row().contextValue.split(" ").includes("types"));
   assert.equal(requests.mock.callCount(), 0);
+
+  fs.rmSync(path.dirname(destination), { recursive: true });
+  await provider.refresh();
+  persistFails = true;
+  assert.equal(provider.refetch(linkId), true);
+  await provider.finishRefetch(linkId).finally(() => provider.releaseRefetch(linkId));
+  assert.equal(provider.session.refetchErrors.has(linkId), true);
+  assert.equal(fs.readFileSync(path.join(destination, "index.d.ts"), "utf8"), text);
+  assert.ok(workshop().contextValue.split(" ").includes("types"));
+  assert.ok(row().contextValue.split(" ").includes("types"));
+
+  persistFails = false;
+  includeAnnex = true;
+  zipAgeMs = -60_000;
+  fs.writeFileSync(path.join(consumer, "index.ts"), "export const item = true;");
+  fs.rmSync(path.dirname(destination), { recursive: true });
+  await provider.refresh();
+  requests.mock.resetCalls();
+  assert.ok(!workshop().contextValue.split(" ").includes("types"));
+  assert.ok(!row().contextValue.split(" ").includes("types"));
+  const annex = () => provider.getChildren().find((node) => node.name === "annex")!;
+  assert.ok(!annex().contextValue.split(" ").includes("types"));
+  assert.ok(!annex().children[0]?.contextValue.split(" ").includes("types"));
+  await provider.rebuild(workshop());
+  assert.ok(store.generation("workshop"));
+  assert.equal(fs.readFileSync(path.join(destination, "index.d.ts"), "utf8"), text);
+  assert.ok(workshop().contextValue.split(" ").includes("types"));
+  assert.ok(row().contextValue.split(" ").includes("types"));
+  assert.ok(annex().contextValue.split(" ").includes("types"));
+  assert.ok(annex().children[0]?.contextValue.split(" ").includes("types"));
+  assert.equal(requests.mock.callCount(), 0);
+
+  fs.rmSync(path.dirname(destination), { recursive: true });
+  fs.writeFileSync(path.join(consumer, "index.ts"), "export const item = 'changed';");
+  await provider.refresh();
+  persistFails = true;
+  await provider.rebuild(workshop());
+  assert.match(provider.session.rebuildErrors.get("workshop") ?? "", /fixture storage unavailable/);
+  assert.equal(fs.readFileSync(path.join(destination, "index.d.ts"), "utf8"), text);
+  assert.ok(workshop().contextValue.split(" ").includes("types"));
+  assert.ok(row().contextValue.split(" ").includes("types"));
 });
 
 test("stat failures in installed types do not prevent rendering the dashboard", (t) => {

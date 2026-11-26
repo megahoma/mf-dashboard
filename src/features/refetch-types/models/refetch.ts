@@ -6,4 +6,8 @@ export type Remote = LocalApp["remotes"][number];
 
 export type TypesRoot = { folder: string; real: string };
 
-export type PathEntry = { file: string; link?: { id: string; parent?: string; listed: boolean } };
+export type PathEntry = {
+  file: string;
+  directory?: boolean;
+  link?: { id: string; parent?: string; listed: boolean };
+};

@@ -36,5 +36,5 @@ export type DashboardView = {
   readonly scriptGaps: ReadonlySet<string>;
   readonly rebuildErrors: ReadonlyMap<string, string>;
   typesForLink(link: RemoteLink): StatusInput["typesState"];
-  actionFor(node: unknown): RowAction | null;
+  actionFor(node: unknown, render?: boolean): RowAction | null;
 };

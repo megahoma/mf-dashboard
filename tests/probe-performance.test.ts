@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { setImmediate } from "node:timers/promises";
 import test from "node:test";
+import { createLoopbackNet } from "../src/entities/microfrontend/lib/net.ts";
 import {
   appProbeId,
   createProbeBook,
@@ -178,6 +179,64 @@ test("apps, links and extras share one manifest while scoped rows enrich types i
     assert.deepEqual(result?.exposes, ["./Panel"]);
     assert.deepEqual(result?.shared, [{ name: "react", version: "19", singleton: true }]);
   }
+});
+
+test("manifest validators are per URL and a 304 still checks the ZIP", async (t) => {
+  const otherUrl = manifestUrl.replace("127.0.0.1", "localhost");
+  const seen = new Map<string, (string | null)[]>();
+  let version = 1;
+  t.mock.method(globalThis, "fetch", async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    if (url.endsWith(".zip")) return new Response(Uint8Array.of(version));
+    const validator = new Headers(init?.headers).get("if-none-match");
+    const requests = seen.get(url) ?? [];
+    requests.push(validator);
+    seen.set(url, requests);
+    const buildVersion = url === manifestUrl ? "numeric" : `named-${version}`;
+    const etag = `"${buildVersion}"`;
+    if (version === 3 && validator) {
+      return Object.defineProperty(new Response(null, { status: 304 }), "redirected", {
+        value: true,
+      });
+    }
+    if (validator === etag) return new Response(null, { status: 304 });
+    const response = Response.json(
+      {
+        ...manifest,
+        id: buildVersion,
+        name: buildVersion,
+        metaData: {
+          ...manifest.metaData,
+          remoteEntry: { name: "remoteEntry.js" },
+          buildInfo: { buildVersion },
+        },
+      },
+      { headers: { etag } },
+    );
+    if (version === 3) Object.defineProperty(response, "redirected", { value: true });
+    return response;
+  });
+  const book = createProbeBook();
+  const cycle = createProbeCycle(createLoopbackNet(), book);
+  const input = { apps: [], links: [], extraManifestUrls: [manifestUrl, otherUrl] };
+  const numeric = () => book.extras.get(externalManifestId(manifestUrl));
+  await cycle.start(input);
+  const first = numeric();
+  assert.ok(first?.zipHash);
+  version = 2;
+  await cycle.start(input);
+  assert.deepEqual(seen.get(manifestUrl), [null, '"numeric"']);
+  assert.deepEqual(seen.get(otherUrl), [null, '"named-1"']);
+  assert.equal(numeric()?.buildVersion, "numeric");
+  assert.deepEqual(numeric()?.exposes, ["./Panel"]);
+  assert.notEqual(numeric()?.zipHash, first.zipHash);
+  assert.equal(book.extras.get(externalManifestId(otherUrl))?.buildVersion, "named-2");
+  version = 3;
+  await cycle.start({ ...input, extraManifestUrls: [otherUrl] });
+  assert.deepEqual(seen.get(otherUrl), [null, '"named-1"', '"named-2"', null]);
+  assert.equal(book.extras.get(externalManifestId(otherUrl))?.buildVersion, "named-3");
+  assert.equal(book.manifestFacts.has(otherUrl), false);
+  assert.equal(book.manifestFacts.has(manifestUrl), false);
 });
 
 test("distinct manifests share an in-flight ZIP and retain its conditional cache next cycle", async () => {

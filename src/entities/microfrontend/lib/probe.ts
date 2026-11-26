@@ -99,6 +99,9 @@ export function createProbeCycle(
         input.extraManifestUrls.forEach((url, index) =>
           putExternalResult(book, url, extras[index]),
         );
+        for (const url of book.manifestFacts.keys()) {
+          if (!cache.manifests.has(url)) book.manifestFacts.delete(url);
+        }
         if (checkTypes && !input.typeLinks)
           for (const url of book.zips.keys()) {
             if (!cache.seen.has(url)) book.zips.delete(url);

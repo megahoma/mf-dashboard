@@ -206,7 +206,7 @@ test("refresh keeps the previous book until the probe settles", async () => {
       scan() {
         return {};
       },
-      loadKnown: () => [app({ name: "app", port: 4100 })],
+      loadKnown: () => [app({ name: "app", port: 4102 })],
       async probe(target) {
         probeFlag = session.probeRunning;
         duringKind = session.nodes()[0]?.kind;
@@ -235,6 +235,7 @@ test("refresh keeps the previous book until the probe settles", async () => {
   assert.equal(changeFlag, false);
   assert.equal(session.probeRunning, false);
   assert.notEqual(session.loaded, visible);
+  assert.equal(session.loaded[0]?.port, 4102);
   assert.equal(book.apps.get(appProbeId("app"))?.buildVersion, "new");
   assert.equal(book.links.size, 0);
   assert.equal(book.extras.size, 0);

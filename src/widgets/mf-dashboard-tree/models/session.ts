@@ -38,6 +38,7 @@ import type {
   DiscoverySnapshot,
   KnownAppsTask,
 } from "./session-types.ts";
+import type { TypesDirectoryLookup } from "./targets.ts";
 
 function appManifestUrl(app: LocalApp): string | null {
   return app.manifest && app.port !== null ? localManifestUrl(app.port, app.manifestPath) : null;
@@ -92,6 +93,7 @@ export class DashboardSession {
   private pathWarnings = new Set<string>();
   private preparedDiscovery: DiscoverySnapshot | undefined;
   readonly book: ProbeBook;
+  renderTypesDirectory?: TypesDirectoryLookup;
   private readonly onChange: () => void;
 
   constructor(
@@ -226,7 +228,9 @@ export class DashboardSession {
       // The probe writes `staged`. The visible book stays put until the swap below.
       const staged = createProbeBook();
       staged.zips = new Map(this.book.zips);
+      staged.manifestFacts = new Map(this.book.manifestFacts);
       const sameApps = isDeepStrictEqual(snapshot.loaded, loaded);
+      if (sameApps) loaded = snapshot.loaded;
       const sameExtras = isDeepStrictEqual(snapshot.extraUrls, extraUrls);
       if (probe) {
         await this.ports.probe(staged, {
@@ -282,6 +286,7 @@ export class DashboardSession {
       this.ownershipSources = ownershipSources;
       this.book.zips.clear();
       for (const [url, fact] of staged.zips) this.book.zips.set(url, fact);
+      this.book.manifestFacts = staged.manifestFacts;
     } catch (error) {
       const toggledDuringProbe = this.structure !== structureAtProbe;
       this.applyRefreshState({
@@ -525,8 +530,13 @@ export class DashboardSession {
     this.structure = snapshot.structure;
   }
 
-  actionFor(node: unknown) {
-    return resolveRowAction(node, this.loaded, this.extraUrls);
+  actionFor(node: unknown, render = false) {
+    return resolveRowAction(
+      node,
+      this.loaded,
+      this.extraUrls,
+      render ? this.renderTypesDirectory : undefined,
+    );
   }
 
   nodes(): DashboardNode[] {

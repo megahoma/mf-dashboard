@@ -20,7 +20,13 @@ export function externalManifestId(url: string): string {
 }
 
 export function createProbeBook(): ProbeBook {
-  return { apps: new Map(), links: new Map(), extras: new Map(), zips: new Map() };
+  return {
+    apps: new Map(),
+    links: new Map(),
+    extras: new Map(),
+    zips: new Map(),
+    manifestFacts: new Map(),
+  };
 }
 
 export function putAppResult(book: ProbeBook, name: string, result: ProbeResult): void {

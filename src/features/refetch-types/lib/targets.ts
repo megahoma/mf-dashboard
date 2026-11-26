@@ -103,7 +103,7 @@ function existingEntry(file: string): PathEntry {
         link: { id: `${stat.dev}:${stat.ino}`, parent, listed },
       };
     }
-    if (stat) return { file: fs.realpathSync.native(file) };
+    if (stat) return { file: fs.realpathSync.native(file), directory: stat.isDirectory() };
   } catch {
     // Keep the configured spelling when another alias cannot be resolved.
   }
@@ -117,6 +117,24 @@ function targetPaths(root: TypesRoot, alias: string) {
     { file: path.resolve(folder, alias.toLowerCase()) },
   ]);
   return { entry, paths: [...paths, entry] };
+}
+
+function hasRegularScope(root: string, alias: string, scopes: Map<string, boolean>): boolean {
+  if (process.platform === "win32") return false;
+  const slash = alias.indexOf("/");
+  if (slash === -1) return true;
+  const scope = alias.slice(0, slash);
+  let directory = scopes.get(scope);
+  if (directory === undefined) {
+    try {
+      directory =
+        fs.lstatSync(path.join(root, scope), { throwIfNoEntry: false })?.isDirectory() === true;
+    } catch {
+      directory = false;
+    }
+    scopes.set(scope, directory);
+  }
+  return directory;
 }
 
 function sameLink(first: PathEntry, second: PathEntry): boolean {
@@ -197,6 +215,7 @@ function assertDistinctTarget(
       continue;
     }
     const references = Array.from(otherRoute, existingEntry);
+    const scopes = new Map<string, boolean>();
     for (const other of remotes) {
       const candidate = targetPaths(root, other.alias);
       const shared =
@@ -209,7 +228,9 @@ function assertDistinctTarget(
         replacesPath(candidate.paths, target.paths, shared) ||
         replacesRoute(target.paths, references) ||
         replacesRoute(candidate.paths, route) ||
-        (!sharedEntry && replacesLinkedAlias(target.paths, consumer, root, other.alias, shared))
+        (!sharedEntry &&
+          !(candidate.entry.directory && hasRegularScope(root.real, other.alias, scopes)) &&
+          replacesLinkedAlias(target.paths, consumer, root, other.alias, shared))
       )
         throw new DiagnosticError(`remote aliases share a types directory: ${alias}`, {
           stage: "destination",
