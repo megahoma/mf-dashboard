@@ -11,6 +11,7 @@ export type RebuildContext = {
   published: Map<string, string>;
   settings: ScriptSettings & { rebuildCommand: string; envMode: string };
   refetchCommand(): string;
+  typesDirectoryChanged?(consumer: string, alias?: string): void;
   persist(): void | PromiseLike<void>;
   rebuilt(name: string): void;
 };

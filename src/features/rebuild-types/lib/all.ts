@@ -251,6 +251,7 @@ export async function rebuildAllTypes(
                 : undefined,
           }).finally(() => {
             phases.installLocalMs += Date.now() - installStarted;
+            context.typesDirectoryChanged?.(app.name, remote.alias);
           });
           dependencyHashes[name] = installed.zipHash;
           // ZIP timestamps can change without changing the installed compiler inputs.
@@ -301,6 +302,7 @@ export async function rebuildAllTypes(
             )
             .finally(() => {
               phases.installRemoteMs += Date.now() - fetchStarted;
+              context.typesDirectoryChanged?.(app.name, remote.alias);
             })
             .catch(async (error: unknown) => {
               if (fallback === undefined || !manifestUnavailable(error)) throw error;
@@ -387,6 +389,7 @@ export async function rebuildAllTypes(
         }
       } finally {
         phases.generateMs += Date.now() - generateStarted;
+        context.typesDirectoryChanged?.(app.name);
       }
       const builtAt = current ? previous?.builtAt : Date.now();
       await measured(

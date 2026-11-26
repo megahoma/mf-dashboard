@@ -19,6 +19,7 @@ export {
   disposeEvidenceWorker,
   readInstalledEvidenceAsync,
   sourceContainsAsync,
+  sourceIdentityForFileAsync,
   sourceIdentityAsync,
 } from "./lib/evidence-worker-client.mts";
 export { typesState } from "./models/state.ts";

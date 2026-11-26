@@ -6,13 +6,14 @@ export type Net = {
   connect(port: number): Promise<boolean>;
   get(
     url: string,
-    init?: { ifModifiedSince?: number; parseJson?: boolean },
+    init?: { ifModifiedSince?: number; ifNoneMatch?: string; parseJson?: boolean },
   ): Promise<{
     ok: boolean;
     status?: number;
     json: unknown | null;
     body: Uint8Array | null;
     lastModified: number | null;
+    etag?: string;
     notModified?: boolean;
   }>;
 };
@@ -49,6 +50,7 @@ export type ProbeBook = {
   links: Map<string, LinkProbeResult>;
   extras: Map<string, ArtifactProbe>;
   zips: Map<string, ZipFact>;
+  manifestFacts: Map<string, { etag: string; artifact: ArtifactProbe }>;
 };
 
 export type ZipFact = {

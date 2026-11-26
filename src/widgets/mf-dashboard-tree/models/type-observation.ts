@@ -7,9 +7,10 @@ import {
   type ConfirmationStore,
   type InstalledEvidence,
   type LinkTypeObservation,
+  type SourceIdentity,
 } from "../../../entities/federated-types/index.ts";
 import {
-  appsByName,
+  indexedApps,
   linkProbeId,
   type LocalApp,
   type ProbeBook,
@@ -36,6 +37,8 @@ export class DashboardTypeObservation {
   private readonly sourceErrors = new Map<string, unknown>();
   private readonly warnings = new Set<string>();
   private readonly typeCache = new Map<string, TypeSnapshot>();
+  private signatureApps: readonly LocalApp[] | undefined;
+  private readonly signatures = new Map<string, { consumer: string; producer: string }>();
   readonly installChecks = new Map<string, InstallCheck>();
   private readonly session: DashboardSession;
   private readonly confirmations: ConfirmationStore;
@@ -133,7 +136,7 @@ export class DashboardTypeObservation {
   }
 
   detailsFor(link: RemoteLink): LinkTypeObservation {
-    const consumer = this.session.loaded.find((app) => app.name === link.consumer);
+    const consumer = indexedApps(this.session.loaded).get(link.consumer);
     if (consumer?.consumeTypes === false)
       return { status: "none", archiveMatch: "unknown", sourceFreshness: "unknown" };
     const cached = this.typeSnapshot(link);
@@ -150,21 +153,26 @@ export class DashboardTypeObservation {
   }
 
   private typeSignature(link: RemoteLink): string {
-    const consumer = this.session.loaded.find((app) => app.name === link.consumer);
-    const producer = this.session.loaded.find((app) => app.name === link.remoteName);
-    return JSON.stringify([
-      consumer?.folder,
-      consumer?.configFile,
-      consumer?.consumeTypes,
-      consumer?.typesFolder,
-      producer?.folder,
-      producer?.configFile,
-      producer?.port,
-      producer?.manifestPath,
-      producer?.generateTypes,
-      producer?.tsconfig,
-      producer?.typesFolder,
-    ]);
+    const apps = this.session.loaded;
+    if (this.signatureApps !== apps) {
+      this.signatureApps = apps;
+      this.signatures.clear();
+      for (const app of apps) {
+        this.signatures.set(app.name, {
+          consumer: JSON.stringify([app.folder, app.configFile, app.consumeTypes, app.typesFolder]),
+          producer: JSON.stringify([
+            app.folder,
+            app.configFile,
+            app.port,
+            app.manifestPath,
+            app.generateTypes,
+            app.tsconfig,
+            app.typesFolder,
+          ]),
+        });
+      }
+    }
+    return `${this.signatures.get(link.consumer)?.consumer ?? ""}\0${this.signatures.get(link.remoteName)?.producer ?? ""}`;
   }
 
   private typeSnapshot(link: RemoteLink) {
@@ -185,12 +193,13 @@ export class DashboardTypeObservation {
       installed?: Map<string, InstalledEvidence>;
       log?: LogContext;
       allowDownload?: boolean;
+      source?: { app: LocalApp; identity: SourceIdentity };
     } = {},
   ): Promise<TypeEvidence> {
-    const { installed = new Map(), log = this.log, allowDownload = true } = options;
+    const { installed = new Map(), log = this.log, allowDownload = true, source } = options;
     const producers = new Map<string, ProducerSnapshot>();
     const errors = new Map<string, unknown>();
-    const byName = appsByName(apps);
+    const byName = indexedApps(apps);
     for (const link of links) {
       if (!this.canCheck(link)) continue;
       const consumer = byName.get(link.consumer);
@@ -209,6 +218,7 @@ export class DashboardTypeObservation {
               this.compareZip,
               log,
               allowDownload,
+              source?.app === producer ? source.identity : undefined,
             ),
           );
         } catch (error) {
@@ -241,10 +251,10 @@ export class DashboardTypeObservation {
   }
 
   private observe(link: RemoteLink): LinkTypeObservation {
-    const consumer = this.session.loaded.find((app) => app.name === link.consumer);
-    const producer = this.session.loaded.find(
-      (app) => app.name === link.remoteName && app.port != null,
-    );
+    const byName = indexedApps(this.session.loaded);
+    const consumer = byName.get(link.consumer);
+    const candidate = byName.get(link.remoteName);
+    const producer = candidate?.port != null ? candidate : undefined;
     if (!consumer)
       return { status: "unknown", archiveMatch: "unknown", sourceFreshness: "unknown" };
     const probe = this.session.book.links.get(linkProbeId(link));

@@ -25,6 +25,9 @@ parentPort!.on("message", async (task: EvidenceTask) => {
       case "sources":
         reply.value = sourceIdentity(task.folder, task.tsconfig, task.typesFolder, log);
         break;
+      case "sources-for-file":
+        reply.value = sourceIdentity(task.folder, task.tsconfig, task.typesFolder, log, task.file);
+        break;
       case "contains":
         reply.value = sourceContains(task.folder, task.tsconfig, task.typesFolder, task.file);
         break;

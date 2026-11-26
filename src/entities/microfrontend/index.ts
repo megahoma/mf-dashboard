@@ -58,6 +58,6 @@ export type {
 } from "./models/probe.ts";
 export { createLoopbackNet, probeWorkspace } from "./lib/net.ts";
 export { CONFIG_FILE, FEDERATION_CONFIG_PREFIX } from "./config/discover.ts";
-export { appsByName, remoteLink, rootApps } from "./lib/app-links.ts";
+export { appsByName, indexedApps, remoteLink, rootApps } from "./lib/app-links.ts";
 export { hashManifestZip, manifestZipUrl } from "./lib/zip-url.ts";
 export type { ManifestZipRequest } from "./models/zip-url.ts";

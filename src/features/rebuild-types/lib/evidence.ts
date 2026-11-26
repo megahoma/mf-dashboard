@@ -9,6 +9,7 @@ import {
 } from "../../../entities/federated-types/index.ts";
 import {
   appProbeId,
+  indexedApps,
   type ArtifactProbe,
   type LocalApp,
   type ProbeBook,
@@ -25,8 +26,7 @@ export function dependencyEvidence(
   book: ProbeBook,
   published: ReadonlyMap<string, string> = new Map(),
 ) {
-  const local = new Map(apps.map((item) => [item.name, { generateTypes: item.generateTypes }]));
-  const dependencies = chainDependencies(app.remotes, local);
+  const dependencies = chainDependencies(app.remotes, indexedApps(apps));
   const dependencyZipHashes: Record<string, string> = Object.create(null);
   for (const name of dependencies) {
     const hash = published.get(name) ?? book.apps.get(appProbeId(name))?.zipHash;
@@ -54,8 +54,9 @@ export async function collectProducerEvidenceAsync(
   compareZip: ReturnType<typeof createPublishedZipComparison>,
   log: LogContext = noLog,
   allowDownload = true,
+  sources?: SourceIdentity,
 ): Promise<ProducerSnapshot> {
-  const sources = await sourceIdentityAsync(app.folder, app.tsconfig, app.typesFolder, log);
+  sources ??= await sourceIdentityAsync(app.folder, app.tsconfig, app.typesFolder, log);
   const snapshot = producerSnapshot(app, apps, book, confirmations, sources);
   if (snapshot.sourceFreshness !== "unknown" || !snapshot.zipReachable) return snapshot;
   const saved = confirmations.generation(app.name);

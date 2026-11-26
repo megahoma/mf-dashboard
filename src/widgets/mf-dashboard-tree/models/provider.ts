@@ -1,18 +1,21 @@
 import { realpathSync } from "node:fs";
 import path from "node:path";
+import picomatch from "picomatch";
 import * as vscode from "vscode";
 import {
   createConfirmationStore,
   disposeEvidenceWorker,
   resolveTypesPath,
-  sourceContainsAsync,
+  sourceIdentityForFileAsync,
   type ConfirmationStore,
   type InstalledEvidence,
   type LinkTypeObservation,
+  type SourceIdentity,
 } from "../../../entities/federated-types/index.ts";
 import {
   appProbeId,
   createProbeBook,
+  indexedApps,
   linkProbeId,
   probeWorkspace,
   prepareWorkspaceScan,
@@ -43,13 +46,12 @@ import { isLoopbackAtPort, localManifestUrl, parseHttpUrl } from "../../../share
 import type { LogContext } from "../../../shared/models/logging.ts";
 import { savedFileKind } from "../lib/app-parse-cache.ts";
 import { KnownAppsWorker } from "../lib/known-apps-worker.mts";
-import { directoryStamp } from "../lib/directory-stamp.ts";
 import { loadKnownApps } from "../lib/known-apps.ts";
-import { linksOf, parseLinkId } from "../lib/links.ts";
+import { incomingLinks, linksOf, parseLinkId } from "../lib/links.ts";
 import { showConfigFile } from "../lib/open-config.ts";
 import { problemDiagnostics } from "../lib/problem-diagnostics.ts";
 import { startRow } from "../lib/start-row.ts";
-import { appTypesDir, linkTypesDir } from "../lib/targets.ts";
+import { appTypesDir, directoryExists, linkTypesDir } from "../lib/targets.ts";
 import {
   prepareWorkspaceGraphDirectories,
   readWorkspaceGraphs,
@@ -65,6 +67,16 @@ import type { DashboardNode, DashboardStructure } from "./presentation.ts";
 import { DashboardSession } from "./session.ts";
 import type { TypeEvidence } from "./type-observation-types.ts";
 import { DashboardTypeObservation } from "./type-observation.ts";
+
+type TypesDirectory = {
+  app: LocalApp;
+  alias?: string;
+  existing: string | null;
+  locations: string[];
+  routes: Set<string>;
+};
+
+type TypesDirectoryChange = { consumer: string; alias?: string };
 
 export class MfDashboardProvider
   implements vscode.TreeDataProvider<DashboardNode>, vscode.Disposable
@@ -84,18 +96,31 @@ export class MfDashboardProvider
   private readonly persistConfirmations: () => void | PromiseLike<void>;
   private readonly observation: DashboardTypeObservation;
   private readonly saveChecks = new Map<string, Promise<void>>();
-  private readonly dirtySaves = new Set<string>();
-  private readonly membershipChecks = new Map<string, Promise<boolean>>();
+  private readonly sourceSaves = new Map<LocalApp, Map<string, Promise<void>>>();
+  private readonly dirtySaves = new Map<
+    string,
+    { app: LocalApp; identity: SourceIdentity } | undefined
+  >();
   private pendingEvidence: TypeEvidence | undefined;
   private readonly publishedZipHashes = new Map<string, string>();
   private explicitTypeCheck = false;
   private requestedTypeLinks: ReadonlySet<string> | undefined;
   private requestedTypeNode: DashboardNode | undefined;
-  private view: { nodes: DashboardNode[]; stamp: string } | null = null;
+  private view: DashboardNode[] | null = null;
   private typesWatcher?: vscode.FileSystemWatcher;
   private typesWatchPattern?: string;
   private typesWatchTopology?: { apps: readonly LocalApp[]; structure: DashboardStructure };
-  private typesWatchPaths = new Set<string>();
+  private readonly typesWatchPaths = new Map<string, Set<TypesDirectory>>();
+  private readonly typesWatchNames = new Map<string, string>();
+  private readonly dirtyTypesDirectories = new Set<TypesDirectory>();
+  private readonly typesDirectories = new Map<string, TypesDirectory>();
+  private unwatchedTypesDirectories = new Set<TypesDirectory>();
+  private typesWatchRoots: {
+    root: string;
+    realRoot: string;
+    excluded: (entry: string, relative: string) => boolean;
+  }[] = [];
+  private typesWatchRoutesChanged = false;
   private typesWatchPending = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private readonly saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -217,6 +242,8 @@ export class MfDashboardProvider
       this.canCheckTypes(link),
     );
     this.session.terms = termsOf();
+    this.session.renderTypesDirectory = (app, alias) =>
+      this.typesDirectories.get(JSON.stringify([app.name, alias]))?.existing ?? null;
     this.session.typesForLink = (link) => this.observation.detailsFor(link).status;
     this.session.typesAutoCheck = readWorkspaceSettings().typesAutoCheck;
     this.session.beforeRefreshChange = (log, probed = true) => {
@@ -235,12 +262,8 @@ export class MfDashboardProvider
       const typesChanged =
         (this.explicitTypeCheck || this.session.typesAutoCheck) &&
         this.observation.refreshLinks(links, this.explicitTypeCheck);
-      return (
-        wasPreparing ||
-        typesChanged ||
-        this.view === null ||
-        (this.explicitTypeCheck && this.view.stamp !== this.typesStamp())
-      );
+      const directoriesChanged = this.explicitTypeCheck && this.refreshTypesDirectories();
+      return wasPreparing || typesChanged || this.view === null || directoriesChanged;
     };
     this.session.onRefreshFailed = () => {
       this.pendingEvidence = undefined;
@@ -385,6 +408,11 @@ export class MfDashboardProvider
     this.change.fire();
   }
 
+  typesWatcherSettingsChanged(): void {
+    this.typesWatchTopology = undefined;
+    if (this.view) this.notify();
+  }
+
   private async withTypeCheck(operation: () => Promise<void>, node?: DashboardNode): Promise<void> {
     this.explicitTypeCheck = true;
     this.requestedTypeNode = node;
@@ -410,7 +438,7 @@ export class MfDashboardProvider
     apps: readonly LocalApp[] = this.session.loaded,
   ): ReadonlySet<string> | null {
     const parsed = node.linkId ? parseLinkId(node.linkId) : null;
-    const app = apps.find((item) => item.name === (parsed?.consumer ?? node.name));
+    const app = indexedApps(apps).get(parsed?.consumer ?? node.name);
     if (!app?.consumeTypes) return null;
     if (!node.linkId && node.id !== `app:${app.name}`) return null;
     const links = linksOf([app]).filter(
@@ -446,43 +474,57 @@ export class MfDashboardProvider
         await this.refresh("config");
         return;
       }
-      if (kind !== "source" || !settings.typesAutoCheck) continue;
-      let included: boolean;
-      try {
-        const key = JSON.stringify([app.folder, app.tsconfig, app.typesFolder, file]);
-        let membership = this.membershipChecks.get(key);
-        if (!membership) {
-          membership = sourceContainsAsync(app.folder, app.tsconfig, app.typesFolder, file);
-          this.membershipChecks.set(key, membership);
-          void membership
-            .finally(() => {
-              if (this.membershipChecks.get(key) === membership) this.membershipChecks.delete(key);
-            })
-            .catch(() => {});
-        }
-        included = await membership;
-      } catch (error) {
-        this.observation.warnOnce(`${app.name}\0source`, "types.sources.unreadable", {
-          producer: app.name,
-          ...safeError(error),
-        });
-        await this.refreshLocalEvidence(app.name);
+      if (
+        kind !== "source" ||
+        !settings.typesAutoCheck ||
+        !incomingLinks(this.session.loaded, app.name).length
+      )
         continue;
+      let saves = this.sourceSaves.get(app);
+      if (!saves) this.sourceSaves.set(app, (saves = new Map()));
+      let pending = saves.get(file);
+      if (!pending) {
+        pending = this.checkSavedSource(app, file, settings.typesSettleMs).finally(() => {
+          saves.delete(file);
+          if (!saves.size) this.sourceSaves.delete(app);
+        });
+        saves.set(file, pending);
       }
-      if (!included || !this.canRefreshSavedTypes()) continue;
-      await this.refreshLocalEvidence(app.name);
-      if (!this.canRefreshSavedTypes()) continue;
-      const previous = this.saveTimers.get(app.name);
-      if (previous) clearTimeout(previous);
-      const timer = setTimeout(() => {
-        this.saveTimers.delete(app.name);
-        if (!this.canRefreshSavedTypes()) return;
-        void this.refreshLocalEvidence(app.name).catch((error: unknown) =>
-          this.log.event("error", "types.save.check-failed", safeError(error)),
-        );
-      }, settings.typesSettleMs);
-      this.saveTimers.set(app.name, timer);
+      await pending;
     }
+  }
+
+  private async checkSavedSource(app: LocalApp, file: string, settleMs: number): Promise<void> {
+    let identity: SourceIdentity | null;
+    try {
+      identity = await sourceIdentityForFileAsync(
+        app.folder,
+        app.tsconfig,
+        app.typesFolder,
+        file,
+        this.log,
+      );
+    } catch (error) {
+      this.observation.warnOnce(`${app.name}\0source`, "types.sources.unreadable", {
+        producer: app.name,
+        ...safeError(error),
+      });
+      await this.refreshLocalEvidence(app.name);
+      return;
+    }
+    if (!identity || !this.canRefreshSavedTypes()) return;
+    await this.refreshLocalEvidence(app.name, { app, identity });
+    if (!this.canRefreshSavedTypes()) return;
+    const previous = this.saveTimers.get(app.name);
+    if (previous) clearTimeout(previous);
+    const timer = setTimeout(() => {
+      this.saveTimers.delete(app.name);
+      if (!this.canRefreshSavedTypes()) return;
+      void this.refreshLocalEvidence(app.name).catch((error: unknown) =>
+        this.log.event("error", "types.save.check-failed", safeError(error)),
+      );
+    }, settleMs);
+    this.saveTimers.set(app.name, timer);
   }
 
   private async reload(source: string, log: LogContext): Promise<void> {
@@ -544,7 +586,9 @@ export class MfDashboardProvider
         undefined,
         log,
         this.session.loaded,
-      );
+      ).finally(() => {
+        this.refreshChangedTypesDirectories([link]);
+      });
       this.confirmations.saveInstall(link, installed.filesFingerprint, installed.zipHash, true);
       await this.persistConfirmations();
       this.clearTypeCache();
@@ -619,6 +663,8 @@ export class MfDashboardProvider
       let reason: string | undefined = "build-failed";
       let resolveMs: number | undefined;
       let refreshMs: number | undefined;
+      const directoryChanges: TypesDirectoryChange[] = [];
+      let directoriesChanged = false;
       try {
         const settings = readWorkspaceSettings();
         const appsToBuild = this.session.workspaceGraph?.settings ?? settings.apps;
@@ -702,6 +748,9 @@ export class MfDashboardProvider
             await this.persistConfirmations();
             reason = "build-failed";
           },
+          typesDirectoryChanged: (consumer, alias) => {
+            directoryChanges.push({ consumer, alias });
+          },
           progress,
           status: (updates) => {
             for (const update of updates) {
@@ -714,6 +763,7 @@ export class MfDashboardProvider
           log,
         }).finally(() => {
           report.skipped.push(...skipped);
+          directoriesChanged = this.refreshChangedTypesDirectories(directoryChanges);
         });
 
         const changedProducers = new Set([
@@ -743,6 +793,7 @@ export class MfDashboardProvider
               await this.observation.prepare(this.session.loaded, links, this.session.book),
             );
             for (const name of report.rebuilt) this.session.rebuildErrors.delete(name);
+            directoriesChanged = false;
             this.notify();
             reason = undefined;
           } finally {
@@ -758,6 +809,7 @@ export class MfDashboardProvider
         reason = undefined;
         return report;
       } finally {
+        if (directoriesChanged) this.notify();
         log.event("info", "types.rebuild.all.completed", {
           rebuilt: report.rebuilt.length,
           installed: report.installed.length,
@@ -781,6 +833,8 @@ export class MfDashboardProvider
     log.event("info", "types.rebuild.started", { app: rootName });
     const settings = readWorkspaceSettings();
     const rebuilt = new Set<string>();
+    const directoryChanges: TypesDirectoryChange[] = [];
+    let directoriesChanged = false;
     try {
       const graph = this.session.workspaceGraph;
       const appSettings = graph?.settings ?? settings.apps;
@@ -809,11 +863,16 @@ export class MfDashboardProvider
           envMode: settings.envMode,
         },
         refetchCommand: () => readWorkspaceSettings().refetchCommand,
+        typesDirectoryChanged: (consumer, alias) => {
+          directoryChanges.push({ consumer, alias });
+        },
         persist: this.persistConfirmations,
         rebuilt: (name) => {
           rebuilt.add(name);
           this.session.clearRebuildError(name);
         },
+      }).finally(() => {
+        directoriesChanged = this.refreshChangedTypesDirectories(directoryChanges);
       });
       this.session.clearRebuildError(rootName);
       log.event("info", "types.rebuild.completed", {
@@ -823,6 +882,7 @@ export class MfDashboardProvider
     } catch (error) {
       log.event("error", "types.rebuild.failed", { app: rootName, ...safeError(error) });
       this.session.noteRebuildError(rootName, String(error));
+      directoriesChanged = false;
       return;
     } finally {
       if (rebuilt.size && readWorkspaceSettings().probeIntervalMs === 0) {
@@ -830,8 +890,9 @@ export class MfDashboardProvider
           (link) => rebuilt.has(link.consumer) || rebuilt.has(link.remoteName),
         );
         this.observation.invalidateLinks(affected.map(linkProbeId));
-        if (affected.length) this.notify();
+        directoriesChanged ||= affected.length > 0;
       }
+      if (directoriesChanged) this.notify();
     }
     await this.reload("rebuild", log);
   }
@@ -884,7 +945,7 @@ export class MfDashboardProvider
 
   private findViewRow(matches: (row: DashboardNode) => boolean): DashboardNode | undefined {
     if (this.discovering) return;
-    const pending = [...(this.view?.nodes ?? this.viewNodes())].reverse();
+    const pending = [...this.viewNodes()].reverse();
     while (pending.length > 0) {
       const row = pending.pop()!;
       if (matches(row)) return row;
@@ -936,77 +997,215 @@ export class MfDashboardProvider
   }
 
   private viewNodes(): DashboardNode[] {
-    const stamp = this.typesStamp();
-    if (this.view?.stamp === stamp) return this.view.nodes;
-    const nodes = this.session.nodes();
-    this.view = { nodes, stamp };
-    return nodes;
+    if (
+      this.typesWatchTopology?.apps !== this.session.loaded ||
+      this.typesWatchTopology.structure !== this.session.structure
+    ) {
+      this.watchTypesDirectories();
+      this.view = null;
+    } else if (this.refreshTypesDirectories(this.unwatchedTypesDirectories)) {
+      this.view = null;
+    }
+    return (this.view ??= this.session.nodes());
   }
 
-  // The probe book does not record whether a types path is a directory.
-  // Comparing that shape keeps Reveal types current without building the tree again.
-  private typesStamp(): string {
-    const rows: string[] = [];
-    for (const app of this.session.loaded) {
-      rows.push(directoryStamp(appTypesDir(app.folder, app.typesFolder)));
-      if (this.session.structure === "flat") continue;
-      for (const remote of app.remotes)
-        rows.push(directoryStamp(linkTypesDir(app.folder, remote.alias, app.typesFolder)));
+  private refreshTypesDirectories(
+    directories: Iterable<TypesDirectory> = this.typesDirectories.values(),
+  ): boolean {
+    let changed = false;
+    for (const directory of directories) {
+      const { app, alias } = directory;
+      const previous = directory.existing;
+      const target =
+        alias === undefined
+          ? appTypesDir(app.folder, app.typesFolder)
+          : linkTypesDir(app.folder, alias, app.typesFolder);
+      directory.existing = target && directoryExists(target) ? target : null;
+      this.updateTypesWatchRoutes(directory);
+      if (directory.existing !== previous) changed = true;
     }
-    return rows.join("\n");
+    if (this.typesWatchRoutesChanged) this.syncTypesDirectoryWatcher();
+    return changed;
+  }
+
+  private refreshChangedTypesDirectories(changes: readonly TypesDirectoryChange[]): boolean {
+    if (this.disposed || changes.length === 0) return false;
+    const directories = new Set<TypesDirectory>();
+    const generationRoots = new Set<TypesDirectory>();
+    for (const { consumer, alias } of changes) {
+      const root = this.typesDirectories.get(JSON.stringify([consumer, undefined]));
+      if (root) directories.add(root);
+      if (alias === undefined) {
+        if (root) generationRoots.add(root);
+        continue;
+      }
+      const dependency = this.typesDirectories.get(JSON.stringify([consumer, alias]));
+      if (dependency) directories.add(dependency);
+    }
+    const locations = new Map<string, boolean>();
+    const collectLocations = () => {
+      for (const directory of directories) {
+        // A generator can change a whole types directory, including previously installed aliases.
+        const includeDescendants = generationRoots.has(directory);
+        for (const location of directory.locations)
+          locations.set(location, includeDescendants || locations.get(location) === true);
+      }
+    };
+    collectLocations();
+    const changed = this.refreshTypesDirectories(directories);
+    collectLocations();
+    const related = new Set<TypesDirectory>();
+    for (const [location, includeDescendants] of locations) {
+      for (const directory of this.typesWatchPaths.get(location) ?? []) {
+        if (
+          !directories.has(directory) &&
+          (includeDescendants || directory.locations.includes(location))
+        )
+          related.add(directory);
+      }
+    }
+    return this.refreshTypesDirectories(related) || changed;
   }
 
   private watchTypesDirectories(): void {
     this.typesWatchTopology = { apps: this.session.loaded, structure: this.session.structure };
-    const roots = workspaceRoots().map(({ path: folder }) => {
-      const root = path.resolve(folder);
+    this.typesWatchRoots = (vscode.workspace.workspaceFolders ?? []).map(({ uri }) => {
+      const root = path.resolve(uri.fsPath);
+      let realRoot = root;
       try {
-        return { root, realRoot: realpathSync.native(root) };
+        realRoot = realpathSync.native(root);
       } catch {
-        return { root, realRoot: root };
+        // Keep the configured root when the folder no longer exists.
       }
+      const excludes =
+        vscode.workspace
+          .getConfiguration("files", uri)
+          .get<Record<string, boolean>>("watcherExclude") ?? {};
+      const patterns = Object.entries(excludes)
+        .filter(([pattern, enabled]) => pattern && enabled === true)
+        .map(([pattern]) => {
+          const glob = pattern.trim().split(path.sep).join("/").replace(/\/+$/, "");
+          const parts = glob.split("/");
+          const complex = parts.findIndex(
+            (part) => part !== "**" && (!/^[\w.@ :?*-]*$/.test(part) || part.includes("**")),
+          );
+          // VS Code and Picomatch differ on complex globs. Recheck everything under the common prefix.
+          const covered = complex < 0 ? glob : [...parts.slice(0, complex), "**"].join("/");
+          const absolute = path.isAbsolute(pattern) || pattern.startsWith("**");
+          try {
+            const match = picomatch(covered, { dot: true, nocase: process.platform !== "linux" });
+            return { absolute, match };
+          } catch {
+            return { absolute, match: () => true };
+          }
+        });
+      return {
+        root,
+        realRoot,
+        excluded: (entry, relative) =>
+          patterns.some(({ absolute, match }) =>
+            match((absolute ? entry : relative).split(path.sep).join("/")),
+          ),
+      };
     });
-    const paths = new Set<string>();
-    const names = new Set<string>();
-    const addBranch = (root: string, relative: string) => {
-      // A rename or deletion can report an ancestor instead of the directory itself.
-      for (let entry = path.resolve(root, relative); entry !== root; entry = path.dirname(entry)) {
-        paths.add(this.typesWatchPath(entry));
-        names.add(path.basename(entry));
-      }
-    };
-    const add = (target: string) => {
-      for (const { root, realRoot } of roots) {
-        const base = pathIsInside(root, target) ? root : realRoot;
-        if (!pathIsInside(base, target)) continue;
-        const relative = path.relative(base, target);
-        addBranch(root, relative);
-        if (root !== realRoot) addBranch(realRoot, relative);
-      }
-    };
-    const addTypesPath = (appFolder: string, target: string) => {
-      add(target);
-      const route = new Set<string>();
-      try {
-        add(resolveTypesPath(appFolder, target, route));
-      } catch {
-        // Keep watching the configured path and any links that can make it valid.
-      }
-      for (const entry of route) add(entry);
+    this.typesWatchPaths.clear();
+    this.typesWatchNames.clear();
+    this.dirtyTypesDirectories.clear();
+    this.unwatchedTypesDirectories.clear();
+    this.typesWatchRoutesChanged = true;
+    this.typesDirectories.clear();
+    const add = (app: LocalApp, alias?: string) => {
+      this.typesDirectories.set(JSON.stringify([app.name, alias]), {
+        app,
+        alias,
+        existing: null,
+        locations: [],
+        routes: new Set(),
+      });
     };
     for (const app of this.session.loaded) {
-      const folder = path.resolve(app.folder, app.typesFolder);
-      if (!pathIsInside(app.folder, folder)) continue;
-      addTypesPath(app.folder, folder);
+      add(app);
       if (this.session.structure === "tree") {
-        for (const { alias } of app.remotes) {
-          const target = path.resolve(folder, alias);
-          if (pathIsInside(folder, target)) addTypesPath(app.folder, target);
-        }
+        for (const { alias } of app.remotes) add(app, alias);
       }
     }
-    this.typesWatchPaths = paths;
-    const sorted = [...names].sort();
+    this.refreshTypesDirectories();
+  }
+
+  private updateTypesWatchRoutes(directory: TypesDirectory): void {
+    const paths = new Map<string, string>();
+    const add = (target: string) => {
+      let inside = false;
+      let excluded = false;
+      for (const { root, realRoot, excluded: isExcluded } of this.typesWatchRoots) {
+        const base = pathIsInside(root, target) ? root : realRoot;
+        if (!pathIsInside(base, target)) continue;
+        // Only an ancestor may be reported after a rename or deletion.
+        const file = path.resolve(base, path.relative(base, target));
+        inside ||= file !== base;
+        for (let entry = file; ; entry = path.dirname(entry)) {
+          const relative = path.relative(base, entry);
+          const configured = path.join(root, relative);
+          const resolved = path.join(realRoot, relative);
+          paths.set(this.typesWatchPath(configured), path.basename(configured));
+          if (root !== realRoot) paths.set(this.typesWatchPath(resolved), path.basename(resolved));
+          if (isExcluded(configured, relative) || isExcluded(resolved, relative)) excluded = true;
+          if (entry === base) break;
+        }
+      }
+      return inside && !excluded;
+    };
+    const { app, alias } = directory;
+    const folder = path.resolve(app.folder, app.typesFolder);
+    const target = alias === undefined ? folder : path.resolve(folder, alias);
+    directory.locations = [this.typesWatchPath(target)];
+    let watched = false;
+    if (
+      this.typesWatchRoots.length &&
+      pathIsInside(app.folder, folder) &&
+      pathIsInside(folder, target)
+    ) {
+      const configured = add(target);
+      const route = new Set<string>();
+      try {
+        const resolved = resolveTypesPath(app.folder, target, route);
+        directory.locations.push(this.typesWatchPath(resolved));
+        watched = add(resolved) && configured;
+      } catch {
+        // A failed lookup may leave the symlink route incomplete.
+      }
+      for (const entry of route) {
+        if (!add(entry)) watched = false;
+      }
+    }
+    for (const entry of directory.routes) {
+      if (paths.has(entry)) continue;
+      const targets = this.typesWatchPaths.get(entry)!;
+      targets.delete(directory);
+      if (!targets.size) {
+        this.typesWatchPaths.delete(entry);
+        this.typesWatchNames.delete(entry);
+        this.typesWatchRoutesChanged = true;
+      }
+    }
+    for (const [entry, name] of paths) {
+      if (directory.routes.has(entry)) continue;
+      const targets = this.typesWatchPaths.get(entry);
+      if (targets) targets.add(directory);
+      else {
+        this.typesWatchPaths.set(entry, new Set([directory]));
+        this.typesWatchNames.set(entry, name);
+        this.typesWatchRoutesChanged = true;
+      }
+    }
+    directory.routes = new Set(paths.keys());
+    if (watched && paths.size) this.unwatchedTypesDirectories.delete(directory);
+    else this.unwatchedTypesDirectories.add(directory);
+  }
+
+  private syncTypesDirectoryWatcher(): void {
+    this.typesWatchRoutesChanged = false;
+    const sorted = [...new Set(this.typesWatchNames.values())].filter(Boolean).sort();
     const pattern = !sorted.length
       ? undefined
       : sorted.some((name) => /[[\]{}*,?]/.test(name))
@@ -1028,14 +1227,17 @@ export class MfDashboardProvider
   }
 
   private readonly typesDirectoryChanged = (uri: vscode.Uri): void => {
-    if (this.typesWatchPending || !this.typesWatchPaths.has(this.typesWatchPath(uri.fsPath)))
-      return;
+    const targets = this.typesWatchPaths.get(this.typesWatchPath(uri.fsPath));
+    if (!targets) return;
+    for (const directory of targets) this.dirtyTypesDirectories.add(directory);
+    if (this.typesWatchPending) return;
     this.typesWatchPending = true;
     queueMicrotask(() => {
       this.typesWatchPending = false;
       if (this.disposed) return;
-      this.watchTypesDirectories();
-      if (this.view && this.view.stamp !== this.typesStamp()) this.notify();
+      const changed = this.refreshTypesDirectories(this.dirtyTypesDirectories);
+      this.dirtyTypesDirectories.clear();
+      if (this.view && changed) this.notify();
     });
   };
 
@@ -1051,19 +1253,24 @@ export class MfDashboardProvider
     return !this.disposed && readWorkspaceSettings().typesAutoCheck;
   }
 
-  private refreshLocalEvidence(name: string): Promise<void> {
-    this.dirtySaves.add(name);
+  private refreshLocalEvidence(
+    name: string,
+    source?: { app: LocalApp; identity: SourceIdentity },
+  ): Promise<void> {
+    this.dirtySaves.set(name, source);
     const existing = this.saveChecks.get(name);
     if (existing) return existing;
     const check = this.run(async () => {
-      while (this.dirtySaves.delete(name)) {
+      while (this.dirtySaves.has(name)) {
+        const source = this.dirtySaves.get(name);
+        this.dirtySaves.delete(name);
         if (!this.canRefreshSavedTypes()) return;
-        const links = linksOf(this.session.loaded).filter((link) => link.remoteName === name);
+        const links = incomingLinks(this.session.loaded, name);
         const evidence = await this.observation.prepare(
           this.session.loaded,
           links,
           this.session.book,
-          { allowDownload: false },
+          { allowDownload: false, source },
         );
         if (!this.canRefreshSavedTypes()) return;
         this.observation.invalidateProducer(name);

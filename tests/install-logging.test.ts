@@ -20,6 +20,25 @@ const manifest = () =>
     },
   });
 
+test("checking configured scoped aliases does not list their directories", (t) => {
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), "mf-types-point-lookups-"));
+  t.after(() => fs.rmSync(folder, { recursive: true, force: true }));
+  const scoped = { ...remote, alias: "@fixture/widget" };
+  const another = { ...remote, alias: "@fixture/panel" };
+  const app = localApp("fixture", folder, {
+    consumeTypes: true,
+    typesFolder: ".",
+    remotes: [scoped, another],
+  });
+  for (const { alias } of app.remotes) fs.mkdirSync(path.join(folder, alias), { recursive: true });
+  for (const dir of [folder, path.join(folder, "@fixture")]) {
+    for (let i = 0; i < 128; i++) fs.writeFileSync(path.join(dir, `unrelated-${i}`), "");
+  }
+  const list = t.mock.method(fs, "readdirSync");
+  assert.equal(dependencyTypesTarget(app, scoped, [app]), path.join(folder, scoped.alias));
+  assert.equal(list.mock.callCount(), 0);
+});
+
 for (const stage of ["manifest", "archive"] as const) {
   test(`Fetch preserves ${stage} HTTP failure through the wrapper without leaking URL secrets`, async (t) => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-install-log-"));

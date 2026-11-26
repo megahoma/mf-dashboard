@@ -122,7 +122,7 @@ function appNode(
     ...row,
     contextValue: withActionTokens(
       row.contextValue,
-      view.actionFor({ id: `app:${app.name}`, name: app.name, linkId: null })?.tokens ?? [],
+      view.actionFor({ id: `app:${app.name}`, name: app.name, linkId: null }, true)?.tokens ?? [],
     ),
     linkId: null,
     children:
@@ -231,7 +231,7 @@ function linkNode(
     ...row,
     contextValue: withActionTokens(
       row.contextValue,
-      view.actionFor({ id, name: remote.name, linkId })?.tokens ?? [],
+      view.actionFor({ id, name: remote.name, linkId }, true)?.tokens ?? [],
     ),
     linkId,
     children: nested,

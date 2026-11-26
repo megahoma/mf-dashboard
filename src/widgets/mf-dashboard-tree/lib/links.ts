@@ -26,6 +26,22 @@ export function linksOf(apps: readonly LocalApp[]): RemoteLink[] {
   return links;
 }
 
+const incoming = new WeakMap<readonly LocalApp[], Map<string, RemoteLink[]>>();
+
+export function incomingLinks(apps: readonly LocalApp[], name: string): RemoteLink[] {
+  let index = incoming.get(apps);
+  if (!index) {
+    index = new Map();
+    for (const link of linksOf(apps)) {
+      const links = index.get(link.remoteName);
+      if (links) links.push(link);
+      else index.set(link.remoteName, [link]);
+    }
+    incoming.set(apps, index);
+  }
+  return index.get(name) ?? [];
+}
+
 export function parseLinkId(linkId: string): RemoteLinkIdentity | null {
   const [consumer, alias, remoteName] = splitRemoteLinkKey(linkId);
   if (!consumer || alias == null || alias === "" || !remoteName) return null;

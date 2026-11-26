@@ -1,8 +1,12 @@
-import { statSync } from "node:fs";
-import { splitRemoteLinkKey, type LocalApp } from "../../../entities/microfrontend/index.ts";
+import fs from "node:fs";
+import {
+  indexedApps,
+  splitRemoteLinkKey,
+  type LocalApp,
+} from "../../../entities/microfrontend/index.ts";
 import { refetchTarget, typesRootTarget } from "../../../features/refetch-types/index.ts";
 import { localManifestUrl, parseHttpUrl } from "../../../shared/lib/urls.ts";
-import type { RowAction, RowActionInput } from "../models/targets.ts";
+import type { RowAction, RowActionInput, TypesDirectoryLookup } from "../models/targets.ts";
 
 export function linkTypesDir(folder: string, alias: string, typesFolder: string): string | null {
   try {
@@ -24,26 +28,38 @@ export function resolveRowAction(
   node: unknown,
   apps: readonly LocalApp[],
   extraUrls: readonly string[],
+  cachedTypesDirectory?: TypesDirectoryLookup,
 ): RowAction | null {
   if (typeof node !== "object" || node === null) return null;
   const { id, name, linkId } = node as { id?: unknown; name?: unknown; linkId?: unknown };
   if (typeof id !== "string" || typeof name !== "string") return null;
+  const byName = indexedApps(apps);
+  const typesDirectory: TypesDirectoryLookup =
+    cachedTypesDirectory ??
+    ((app, alias) =>
+      alias === undefined
+        ? appTypesDir(app.folder, app.typesFolder)
+        : linkTypesDir(app.folder, alias, app.typesFolder));
+  const isDirectory = cachedTypesDirectory ? () => true : directoryExists;
   if (typeof linkId === "string") {
     const parts = splitRemoteLinkKey(linkId);
     if (parts.length !== 3) return null;
     const [consumerName, alias, remoteName] = parts;
-    const consumer = apps.find((app) => app.name === consumerName);
+    const consumer = byName.get(consumerName);
     const remote = consumer?.remotes.find(
       (item) => item.alias === alias && item.name === remoteName,
     );
     if (!consumer || !remote || name !== remoteName) return null;
-    const producer = apps.find((app) => app.name === remoteName);
-    return rowAction({
-      configFile: consumer.configFile,
-      producerConfigFile: producer?.configFile ?? null,
-      typesDir: linkTypesDir(consumer.folder, alias, consumer.typesFolder),
-      manifestUrl: remote.url,
-    });
+    const producer = byName.get(remoteName);
+    return rowAction(
+      {
+        configFile: consumer.configFile,
+        producerConfigFile: producer?.configFile ?? null,
+        typesDir: typesDirectory(consumer, alias),
+        manifestUrl: remote.url,
+      },
+      isDirectory,
+    );
   }
   if (linkId != null) return null;
   if (id.startsWith("extra:")) {
@@ -56,20 +72,23 @@ export function resolveRowAction(
       manifestUrl: url,
     });
   }
-  const app = apps.find((item) => item.name === name && id === `app:${item.name}`);
-  if (!app) return null;
-  return rowAction({
-    configFile: app.configFile,
-    producerConfigFile: null,
-    typesDir: appTypesDir(app.folder, app.typesFolder),
-    manifestUrl:
-      app.manifest && app.port != null ? localManifestUrl(app.port, app.manifestPath) : null,
-  });
+  const app = byName.get(name);
+  if (!app || id !== `app:${app.name}`) return null;
+  return rowAction(
+    {
+      configFile: app.configFile,
+      producerConfigFile: null,
+      typesDir: typesDirectory(app),
+      manifestUrl:
+        app.manifest && app.port != null ? localManifestUrl(app.port, app.manifestPath) : null,
+    },
+    isDirectory,
+  );
 }
 
-function directoryExists(path: string): boolean {
+export function directoryExists(path: string): boolean {
   try {
-    return statSync(path).isDirectory();
+    return fs.statSync(path).isDirectory();
   } catch {
     return false;
   }

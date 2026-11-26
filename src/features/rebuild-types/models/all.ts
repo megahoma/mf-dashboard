@@ -21,6 +21,7 @@ export type RebuildAllContext = {
     tsconfigFingerprint: string,
     dependencies: readonly [string, string, string][],
   ): Promise<string>;
+  typesDirectoryChanged?(consumer: string, alias?: string): void;
   persist(): void | PromiseLike<void>;
   progress?(name: string, index: number, total: number): void;
   status?(updates: readonly RebuildAppStatus[]): void;

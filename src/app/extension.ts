@@ -384,9 +384,12 @@ export function activate(context: vscode.ExtensionContext): void {
         .catch((error: unknown) => log.event("error", "save.refresh.failed", safeError(error)));
     }),
     vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      provider.typesWatcherSettingsChanged();
       reloadGraph();
     }),
     vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration("files.watcherExclude"))
+        provider.typesWatcherSettingsChanged();
       if (event.affectsConfiguration("mf-dashboard.language")) termsChanged.fire(selectedTerms());
       const appsChanged = event.affectsConfiguration("mf-dashboard.apps");
       if (

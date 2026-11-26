@@ -118,6 +118,16 @@ export function sourceContainsAsync(
   return runEvidenceTask({ kind: "contains", folder, tsconfig, typesFolder, file });
 }
 
+export function sourceIdentityForFileAsync(
+  folder: string,
+  tsconfig: string | null,
+  typesFolder: string,
+  file: string,
+  log: LogContext = noLog,
+): Promise<SourceIdentity | null> {
+  return runEvidenceTask({ kind: "sources-for-file", folder, tsconfig, typesFolder, file }, log);
+}
+
 export function readInstalledEvidenceAsync(
   destination: string | null,
   log: LogContext = noLog,

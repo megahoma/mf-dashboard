@@ -25,13 +25,18 @@ export function createLoopbackNet(): Net {
       });
     },
     async get(url, init) {
-      const response = await fetch(url, {
-        signal: AbortSignal.timeout(HTTP_CHECK_TIMEOUT_MS),
-        headers:
-          init?.ifModifiedSince != null
+      const signal = AbortSignal.timeout(HTTP_CHECK_TIMEOUT_MS);
+      let response = await fetch(url, {
+        signal,
+        headers: init?.ifNoneMatch
+          ? { "If-None-Match": init.ifNoneMatch }
+          : init?.ifModifiedSince != null
             ? { "If-Modified-Since": new Date(init.ifModifiedSince).toUTCString() }
             : undefined,
       });
+      // A redirect can point to a different resource with the same validator.
+      if (init?.ifNoneMatch && response.redirected && response.status === 304)
+        response = await fetch(url, { signal });
       const lastModified = httpDateMs(response.headers.get("last-modified"));
       if (response.status === 304)
         return { ok: true, status: 304, notModified: true, json: null, body: null, lastModified };
@@ -47,7 +52,8 @@ export function createLoopbackNet(): Net {
           json = null;
         }
       }
-      return { ok: true, status: response.status, json, body, lastModified };
+      const etag = response.redirected ? null : response.headers.get("etag");
+      return { ok: true, status: response.status, json, body, lastModified, ...(etag && { etag }) };
     },
   };
 }

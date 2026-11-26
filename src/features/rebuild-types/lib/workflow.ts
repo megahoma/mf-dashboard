@@ -74,15 +74,17 @@ export async function rebuildTypes(
             ? localManifestUrl(producer.port, producer.manifestPath)
             : remote.url;
         if (manifestUrl == null) throw new Error(`unreachable dependency: ${remote.name}`);
-        const installed = await operations.installRemoteTypes(
-          app,
-          remote,
-          manifestUrl,
-          context.refetchCommand(),
-          undefined,
-          log,
-          apps,
-        );
+        const installed = await operations
+          .installRemoteTypes(
+            app,
+            remote,
+            manifestUrl,
+            context.refetchCommand(),
+            undefined,
+            log,
+            apps,
+          )
+          .finally(() => context.typesDirectoryChanged?.(app.name, remote.alias));
         const url = remote.url ?? manifestUrl;
         confirmations.saveInstall(
           {
@@ -105,30 +107,34 @@ export async function rebuildTypes(
     const sources = sourceIdentity(app.folder, app.tsconfig, app.typesFolder, log);
     const inputs = inputsFingerprint(app, context.settings, null, sources.tsconfigFingerprint, []);
     let zipHash: string;
-    if (context.settings.rebuildCommand.trim() !== "") {
-      await runRebuildCommand(app, context.settings.rebuildCommand, log, operations.runShell);
-      if (app.port == null) throw new Error("generated zip is not published by a manifest");
-      zipHash = (
-        await operations.hashManifestZip({
-          appDir: app.folder,
-          hostName: app.name,
-          remoteName: app.name,
-          alias: app.name,
-          manifestUrl: localManifestUrl(app.port, manifestPath),
-        })
-      ).zipHash;
-    } else {
-      zipHash = (
-        await operations.generateFederatedTypes({
-          appDir: app.folder,
-          name: app.name,
-          configFile: app.buildConfigFile ?? app.configFile,
-          ...(app.bundler && { bundler: app.bundler }),
-          ...(app.launchEnvironment ?? { envMode: context.settings.envMode }),
-          port: app.port,
-          manifestPath,
-        })
-      ).zipHash;
+    try {
+      if (context.settings.rebuildCommand.trim() !== "") {
+        await runRebuildCommand(app, context.settings.rebuildCommand, log, operations.runShell);
+        if (app.port == null) throw new Error("generated zip is not published by a manifest");
+        zipHash = (
+          await operations.hashManifestZip({
+            appDir: app.folder,
+            hostName: app.name,
+            remoteName: app.name,
+            alias: app.name,
+            manifestUrl: localManifestUrl(app.port, manifestPath),
+          })
+        ).zipHash;
+      } else {
+        zipHash = (
+          await operations.generateFederatedTypes({
+            appDir: app.folder,
+            name: app.name,
+            configFile: app.buildConfigFile ?? app.configFile,
+            ...(app.bundler && { bundler: app.bundler }),
+            ...(app.launchEnvironment ?? { envMode: context.settings.envMode }),
+            port: app.port,
+            manifestPath,
+          })
+        ).zipHash;
+      }
+    } finally {
+      context.typesDirectoryChanged?.(app.name);
     }
     const after = sourceIdentity(app.folder, app.tsconfig, app.typesFolder, log);
     if (
