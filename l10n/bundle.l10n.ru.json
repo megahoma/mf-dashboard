@@ -104,6 +104,7 @@
   "not in workspace": "нет в воркспейсе",
   "Reference: dependencies are shown at the first occurrence of this app.": "Ссылка: зависимости показаны при первом появлении этого приложения.",
   "Finding microfrontends…": "Ищем микрофронты…",
-  "The microfrontend graph is outdated. Run Find microfrontends to update it.": "Граф микрофронтов устарел. Запустите поиск микрофронтов, чтобы обновить его.",
+  "Status not checked": "Статус не проверен",
+  "Auto-refresh is off. Use Refresh (↻) to check statuses.": "Автообновление выключено. Нажмите «Обновить» (↻), чтобы проверить статусы.",
   "Not built yet": "Ещё не собирался"
 }

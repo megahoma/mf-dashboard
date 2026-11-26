@@ -17,7 +17,7 @@ import {
   type ProblemDraft,
   type StatusInput,
 } from "../../../entities/status/index.ts";
-import { localManifestUrl } from "../../../shared/lib/urls.ts";
+import { isHttpUrl, localManifestUrl } from "../../../shared/lib/urls.ts";
 import type { DashboardNode, DashboardView } from "../models/presentation.ts";
 import { withActionTokens } from "./targets.ts";
 
@@ -103,6 +103,7 @@ function appNode(
       port: app.port,
       portOpen: probe?.portOpen ?? false,
       checking: view.probeRunning && !probe && app.port !== null,
+      unchecked: view.manualProbeOnly && !probe && app.port !== null,
       manifestEnabled: app.manifest,
       buildVersion: probe?.buildVersion ?? null,
       requestFailure: probe?.requestFailure,
@@ -155,6 +156,7 @@ function linkStatusInput(
       port: producer.port,
       portOpen: producerProbe?.portOpen ?? false,
       checking,
+      unchecked: view.manualProbeOnly && !producerProbe,
       manifestEnabled: producer.manifest,
       buildVersion: producerProbe?.buildVersion ?? null,
       requestFailure: probe?.requestFailure,
@@ -167,6 +169,7 @@ function linkStatusInput(
     port: null,
     portOpen: manifestAnswers(probe),
     checking: view.probeRunning && !probe && remote.url !== null,
+    unchecked: view.manualProbeOnly && !probe && isHttpUrl(remote.url),
     manifestEnabled: true,
     buildVersion: probe?.buildVersion ?? null,
     requestFailure: probe?.requestFailure,
@@ -182,6 +185,7 @@ function extraStatusInput(view: DashboardView, url: string): StatusInput {
     port: null,
     portOpen: manifestAnswers(result),
     checking: view.probeRunning && !result,
+    unchecked: view.manualProbeOnly && !result && isHttpUrl(url),
     manifestEnabled: true,
     buildVersion: result?.buildVersion ?? null,
     requestFailure: result?.requestFailure,
@@ -209,9 +213,6 @@ function linkNode(
     row.description += ` · ${view.terms.unknownPort}`;
     row.tooltip += `\n${view.terms.unknownPort}`;
   }
-  const checkedAt = view.typesAutoCheck === false ? view.typesCheckedAt?.(link) : null;
-  if (checkedAt != null)
-    row.tooltip = `${row.tooltip}\n${view.terms.typesCheckedAt}: ${new Date(checkedAt).toLocaleString()}`;
   const nodePath = [...parentPath, linkId];
   const id = JSON.stringify(nodePath);
   const nested: DashboardNode[] = [];

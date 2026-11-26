@@ -12,7 +12,7 @@
   "configuration.ignorePaths": "Extra directories skipped while scanning for Module Federation configs.",
   "configuration.extraManifestUrls": "Manifest URLs that have no application in this workspace.",
   "configuration.packageManager": "auto reads the repository package manager. npm, pnpm, yarn, and bun are explicit.",
-  "configuration.probeIntervalMs": "Milliseconds between port, manifest, and zip checks.",
+  "configuration.probeIntervalMs": "Delay between background probes in milliseconds (at least 1000). Set to 0 to check statuses manually.",
   "configuration.typesSettleMs": "Milliseconds after a source save before a zip is treated as stale.",
   "configuration.types.autoCheck": "Automatically check type files, producer sources, and types ZIP archives. When disabled, ports and manifests still update; use Check @mf-types to check types manually.",
   "command.checkTypes": "Check @mf-types",

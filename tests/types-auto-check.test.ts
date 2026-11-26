@@ -15,6 +15,7 @@ import {
 } from "../src/entities/federated-types/index.ts";
 import { appProbeId } from "../src/entities/microfrontend/index.ts";
 import { terms } from "../src/shared/config/index.ts";
+import { shellQuote } from "../src/shared/lib/shell.ts";
 import type { LogContext, LogFields } from "../src/shared/models/logging.ts";
 
 registerHooks({
@@ -28,7 +29,16 @@ const { MfDashboardProvider } = await import("../src/widgets/mf-dashboard-tree/m
 
 function fixture(t: TestContext, automatic = false) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mf-manual-check-")));
-  const options = { automatic, portOpen: true, version: "first", lastModified: true };
+  const options = {
+    automatic,
+    interval: 5000,
+    portOpen: true,
+    version: "first",
+    lastModified: true,
+    zipAgeMs: -60_000,
+    rebuildCommand: "",
+    typesSettleMs: 15_000,
+  };
   const definitions = [
     {
       name: "studio",
@@ -46,7 +56,7 @@ function fixture(t: TestContext, automatic = false) {
     { name: "palette", port: 4501, remotes: {} },
     { name: "timeline", port: 4502, remotes: {} },
   ];
-  const archive = new Uint8Array([7, 8, 9]);
+  const archive = new Uint8Array([0x50, 0x4b, 3, 4, 7, 8, 9]);
   const zipHash = createHash("sha256").update(archive).digest("hex");
   const store = createConfirmationStore();
   const typesFile = (name: string, alias: string) =>
@@ -82,9 +92,13 @@ function fixture(t: TestContext, automatic = false) {
         definitions.map((definition) => [definition.name, { path: definition.name }]),
       ),
     }),
-    get: <T>(key: string): T | undefined =>
-      (key === "types.autoCheck" ? options.automatic : key === "structure" ? "tree" : undefined) as
-        T | undefined,
+    get: (key: string) => {
+      if (key === "probeIntervalMs") return options.interval;
+      if (key === "types.autoCheck") return options.automatic;
+      if (key === "structure") return "tree";
+      if (key === "commands.rebuildTypes") return options.rebuildCommand;
+      if (key === "typesSettleMs") return options.typesSettleMs;
+    },
   }));
   t.mock.method(net, "connect", () => {
     const socket = Object.assign(new EventEmitter(), { setTimeout() {}, destroy() {} });
@@ -105,7 +119,7 @@ function fixture(t: TestContext, automatic = false) {
       });
     return new Response(archive, {
       headers: options.lastModified
-        ? { "last-modified": new Date(Date.now() + 60_000).toUTCString() }
+        ? { "last-modified": new Date(Date.now() - options.zipAgeMs).toUTCString() }
         : undefined,
     });
   });
@@ -193,6 +207,101 @@ test("autoCheck false keeps ports and manifests live without type scans, ZIP req
   assert.equal(f.typeReads("studio", "paint"), 0);
 });
 
+test("zero interval cancels polling and checks only on demand, even with automatic types enabled", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const f = fixture(t, true);
+  f.provider.armProbe();
+  f.options.interval = 0;
+  f.provider.armProbe();
+  f.provider.typesSettingsChanged();
+  const probes = t.mock.method(f.provider.session["ports"], "probe");
+  for (const source of ["startup", "settings", "graph", "timer"]) await f.provider.refresh(source);
+  assert.equal(f.row().kind, "unchecked");
+  await f.provider.fileSaved(f.sourceFile("palette"));
+  t.mock.timers.tick(60_000);
+  await f.provider["run"](async () => {});
+  assert.equal(probes.mock.callCount(), 0);
+  assert.equal(f.sourceScans("palette"), 0);
+  await f.provider.refresh();
+  assert.equal(probes.mock.callCount(), 1);
+  assert.equal(f.row().kind, "listen");
+  f.options.portOpen = false;
+  await f.provider.refresh("graph");
+  assert.equal(f.row().kind, "listen");
+  assert.equal(probes.mock.callCount(), 1);
+  await f.provider.checkTypes(f.row());
+  assert.equal(f.row().kind, "silent");
+  f.options.interval = 1000;
+  f.provider.armProbe();
+  t.mock.timers.tick(1000);
+  await f.provider["run"](async () => {});
+  assert.equal(probes.mock.callCount(), 3);
+});
+
+test("identical probes retain tree rows and diagnostics until visible results change", async (t) => {
+  const f = fixture(t);
+  await f.provider.refresh("startup");
+  const roots = f.provider.getChildren();
+  const builds = t.mock.method(f.provider.session, "nodes");
+  const diagnostics = t.mock.method(f.provider["diagnostics"], "set");
+  const changes = t.mock.fn();
+  f.provider.onDidChangeTreeData(changes);
+  const stats = t.mock.method(fs, "statSync");
+  await f.provider.refresh("timer");
+  assert.equal(builds.mock.callCount(), 0);
+  assert.equal(changes.mock.callCount(), 0);
+  assert.equal(diagnostics.mock.callCount(), 0);
+  assert.ok(!stats.mock.calls.some(({ arguments: [file] }) => String(file).includes("@mf-types")));
+  assert.equal(f.provider.getChildren(), roots);
+  f.options.version = "next";
+  await f.provider.refresh("timer");
+  assert.equal(changes.mock.callCount(), 1);
+  assert.equal(builds.mock.callCount(), 1);
+  assert.match(f.row().description, /next/);
+  f.options.portOpen = false;
+  await f.provider.refresh("timer");
+  assert.equal(f.row().kind, "silent");
+});
+
+test("manual mode clears stale observations after a successful rebuild without probing", async (t) => {
+  const f = fixture(t);
+  f.options.interval = 0;
+  f.options.zipAgeMs = 60_000;
+  f.options.typesSettleMs = 0;
+  f.options.rebuildCommand = `${shellQuote(process.execPath)} --version`;
+  const sourceSavedAt = new Date(Date.now() - 30_000);
+  fs.utimesSync(f.sourceFile("palette"), sourceSavedAt, sourceSavedAt);
+  await f.provider.refresh();
+  const palette = f.row().children.find((node) => node.name === "palette")!;
+  const timeline = f.row().children.find((node) => node.name === "timeline")!;
+  assert.match(palette.contextValue, /^stale\b/);
+  const unaffected = f.provider.typeDetails(timeline.linkId!);
+  assert.ok(unaffected?.checkedAt);
+  const probe = t.mock.method(f.provider.session["ports"], "probe");
+  await f.provider.rebuild(palette);
+  assert.equal(f.store.generation("palette")?.zipHash, f.zipHash);
+  assert.doesNotMatch(f.provider.findRow(palette.id)?.contextValue ?? "", /^stale\b/);
+  assert.equal(f.provider.typeDetails(palette.linkId!)?.status, "unchecked");
+  assert.equal(f.provider.typeDetails(palette.linkId!)?.checkedAt, undefined);
+  assert.deepEqual(f.provider.typeDetails(timeline.linkId!), unaffected);
+  assert.equal(probe.mock.callCount(), 0);
+});
+
+test("repeated type checks update their timestamp without rebuilding unchanged rows", async (t) => {
+  const f = fixture(t);
+  await f.provider.refresh();
+  const link = f.row().children[0];
+  const firstCheck = f.provider.typeDetails(link.linkId!)!.checkedAt!;
+  const builds = t.mock.method(f.provider.session, "nodes");
+  t.mock.method(Date, "now", () => firstCheck + 5000);
+  await f.provider.refresh();
+  assert.equal(f.provider.typeDetails(link.linkId!)?.checkedAt, firstCheck + 5000);
+  assert.equal(builds.mock.callCount(), 0);
+  fs.writeFileSync(f.typesFile("studio", "paint"), "export type Changed = true;");
+  await f.provider.refresh();
+  assert.equal(builds.mock.callCount(), 1);
+});
+
 test("a burst of source saves refreshes only the changed producer once", async (t) => {
   const f = fixture(t, true);
   await f.provider.refresh("startup");
@@ -240,8 +349,8 @@ test("manual checks inspect only the selected link or consumer and retain the da
   assert.ok(f.typeScans("studio", "paint") > 0);
   assert.equal(f.typeScans("studio", "track"), 0);
   assert.equal(f.typeScans("editor", "paint"), 0);
-  const tooltip = f.row().children.find((node) => node.name === "palette")!.tooltip;
-  assert.ok(tooltip.includes(terms.typesCheckedAt));
+  const checkedAt = f.provider.typeDetails(selected.linkId!)?.checkedAt;
+  assert.ok(checkedAt);
   const counts = [
     f.sourceReads("palette"),
     f.typeReads("studio", "paint"),
@@ -252,7 +361,7 @@ test("manual checks inspect only the selected link or consumer and retain the da
   fs.writeFileSync(f.typesFile("studio", "paint"), "export type Revision = 22;");
   await f.provider.fileSaved(f.sourceFile("palette"));
   await f.provider.refresh("timer");
-  assert.equal(f.row().children.find((node) => node.name === "palette")!.tooltip, tooltip);
+  assert.equal(f.provider.typeDetails(selected.linkId!)?.checkedAt, checkedAt);
   assert.deepEqual(
     [
       f.sourceReads("palette"),

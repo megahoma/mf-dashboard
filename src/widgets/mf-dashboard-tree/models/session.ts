@@ -1,5 +1,9 @@
+import { isDeepStrictEqual } from "node:util";
 import {
+  appProbeId,
   createProbeBook,
+  externalManifestId,
+  linkProbeId,
   remoteLinkKey,
   type ArtifactProbe,
   type LinkProbeResult,
@@ -13,6 +17,7 @@ import { WORKSPACE_DEFAULTS } from "../../../features/init-settings/index.ts";
 import { terms, type DashboardTerms } from "../../../shared/config/index.ts";
 import { noLog } from "../../../shared/config/logging.ts";
 import { logDuration, resolveLogFields, safeError } from "../../../shared/lib/logging.ts";
+import { localManifestUrl } from "../../../shared/lib/urls.ts";
 import type { LogContext, LogFields } from "../../../shared/models/logging.ts";
 import { createAppParseCache, withDiscoveryCache } from "../lib/app-parse-cache.ts";
 import {
@@ -25,7 +30,7 @@ import {
 import { beginRefetch, endRefetch, linksOf } from "../lib/links.ts";
 import { dashboardNodes, dashboardProblemDrafts } from "../lib/presentation.ts";
 import { resolveRowAction } from "../lib/targets.ts";
-import { workspaceGraphIsStale, type WorkspaceGraph } from "../lib/workspace-graph.ts";
+import type { WorkspaceGraph } from "../lib/workspace-graph.ts";
 import type { DashboardNode, DashboardSort, DashboardStructure } from "./presentation.ts";
 import type {
   AppParseCache,
@@ -34,12 +39,38 @@ import type {
   KnownAppsTask,
 } from "./session-types.ts";
 
+function appManifestUrl(app: LocalApp): string | null {
+  return app.manifest && app.port !== null ? localManifestUrl(app.port, app.manifestPath) : null;
+}
+
+function sameProbeRows(
+  previous: ReadonlyMap<string, ArtifactProbe & { portOpen?: boolean }>,
+  next: ReadonlyMap<string, ArtifactProbe & { portOpen?: boolean }>,
+): boolean {
+  if (previous.size !== next.size) return false;
+  for (const [id, result] of next) {
+    const old = previous.get(id);
+    if (
+      !old ||
+      old.portOpen !== result.portOpen ||
+      old.manifestReachable !== result.manifestReachable ||
+      old.manifestValid !== result.manifestValid ||
+      old.requestFailure !== result.requestFailure ||
+      old.buildVersion !== result.buildVersion ||
+      !isDeepStrictEqual(old.exposes, result.exposes) ||
+      !isDeepStrictEqual(old.shared, result.shared)
+    )
+      return false;
+  }
+  return true;
+}
+
 export class DashboardSession {
   loaded: LocalApp[] = [];
   typesApps: readonly LocalApp[] = [];
   hasConfiguredApps = false;
   workspaceGraph?: WorkspaceGraph;
-  graphStale = false;
+  manualProbeOnly = false;
   ownershipSources: ReadonlySet<string> = new Set();
   extraUrls: string[] = [];
   structure: DashboardStructure = "tree";
@@ -47,8 +78,7 @@ export class DashboardSession {
   terms: DashboardTerms = terms;
   typesForLink: (link: RemoteLink) => StatusInput["typesState"] = () => "unknown";
   typesAutoCheck: boolean = WORKSPACE_DEFAULTS["mf-dashboard.types.autoCheck"];
-  typesCheckedAt: (link: RemoteLink) => number | null = () => null;
-  beforeRefreshChange: (log?: LogContext) => void = () => {};
+  beforeRefreshChange: (log?: LogContext, probed?: boolean) => boolean = () => false;
   onRefreshFailed: () => void = () => {};
   probeRunning = false;
   readonly pending = new Set<string>();
@@ -61,7 +91,6 @@ export class DashboardSession {
   private activeLog: LogContext = noLog;
   private pathWarnings = new Set<string>();
   private preparedDiscovery: DiscoverySnapshot | undefined;
-  private graphCheck = 0;
   readonly book: ProbeBook;
   private readonly onChange: () => void;
 
@@ -108,10 +137,13 @@ export class DashboardSession {
     let hasConfiguredApps = this.hasConfiguredApps;
     let failureFields: LogFields = {};
     let publishedStructure = false;
-    this.probeRunning = true;
+    let changed = false;
     let structureAtProbe = this.structure;
     try {
       const current = this.ports.readSettings();
+      this.manualProbeOnly = current.probeIntervalMs === 0;
+      const probe = !this.manualProbeOnly || source === "manual" || source === "types";
+      this.probeRunning = probe;
       const roots = this.ports.roots();
       let configured = Object.keys(current.apps ?? {}).length;
       hasConfiguredApps = roots.length > 0 && configured > 0;
@@ -127,14 +159,19 @@ export class DashboardSession {
         const workspace =
           source === "timer" && previous ? previous : await graph.read(roots, loadLog);
         this.workspaceGraph = workspace;
+        changed =
+          !previous ||
+          previous.incomplete !== workspace.incomplete ||
+          previous.files.length !== workspace.files.length;
         loaded = workspace.apps;
         configured = loaded.length;
         hasConfiguredApps = configured > 0;
         if (
+          probe &&
           previous !== workspace &&
           (!previous ||
-            JSON.stringify(this.loaded) !== JSON.stringify(loaded) ||
-            JSON.stringify(this.extraUrls) !== JSON.stringify(extraUrls))
+            !isDeepStrictEqual(this.loaded, loaded) ||
+            !isDeepStrictEqual(this.extraUrls, extraUrls))
         ) {
           // Publish the saved structure before any network or type freshness checks.
           this.applyRefreshState({
@@ -147,21 +184,9 @@ export class DashboardSession {
           });
           this.typesApps = loaded;
           this.hasConfiguredApps = hasConfiguredApps;
-          if (!workspace.files.length) this.graphStale = false;
           snapshot = this.captureRefreshState();
           publishedStructure = true;
           this.onChange();
-        }
-        if (source !== "timer" || Date.now() - this.graphCheck >= 30_000) {
-          this.graphCheck = Date.now();
-          void workspaceGraphIsStale(workspace, current).then(
-            (stale) => {
-              if (this.workspaceGraph !== workspace || stale === this.graphStale) return;
-              this.graphStale = stale;
-              this.onChange();
-            },
-            (error: unknown) => log.event("warn", "graph.check.failed", safeError(error)),
-          );
         }
       } else if (roots.length && current.apps) {
         if (this.ports.loadKnownAsync && configured > 0) {
@@ -201,16 +226,51 @@ export class DashboardSession {
       // The probe writes `staged`. The visible book stays put until the swap below.
       const staged = createProbeBook();
       staged.zips = new Map(this.book.zips);
-      await this.ports.probe(staged, {
-        apps: loaded,
-        links: linksOf(loaded),
-        extraManifestUrls: extraUrls,
-        log,
-      });
+      const sameApps = isDeepStrictEqual(snapshot.loaded, loaded);
+      const sameExtras = isDeepStrictEqual(snapshot.extraUrls, extraUrls);
+      if (probe) {
+        await this.ports.probe(staged, {
+          apps: loaded,
+          links: linksOf(loaded),
+          extraManifestUrls: extraUrls,
+          log,
+        });
+      } else {
+        // Keep the last manual result only while its target still belongs to this graph.
+        const oldApps = new Map(snapshot.loaded.map((app) => [app.name, app]));
+        for (const app of loaded) {
+          const id = appProbeId(app.name);
+          const previous = snapshot.apps.get(id);
+          const oldApp = oldApps.get(app.name);
+          if (
+            previous &&
+            oldApp?.port === app.port &&
+            appManifestUrl(oldApp) === appManifestUrl(app)
+          )
+            staged.apps.set(id, previous);
+        }
+        for (const link of linksOf(loaded)) {
+          const id = linkProbeId(link);
+          const previous = snapshot.links.get(id);
+          if (previous) staged.links.set(id, previous);
+        }
+        for (const url of extraUrls) {
+          const id = externalManifestId(url);
+          const previous = snapshot.extras.get(id);
+          if (previous) staged.extras.set(id, previous);
+        }
+      }
+      changed ||=
+        publishedStructure ||
+        this.hasConfiguredApps !== hasConfiguredApps ||
+        !sameApps ||
+        !sameExtras ||
+        snapshot.structure !== this.structure ||
+        !sameProbeRows(snapshot.apps, staged.apps) ||
+        !sameProbeRows(snapshot.links, staged.links) ||
+        !sameProbeRows(snapshot.extras, staged.extras);
       this.applyRefreshState({
-        apps: staged.apps,
-        links: staged.links,
-        extras: staged.extras,
+        ...staged,
         loaded,
         extraUrls,
         structure: this.structure,
@@ -250,11 +310,11 @@ export class DashboardSession {
     }
     this.hasConfiguredApps = hasConfiguredApps;
     this.pathWarnings = seenWarnings;
+    const probed = this.probeRunning;
     this.probeRunning = false;
-    this.pruneMessages(snapshot.loaded);
+    if (snapshot.loaded !== this.loaded) this.pruneMessages(snapshot.loaded);
     const renderStarted = Date.now();
-    this.beforeRefreshChange(log);
-    this.onChange();
+    if (this.beforeRefreshChange(log, probed) || changed) this.onChange();
     logDuration(
       log,
       "refresh.completed",

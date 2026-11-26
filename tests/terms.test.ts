@@ -5,6 +5,7 @@ import { icons } from "../src/shared/config/icons.ts";
 
 const statusKeys = [
   "checking",
+  "unchecked",
   "listen",
   "silent",
   "unknownPort",

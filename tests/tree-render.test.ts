@@ -110,7 +110,6 @@ test("details follow the selected row and link to its direct consumers", async (
       "connection: portal → gallery",
       "URL: https://example.test/mf-manifest.json?x=1&y=2",
       terms.requestNetworkError,
-      "types last checked: 10:30",
       "exposes: <img src=x>&",
       terms.treeReference,
     ].join("\n"),
@@ -131,7 +130,9 @@ test("details follow the selected row and link to its direct consumers", async (
     localApp("shell", "/shell", { remotes: [{ alias: "portal", name: "portal", url: null }] }),
     localApp("gallery", "/gallery"),
   ];
+  const checkedAt = new Date(2026, 0, 1, 10, 30).getTime();
   let typeDetails: NonNullable<ReturnType<Provider["typeDetails"]>> = {
+    checkedAt,
     status: "unknown",
     archiveMatch: "matches",
     sourceFreshness: "unknown",
@@ -197,7 +198,11 @@ test("details follow the selected row and link to its direct consumers", async (
       view.webview.html.indexOf('id="types-title"'),
   );
   assert.doesNotMatch(String(provider.getTreeItem(link).description), /@mf-types/);
-  assert.match(view.webview.html, /<dt>types last checked<\/dt><dd>10:30<\/dd>/);
+  assert.ok(
+    view.webview.html.includes(
+      `<dt>types last checked</dt><dd>${new Date(checkedAt).toLocaleString()}</dd>`,
+    ),
+  );
   assert.match(view.webview.html, /<dt>connection<\/dt><dd>portal → gallery<\/dd>/);
   assert.match(
     view.webview.html,
@@ -1024,6 +1029,188 @@ test("a types directory change updates Reveal types without a new probe", () => 
   }
 });
 
+test("workspace events update Reveal types in cached rows when a types directory appears or disappears", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-tree-watch-types-"));
+  const folder = path.join(root, "shell");
+  fs.mkdirSync(folder);
+  const restore = useWorkspace(root, {});
+  const creates = new vscode.EventEmitter<vscode.Uri>();
+  const changes = new vscode.EventEmitter<vscode.Uri>();
+  const deletes = new vscode.EventEmitter<vscode.Uri>();
+  const dispose = t.mock.fn(() => {
+    creates.dispose();
+    changes.dispose();
+    deletes.dispose();
+  });
+  const watch = t.mock.method(vscode.workspace, "createFileSystemWatcher", () => ({
+    onDidCreate: creates.event,
+    onDidDelete: deletes.event,
+    onDidChange: changes.event,
+    dispose,
+  }));
+  const provider = providerFor();
+  t.after(() => {
+    provider.dispose();
+    restore();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  provider.session.loaded = [
+    localApp("shell", folder, {
+      typesFolder: "generated/types",
+      remotes: [{ alias: "@team/widget", name: "widget", url: null }],
+    }),
+  ];
+  provider.relabel();
+  assert.match(String(watch.mock.calls[0].arguments[0]), /types/);
+  const appId = provider.getChildren()[0].id;
+  const hasTypes = () =>
+    provider.findRow(appId)?.children[0]?.contextValue.split(" ").includes("types");
+  const changed = t.mock.fn();
+  provider.onDidChangeTreeData(changed);
+
+  const target = path.join(folder, "generated", "types", "@team", "widget");
+  fs.mkdirSync(target, { recursive: true });
+  creates.fire(vscode.Uri.file(path.join(root, "widget")));
+  await Promise.resolve();
+  assert.equal(changed.mock.callCount(), 0);
+  assert.equal(hasTypes(), false);
+  creates.fire(vscode.Uri.file(path.join(folder, "generated")));
+  creates.fire(vscode.Uri.file(target));
+  await Promise.resolve();
+  assert.equal(changed.mock.callCount(), 1);
+  assert.equal(hasTypes(), true);
+  assert.equal(watch.mock.callCount(), 1);
+
+  fs.rmdirSync(target);
+  fs.writeFileSync(target, "replaced the directory");
+  changes.fire(vscode.Uri.file(target));
+  await Promise.resolve();
+  assert.equal(changed.mock.callCount(), 2);
+  assert.equal(hasTypes(), false);
+  fs.rmSync(target);
+  fs.mkdirSync(target);
+  changes.fire(vscode.Uri.file(target));
+  await Promise.resolve();
+  assert.equal(changed.mock.callCount(), 3);
+  assert.equal(hasTypes(), true);
+
+  fs.rmSync(path.join(folder, "generated"), { recursive: true });
+  deletes.fire(vscode.Uri.file(path.join(folder, "generated")));
+  await Promise.resolve();
+  assert.equal(changed.mock.callCount(), 4);
+  assert.equal(hasTypes(), false);
+  provider.dispose();
+  assert.equal(dispose.mock.callCount(), 1);
+});
+
+test("types watches follow internal links, including a chain whose final directory disappears", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-tree-watch-link-"));
+  const restore = useWorkspace(root, {});
+  const creates = new vscode.EventEmitter<vscode.Uri>();
+  const changes = new vscode.EventEmitter<vscode.Uri>();
+  const deletes = new vscode.EventEmitter<vscode.Uri>();
+  const watch = t.mock.method(vscode.workspace, "createFileSystemWatcher", () => ({
+    onDidCreate: creates.event,
+    onDidChange: changes.event,
+    onDidDelete: deletes.event,
+    dispose() {},
+  }));
+  const provider = providerFor();
+  t.after(() => {
+    provider.dispose();
+    restore();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  const link = path.join(root, "generated");
+  const first = path.join(root, "backing");
+  const redirect = path.join(root, "redirect");
+  const second = path.join(root, "replacement");
+  fs.mkdirSync(first);
+  fs.symlinkSync(first, link, "junction");
+  provider.session.loaded = [localApp("shell", root, { typesFolder: "generated/types" })];
+  provider.relabel();
+  const hasTypes = () => provider.findRow("app:shell")?.contextValue.split(" ").includes("types");
+  assert.match(String(watch.mock.calls.at(-1)?.arguments[0]), /backing/);
+  assert.equal(hasTypes(), false);
+
+  fs.mkdirSync(path.join(first, "types"));
+  creates.fire(vscode.Uri.file(path.join(first, "types")));
+  await Promise.resolve();
+  assert.equal(hasTypes(), true);
+
+  fs.mkdirSync(path.join(second, "types"), { recursive: true });
+  fs.symlinkSync(second, redirect, "junction");
+  fs.unlinkSync(link);
+  fs.symlinkSync(redirect, link, "junction");
+  changes.fire(vscode.Uri.file(link));
+  await Promise.resolve();
+  assert.match(String(watch.mock.calls.at(-1)?.arguments[0]), /replacement/);
+  assert.equal(hasTypes(), true);
+
+  fs.rmSync(second, { recursive: true });
+  deletes.fire(vscode.Uri.file(second));
+  await Promise.resolve();
+  assert.equal(hasTypes(), false);
+  assert.match(String(watch.mock.calls.at(-1)?.arguments[0]), /replacement/);
+  fs.mkdirSync(second);
+  creates.fire(vscode.Uri.file(second));
+  await Promise.resolve();
+  fs.mkdirSync(path.join(second, "types"));
+  creates.fire(vscode.Uri.file(path.join(second, "types")));
+  await Promise.resolve();
+  assert.equal(hasTypes(), true);
+});
+
+test("moving an extra URL to user settings clears the old diagnostic without rebuilding rows", async (t) => {
+  const root = os.tmpdir();
+  const restore = useWorkspace(root, {});
+  let workspaceValue = true;
+  const url = "invalid URL";
+  t.mock.method(vscode.workspace, "getConfiguration", () => ({
+    async update() {},
+    inspect: (key: string) =>
+      key === "extraManifestUrls" && workspaceValue ? { workspaceValue: [url] } : undefined,
+    get: (key: string) =>
+      key === "probeIntervalMs" ? 0 : key === "extraManifestUrls" ? [url] : undefined,
+  }));
+  const provider = providerFor();
+  t.after(() => {
+    provider.dispose();
+    restore();
+  });
+  const diagnostics = t.mock.method(provider["diagnostics"], "set");
+  await provider.refresh("settings");
+  const file = vscode.Uri.file(path.join(root, ".vscode", "settings.json"));
+  const entries = diagnostics.mock.calls[0]?.arguments[0];
+  assert.deepEqual(entries[0]?.[0], file);
+  assert.ok(entries[0]?.[1]);
+
+  const builds = countBuilds(provider);
+  workspaceValue = false;
+  await provider.refresh("settings");
+  assert.deepEqual(diagnostics.mock.calls[1]?.arguments[0], [[file, undefined]]);
+  assert.equal(builds.count, 0);
+});
+
+test("a refresh finishing after disposal leaves the diagnostic collection alone", async (t) => {
+  const root = os.tmpdir();
+  const restore = useWorkspace(root, {});
+  const url = "invalid URL";
+  t.mock.method(vscode.workspace, "getConfiguration", () => ({
+    async update() {},
+    inspect: (key: string) => (key === "extraManifestUrls" ? { workspaceValue: [url] } : undefined),
+    get: (key: string) => (key === "extraManifestUrls" ? [url] : undefined),
+  }));
+  const provider = providerFor();
+  t.after(restore);
+  t.mock.method(provider.session["ports"], "probe", async () => {
+    provider.dispose();
+  });
+  const diagnostics = t.mock.method(provider["diagnostics"], "set");
+  await provider.refresh("settings");
+  assert.equal(diagnostics.mock.callCount(), 0);
+});
+
 test("a failed refresh keeps the previous rows", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-tree-rollback-"));
   const shell = path.join(root, "shell");
@@ -1049,7 +1236,7 @@ test("a failed refresh keeps the previous rows", async (t) => {
   assert.equal(provider.session.loaded.length, 1);
 });
 
-test("saving a source and the settle timer each rebuild the tree once", async (t) => {
+test("saving a source and settling leave unchanged rows intact", async (t) => {
   const configured = vscode.workspace.getConfiguration;
   t.mock.method(vscode.workspace, "getConfiguration", () => ({
     ...configured(),
@@ -1072,17 +1259,11 @@ test("saving a source and the settle timer each rebuild the tree once", async (t
   const baseline = builds.count;
   await provider.fileSaved(source);
   provider.getChildren();
-  assert.equal(builds.count, baseline + 1);
-  const settled = new Promise<void>((resolve) => {
-    const listener = provider.onDidChangeTreeData(() => {
-      listener.dispose();
-      resolve();
-    });
-  });
+  assert.equal(builds.count, baseline);
   t.mock.timers.tick(15_000);
-  await settled;
+  await provider["run"](async () => {});
   provider.getChildren();
-  assert.equal(builds.count, baseline + 2);
+  assert.equal(builds.count, baseline);
 });
 
 test("a structure change during a probe updates the rows without logging staged status", () => {

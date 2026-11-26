@@ -14,6 +14,7 @@ function urlPort(url: URL): number {
 
 export function classify(input: StatusInput): StatusKind {
   if (input.checking) return "checking";
+  if (input.unchecked) return "unchecked";
   if (input.role === "app") {
     if (input.port === null) return "unknownPort";
     return input.portOpen ? "listen" : "silent";

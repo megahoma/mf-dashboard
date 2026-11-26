@@ -1,5 +1,6 @@
 export type StatusKind =
   | "checking"
+  | "unchecked"
   | "listen"
   | "silent"
   | "unknownPort"
@@ -16,6 +17,7 @@ export type StatusInput = {
   port: number | null;
   portOpen: boolean;
   checking?: boolean;
+  unchecked?: boolean;
   manifestEnabled: boolean;
   buildVersion: string | null;
   url: string | null;

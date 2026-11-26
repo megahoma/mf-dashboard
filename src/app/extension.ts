@@ -89,6 +89,13 @@ export function activate(context: vscode.ExtensionContext): void {
     { structure: () => layout("structure") },
   );
   const tree = vscode.window.createTreeView("mf-dashboard", { treeDataProvider: provider });
+  const syncProbeMode = () => {
+    tree.message =
+      dashboardConfiguration().get<number>("probeIntervalMs") === 0
+        ? provider.session.terms.manualProbeMessage
+        : undefined;
+  };
+  syncProbeMode();
   const discoveryView = vscode.window.createTreeView<vscode.TreeItem>(DISCOVERY_VIEW, {
     treeDataProvider: { getChildren: () => [], getTreeItem: (item) => item },
   });
@@ -121,15 +128,11 @@ export function activate(context: vscode.ExtensionContext): void {
   let appsVisible: boolean | undefined;
   let welcomeVisible: boolean | undefined;
   const welcome = createWelcomeView(provider.onDidChangeTreeData, () => {
-    const { terms, graphStale, workspaceGraph } = provider.session;
+    const { terms, workspaceGraph } = provider.session;
     const noResults = !!workspaceGraph?.files.length && !workspaceGraph.incomplete;
     return {
-      message: graphStale
-        ? terms.graphStale
-        : noResults
-          ? terms.noMicrofrontends
-          : terms.welcomeMessage,
-      label: noResults || graphStale ? terms.searchAgain : terms.discover,
+      message: noResults ? terms.noMicrofrontends : terms.welcomeMessage,
+      label: noResults ? terms.searchAgain : terms.discover,
     };
   });
   const canUpdateTypes = () => !discovering && !updatingTypes && provider.session.hasConfiguredApps;
@@ -165,7 +168,6 @@ export function activate(context: vscode.ExtensionContext): void {
       configured ? provider.session.typesApps : [],
       layout("types.structure"),
     );
-    tree.message = provider.session.graphStale ? provider.session.terms.graphStale : undefined;
   };
   const syncLayout = () => {
     const sort = context.workspaceState.get("mf-dashboard.flatSort") === "port" ? "port" : "name";
@@ -368,6 +370,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.window.registerWebviewViewProvider("mf-dashboard.welcome", welcome),
     onDidChangeTerms((next) => {
       provider.relabel(next);
+      syncProbeMode();
       typesBuild.relabel(buildTranslator());
       typesTree.title = next.typesBuildTitle;
       if (finishTypesLoading) typesTree.message = next.loadingTypesTree;
@@ -391,9 +394,13 @@ export function activate(context: vscode.ExtensionContext): void {
         event.affectsConfiguration("mf-dashboard.structure")
       )
         syncLayout();
-      if (event.affectsConfiguration("mf-dashboard.probeIntervalMs")) provider.armProbe();
+      const intervalChanged = event.affectsConfiguration("mf-dashboard.probeIntervalMs");
+      if (intervalChanged) {
+        provider.armProbe();
+        syncProbeMode();
+      }
       const typesAutoCheckChanged = event.affectsConfiguration("mf-dashboard.types.autoCheck");
-      if (typesAutoCheckChanged) provider.typesSettingsChanged();
+      if (intervalChanged || typesAutoCheckChanged) provider.typesSettingsChanged();
       if (
         appsChanged ||
         event.affectsConfiguration("mf-dashboard.envMode") ||

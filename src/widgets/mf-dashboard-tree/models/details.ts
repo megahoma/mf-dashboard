@@ -118,6 +118,7 @@ export class DashboardDetails implements WebviewViewProvider {
     };
     const subscriptions = [
       this.provider.onDidChangeTreeData(render),
+      this.provider.onDidCheckTypes(render),
       view.onDidChangeVisibility(render),
       view.onDidDispose(() => this.activeView?.dispose()),
     ];
@@ -270,6 +271,8 @@ function detailsHtml(
   const connectionFields: [string, string][] = row ? [[terms.appStatus, status]] : [];
   const manifestFields: [string, string][] = [];
   const typeFields: [string, string][] = [];
+  if (types?.checkedAt != null)
+    typeFields.push([terms.typesCheckedAt, new Date(types.checkedAt).toLocaleString()]);
   const notes: string[] = [];
   for (const line of row?.tooltip.split("\n") ?? []) {
     if (
@@ -288,8 +291,6 @@ function detailsHtml(
       connectionFields.push([label, value]);
     } else if (label === terms.exposes || label === terms.shared) {
       manifestFields.push([label, value]);
-    } else if (label === terms.typesCheckedAt) {
-      typeFields.push([label, value]);
     } else {
       notes.push(line);
     }

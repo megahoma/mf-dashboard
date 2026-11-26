@@ -1,7 +1,10 @@
+import { realpathSync } from "node:fs";
+import path from "node:path";
 import * as vscode from "vscode";
 import {
   createConfirmationStore,
   disposeEvidenceWorker,
+  resolveTypesPath,
   sourceContainsAsync,
   type ConfirmationStore,
   type InstalledEvidence,
@@ -34,6 +37,7 @@ import { installRemoteTypes } from "../../../features/refetch-types/index.ts";
 import { icons, type DashboardTerms } from "../../../shared/config/index.ts";
 import { noLog } from "../../../shared/config/logging.ts";
 import { logDuration, safeError } from "../../../shared/lib/logging.ts";
+import { pathIsInside } from "../../../shared/lib/paths.ts";
 import { createSerialQueue } from "../../../shared/lib/queue.ts";
 import { isLoopbackAtPort, localManifestUrl, parseHttpUrl } from "../../../shared/lib/urls.ts";
 import type { LogContext } from "../../../shared/models/logging.ts";
@@ -67,8 +71,11 @@ export class MfDashboardProvider
 {
   private readonly change = new vscode.EventEmitter<DashboardNode | undefined | null | void>();
   readonly onDidChangeTreeData = this.change.event;
+  private readonly typesChecked = new vscode.EventEmitter<void>();
+  readonly onDidCheckTypes = this.typesChecked.event;
   private readonly diagnostics = vscode.languages.createDiagnosticCollection("mf-dashboard");
   private publishedFiles: string[] = [];
+  private publishedSettingsFile: string | null = null;
   readonly session: DashboardSession;
   private readonly run = createSerialQueue();
   private readonly knownAppsWorker = new KnownAppsWorker();
@@ -85,6 +92,11 @@ export class MfDashboardProvider
   private requestedTypeLinks: ReadonlySet<string> | undefined;
   private requestedTypeNode: DashboardNode | undefined;
   private view: { nodes: DashboardNode[]; stamp: string } | null = null;
+  private typesWatcher?: vscode.FileSystemWatcher;
+  private typesWatchPattern?: string;
+  private typesWatchTopology?: { apps: readonly LocalApp[]; structure: DashboardStructure };
+  private typesWatchPaths = new Set<string>();
+  private typesWatchPending = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private readonly saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private disposed = false;
@@ -207,24 +219,28 @@ export class MfDashboardProvider
     this.session.terms = termsOf();
     this.session.typesForLink = (link) => this.observation.detailsFor(link).status;
     this.session.typesAutoCheck = readWorkspaceSettings().typesAutoCheck;
-    this.session.typesCheckedAt = (link) => this.observation.checkedAt(link);
-    this.session.beforeRefreshChange = (log) => {
+    this.session.beforeRefreshChange = (log, probed = true) => {
       this.observation.log = log ?? this.log;
+      const links = linksOf(this.session.loaded);
+      this.observation.pruneLinks(new Set(links.map(linkProbeId)));
+      if (!probed) return false;
       this.session.typesAutoCheck = readWorkspaceSettings().typesAutoCheck;
+      const wasPreparing = this.observation.preparing;
       this.observation.preparing = false;
-      this.clearTypeCache();
+      this.observation.clear(false);
       if (this.pendingEvidence) {
         this.observation.apply(this.pendingEvidence);
         this.pendingEvidence = undefined;
       }
-      const links = linksOf(this.session.loaded);
-      this.observation.pruneLinks(new Set(links.map(linkProbeId)));
-      // Manual checks must keep their results even when no view reads the link.
-      if (this.explicitTypeCheck) {
-        for (const link of links) {
-          if (this.canCheckTypes(link)) this.observation.detailsFor(link);
-        }
-      }
+      const typesChanged =
+        (this.explicitTypeCheck || this.session.typesAutoCheck) &&
+        this.observation.refreshLinks(links, this.explicitTypeCheck);
+      return (
+        wasPreparing ||
+        typesChanged ||
+        this.view === null ||
+        (this.explicitTypeCheck && this.view.stamp !== this.typesStamp())
+      );
     };
     this.session.onRefreshFailed = () => {
       this.pendingEvidence = undefined;
@@ -243,16 +259,24 @@ export class MfDashboardProvider
     if (this.timer) clearTimeout(this.timer);
     for (const timer of this.saveTimers.values()) clearTimeout(timer);
     this.saveTimers.clear();
+    this.typesWatcher?.dispose();
+    this.typesWatcher = undefined;
     this.view = null;
     this.observation.installChecks.clear();
     this.manifestRegistration.dispose();
     this.manifests.dispose();
     this.diagnostics.dispose();
     this.change.dispose();
+    this.typesChecked.dispose();
   }
 
   private notify(): void {
     if (this.disposed) return;
+    if (
+      this.typesWatchTopology?.apps !== this.session.loaded ||
+      this.typesWatchTopology.structure !== this.session.structure
+    )
+      this.watchTypesDirectories();
     this.view = null;
     if (!this.session.probeRunning) {
       this.publishProblems();
@@ -282,30 +306,41 @@ export class MfDashboardProvider
     this.change.fire();
   }
 
-  private publishProblems(): void {
-    const drafts = this.session.problemDrafts(settingsDiagnosticFile());
+  private publishProblems(settingsFile = settingsDiagnosticFile()): void {
+    const drafts = this.session.problemDrafts(settingsFile);
     const { files, entries } = problemDiagnostics(this.publishedFiles, drafts);
     this.publishedFiles = files;
     this.diagnostics.set(entries);
+    this.publishedSettingsFile = settingsFile;
   }
 
   armProbe(): void {
     if (this.disposed) return;
     if (this.timer) clearTimeout(this.timer);
-    const ms = Math.max(1000, readWorkspaceSettings().probeIntervalMs);
-    this.timer = setTimeout(() => {
-      void this.refresh("timer")
-        .catch(() => {})
-        .finally(() => this.armProbe());
-    }, ms);
+    const ms = readWorkspaceSettings().probeIntervalMs;
+    if (ms === 0) {
+      this.timer = undefined;
+      return;
+    }
+    this.timer = setTimeout(
+      () => {
+        void this.refresh("timer")
+          .catch(() => {})
+          .finally(() => this.armProbe());
+      },
+      Math.max(1000, ms),
+    );
   }
 
   refresh(source = "manual"): Promise<void> {
-    return this.enqueue(source, (log) =>
-      source === "manual"
-        ? this.withTypeCheck(() => this.session.refresh(source, log))
-        : this.session.refresh(source, log),
-    );
+    return this.enqueue(source, async (log) => {
+      if (source === "manual") await this.withTypeCheck(() => this.session.refresh(source, log));
+      else await this.session.refresh(source, log);
+      if (!this.disposed && source !== "timer") {
+        const settingsFile = settingsDiagnosticFile();
+        if (settingsFile !== this.publishedSettingsFile) this.publishProblems(settingsFile);
+      }
+    });
   }
 
   private enqueue<T>(source: string, work: (log: LogContext) => Promise<T>): Promise<T> {
@@ -339,6 +374,7 @@ export class MfDashboardProvider
 
   typesSettingsChanged(): void {
     const automatic = readWorkspaceSettings().typesAutoCheck;
+    if (automatic === this.session.typesAutoCheck) return;
     this.session.typesAutoCheck = automatic;
     this.observation.preparing = automatic;
     if (!automatic) {
@@ -355,6 +391,7 @@ export class MfDashboardProvider
     this.requestedTypeLinks = node ? (this.typeLinksForNode(node) ?? new Set()) : undefined;
     try {
       await operation();
+      if (!this.session.typesAutoCheck) this.typesChecked.fire();
     } finally {
       this.explicitTypeCheck = false;
       this.requestedTypeLinks = undefined;
@@ -397,12 +434,12 @@ export class MfDashboardProvider
   }
 
   async fileSaved(file: string): Promise<void> {
-    if (this.disposed) return;
+    const settings = readWorkspaceSettings();
+    if (this.disposed || settings.probeIntervalMs === 0) return;
     if (this.session.ownershipSources.has(file)) {
       await this.refresh("config");
       return;
     }
-    const settings = readWorkspaceSettings();
     for (const app of this.session.loaded) {
       const kind = savedFileKind(app, file, settings.envMode);
       if (kind === "config") {
@@ -449,6 +486,7 @@ export class MfDashboardProvider
   }
 
   private async reload(source: string, log: LogContext): Promise<void> {
+    if (readWorkspaceSettings().probeIntervalMs === 0) return;
     await this.withTypeCheck(() => this.session.refresh(source, log));
   }
 
@@ -510,6 +548,8 @@ export class MfDashboardProvider
       this.confirmations.saveInstall(link, installed.filesFingerprint, installed.zipHash, true);
       await this.persistConfirmations();
       this.clearTypeCache();
+      if (readWorkspaceSettings().probeIntervalMs === 0)
+        this.observation.recordInstall(link, installed.zipHash);
       log.event("info", "types.fetch.completed", {
         app: consumer.name,
         durationMs: Date.now() - started,
@@ -738,6 +778,7 @@ export class MfDashboardProvider
     const started = Date.now();
     log.event("info", "types.rebuild.started", { app: rootName });
     const settings = readWorkspaceSettings();
+    const rebuilt = new Set<string>();
     try {
       const graph = this.session.workspaceGraph;
       const appSettings = graph?.settings ?? settings.apps;
@@ -767,7 +808,10 @@ export class MfDashboardProvider
         },
         refetchCommand: () => readWorkspaceSettings().refetchCommand,
         persist: this.persistConfirmations,
-        rebuilt: (name) => this.session.clearRebuildError(name),
+        rebuilt: (name) => {
+          rebuilt.add(name);
+          this.session.clearRebuildError(name);
+        },
       });
       this.session.clearRebuildError(rootName);
       log.event("info", "types.rebuild.completed", {
@@ -778,6 +822,14 @@ export class MfDashboardProvider
       log.event("error", "types.rebuild.failed", { app: rootName, ...safeError(error) });
       this.session.noteRebuildError(rootName, String(error));
       return;
+    } finally {
+      if (rebuilt.size && readWorkspaceSettings().probeIntervalMs === 0) {
+        const affected = linksOf(this.session.loaded).filter(
+          (link) => rebuilt.has(link.consumer) || rebuilt.has(link.remoteName),
+        );
+        this.observation.invalidateLinks(affected.map(linkProbeId));
+        if (affected.length) this.notify();
+      }
     }
     await this.reload("rebuild", log);
   }
@@ -839,14 +891,19 @@ export class MfDashboardProvider
     }
   }
 
-  typeDetails(linkId: string): (LinkTypeObservation & { startToCheck?: true }) | undefined {
+  typeDetails(
+    linkId: string,
+  ): (LinkTypeObservation & { startToCheck?: true; checkedAt?: number }) | undefined {
     const link = parseLinkId(linkId);
     if (!link) return;
     const remote = this.session.loaded
       .find(({ name }) => name === link.consumer)
       ?.remotes.find(({ alias, name }) => alias === link.alias && name === link.remoteName);
     if (!remote) return;
-    const observation = this.observation.detailsFor({ ...link, url: remote.url });
+    const current = { ...link, url: remote.url };
+    const details = this.observation.detailsFor(current);
+    const checkedAt = this.session.typesAutoCheck ? null : this.observation.checkedAt(current);
+    const observation = checkedAt === null ? details : { ...details, checkedAt };
     if (
       observation.status === "none" ||
       observation.archiveMatch === "matches" ||
@@ -897,6 +954,89 @@ export class MfDashboardProvider
     return rows.join("\n");
   }
 
+  private watchTypesDirectories(): void {
+    this.typesWatchTopology = { apps: this.session.loaded, structure: this.session.structure };
+    const roots = workspaceRoots().map(({ path: folder }) => {
+      const root = path.resolve(folder);
+      try {
+        return { root, realRoot: realpathSync.native(root) };
+      } catch {
+        return { root, realRoot: root };
+      }
+    });
+    const paths = new Set<string>();
+    const names = new Set<string>();
+    const addBranch = (root: string, relative: string) => {
+      // A rename or deletion can report an ancestor instead of the directory itself.
+      for (let entry = path.resolve(root, relative); entry !== root; entry = path.dirname(entry)) {
+        paths.add(this.typesWatchPath(entry));
+        names.add(path.basename(entry));
+      }
+    };
+    const add = (target: string) => {
+      for (const { root, realRoot } of roots) {
+        const base = pathIsInside(root, target) ? root : realRoot;
+        if (!pathIsInside(base, target)) continue;
+        const relative = path.relative(base, target);
+        addBranch(root, relative);
+        if (root !== realRoot) addBranch(realRoot, relative);
+      }
+    };
+    const addTypesPath = (appFolder: string, target: string) => {
+      add(target);
+      const route = new Set<string>();
+      try {
+        add(resolveTypesPath(appFolder, target, route));
+      } catch {
+        // Keep watching the configured path and any links that can make it valid.
+      }
+      for (const entry of route) add(entry);
+    };
+    for (const app of this.session.loaded) {
+      const folder = path.resolve(app.folder, app.typesFolder);
+      if (!pathIsInside(app.folder, folder)) continue;
+      addTypesPath(app.folder, folder);
+      if (this.session.structure === "tree") {
+        for (const { alias } of app.remotes) {
+          const target = path.resolve(folder, alias);
+          if (pathIsInside(folder, target)) addTypesPath(app.folder, target);
+        }
+      }
+    }
+    this.typesWatchPaths = paths;
+    const sorted = [...names].sort();
+    const pattern = !sorted.length
+      ? undefined
+      : sorted.some((name) => /[[\]{}*,?]/.test(name))
+        ? "**"
+        : sorted.length === 1
+          ? `**/${sorted[0]}`
+          : `**/{${sorted.join(",")}}`;
+    if (pattern === this.typesWatchPattern) return;
+    this.typesWatcher?.dispose();
+    this.typesWatchPattern = pattern;
+    this.typesWatcher = pattern ? vscode.workspace.createFileSystemWatcher(pattern) : undefined;
+    this.typesWatcher?.onDidCreate(this.typesDirectoryChanged);
+    this.typesWatcher?.onDidChange(this.typesDirectoryChanged);
+    this.typesWatcher?.onDidDelete(this.typesDirectoryChanged);
+  }
+
+  private typesWatchPath(file: string): string {
+    return process.platform === "linux" ? file : file.toLowerCase();
+  }
+
+  private readonly typesDirectoryChanged = (uri: vscode.Uri): void => {
+    if (this.typesWatchPending || !this.typesWatchPaths.has(this.typesWatchPath(uri.fsPath)))
+      return;
+    this.typesWatchPending = true;
+    queueMicrotask(() => {
+      this.typesWatchPending = false;
+      if (this.disposed) return;
+      this.watchTypesDirectories();
+      if (this.view && this.view.stamp !== this.typesStamp()) this.notify();
+    });
+  };
+
   private clearTypeCache(resetTypes = this.canCheckTypes()): void {
     this.observation.clear(
       resetTypes,
@@ -924,10 +1064,9 @@ export class MfDashboardProvider
           { allowDownload: false },
         );
         if (!this.canRefreshSavedTypes()) return;
-        this.observation.invalidateLinks(links.map(linkProbeId));
         this.observation.invalidateProducer(name);
         this.observation.apply(evidence);
-        this.notify();
+        if (this.observation.refreshLinks(links, false)) this.notify();
       }
     }).finally(() => {
       if (this.saveChecks.get(name) === check) this.saveChecks.delete(name);

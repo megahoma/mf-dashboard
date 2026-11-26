@@ -1,4 +1,5 @@
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import {
   describeLink,
   readInstalledEvidence,
@@ -78,6 +79,37 @@ export class DashboardTypeObservation {
     for (const id of ids) this.typeCache.delete(id);
   }
 
+  recordInstall(link: RemoteLink, zipHash: string): void {
+    const id = linkProbeId(link);
+    const previous = this.typeSnapshot(link)?.observation;
+    this.typeCache.set(id, {
+      observation: {
+        status: previous?.status === "stale-source" ? "stale-source" : "ok",
+        archiveMatch: "matches",
+        sourceFreshness:
+          this.session.book.links.get(id)?.zipHash === zipHash
+            ? (previous?.sourceFreshness ?? "unknown")
+            : "unknown",
+      },
+      checkedAt: Date.now(),
+      signature: this.typeSignature(link),
+    });
+  }
+
+  refreshLinks(links: readonly RemoteLink[], explicit: boolean): boolean {
+    let changed = false;
+    for (const link of links) {
+      const id = linkProbeId(link);
+      const previous = this.typeCache.get(id);
+      if ((!previous && !explicit) || !this.canCheck(link)) continue;
+      this.typeCache.delete(id);
+      this.detailsFor(link);
+      const next = this.typeCache.get(id);
+      changed ||= !isDeepStrictEqual(previous?.observation, next?.observation);
+    }
+    return changed;
+  }
+
   invalidateProducer(name: string): void {
     this.producerCache.delete(name);
     this.sourceErrors.delete(name);
@@ -85,6 +117,7 @@ export class DashboardTypeObservation {
 
   pruneLinks(active: ReadonlySet<string>): void {
     for (const id of this.typeCache.keys()) if (!active.has(id)) this.typeCache.delete(id);
+    for (const id of this.installChecks.keys()) if (!active.has(id)) this.installChecks.delete(id);
   }
 
   pruneWarnings(apps: readonly LocalApp[]): void {
