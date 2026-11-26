@@ -16,6 +16,7 @@ export type GenerationConfirmation = {
   sourceFingerprint: string;
   builtDependencyHashes: Record<string, string>;
   local?: { zipPath: string; inputsFingerprint: string };
+  builtAt?: number;
 };
 
 export type ConfirmationSnapshot = {
@@ -39,6 +40,7 @@ export type ConfirmationStore = {
     zipHash: string,
     builtDependencyHashes: Record<string, string>,
     local?: GenerationConfirmation["local"],
+    builtAt?: number,
   ): void;
   generationConfirmed(
     name: string,

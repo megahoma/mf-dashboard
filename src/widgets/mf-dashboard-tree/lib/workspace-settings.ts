@@ -18,6 +18,7 @@ export function readWorkspaceSettings(): WorkspaceSettings {
     config.get("probeIntervalMs"),
     WORKSPACE_DEFAULTS["mf-dashboard.probeIntervalMs"],
   );
+  const buildConcurrency = config.get<number>("types.buildConcurrency");
   return {
     apps: readConfiguredApps<AppSetting>(config),
     envMode: config.get<string>("envMode") ?? WORKSPACE_DEFAULTS["mf-dashboard.envMode"],
@@ -30,6 +31,15 @@ export function readWorkspaceSettings(): WorkspaceSettings {
     packageManager:
       config.get<string>("packageManager") ?? WORKSPACE_DEFAULTS["mf-dashboard.packageManager"],
     probeIntervalMs,
+    buildConcurrency:
+      typeof buildConcurrency === "number" &&
+      Number.isSafeInteger(buildConcurrency) &&
+      buildConcurrency >= 1
+        ? buildConcurrency
+        : WORKSPACE_DEFAULTS["mf-dashboard.types.buildConcurrency"],
+    useBuildCache:
+      config.get<boolean>("types.useBuildCache") ??
+      WORKSPACE_DEFAULTS["mf-dashboard.types.useBuildCache"],
     typesSettleMs: finiteNumber(
       config.get("typesSettleMs"),
       WORKSPACE_DEFAULTS["mf-dashboard.typesSettleMs"],

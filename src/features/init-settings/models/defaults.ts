@@ -11,6 +11,8 @@ export type WorkspaceDefaults = {
   "mf-dashboard.probeIntervalMs": number;
   "mf-dashboard.typesSettleMs": number;
   "mf-dashboard.types.autoCheck": boolean;
+  "mf-dashboard.types.buildConcurrency": number;
+  "mf-dashboard.types.useBuildCache": boolean;
   "mf-dashboard.terminal.reveal": boolean;
   "mf-dashboard.commands.rebuildTypes": string;
   "mf-dashboard.commands.refetchTypes": string;

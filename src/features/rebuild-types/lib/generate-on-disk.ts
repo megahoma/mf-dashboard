@@ -1,3 +1,8 @@
+import { lstatSync } from "node:fs";
+import { resolveTypesPath } from "../../../entities/federated-types/index.ts";
+import { assertTreeInside } from "../../../entities/federated-types/lib/types-tree.ts";
+import { pathIsInside } from "../../../shared/lib/paths.ts";
+import { DiagnosticError } from "../../../shared/models/diagnostic-error.ts";
 import type { CompilerInputs } from "../models/compiler-inputs.ts";
 import type {
   GenerationRequest,
@@ -32,7 +37,35 @@ export async function generateTypesOnDisk(
     input,
     zipPath,
     inputs,
-    () => generate(measure),
+    async () => {
+      if (input.parallel) {
+        try {
+          if (remote?.afterGenerate) throw new Error("afterGenerate needs exclusive access");
+          if (!inputs?.writePaths) throw new Error("Compiler write paths unavailable");
+          const { paths, declarationTrees } = await inputs.writePaths();
+          for (const file of [zipPath, ...paths]) {
+            const resolved = resolveTypesPath(input.appDir, file);
+            const stat = lstatSync(resolved, { throwIfNoEntry: false });
+            if (stat?.isFile() && stat.nlink > 1) throw new Error("Shared output file");
+          }
+          const roots = [
+            ...new Set(declarationTrees.map((dir) => resolveTypesPath(input.appDir, dir))),
+          ];
+          for (const root of roots) {
+            if (roots.some((parent) => parent !== root && pathIsInside(parent, root))) continue;
+            if (lstatSync(root, { throwIfNoEntry: false }))
+              assertTreeInside(root, { rejectHardLinks: true });
+          }
+        } catch (cause) {
+          throw new DiagnosticError(
+            "Type generation needs exclusive access",
+            { stage: "generation", reason: "parallel-output" },
+            { cause },
+          );
+        }
+      }
+      return generate(measure);
+    },
     measure,
   );
   return { archive, port };

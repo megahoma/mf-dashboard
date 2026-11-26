@@ -46,13 +46,14 @@ export function createConfirmationStore(snapshot?: ConfirmationSnapshot): Confir
       const record = generations.get(name);
       return record ? copyGeneration(record) : null;
     },
-    saveGeneration(name, sourceFingerprint, zipHash, builtDependencyHashes, local) {
+    saveGeneration(name, sourceFingerprint, zipHash, builtDependencyHashes, local, builtAt) {
       generations.set(name, {
         name,
         sourceFingerprint,
         zipHash,
         builtDependencyHashes: { ...builtDependencyHashes },
         ...(local && { local: { ...local } }),
+        ...(builtAt !== undefined && { builtAt }),
       });
     },
     generationConfirmed(name, sourceFingerprint, zipHash, builtDependencyHashes) {
