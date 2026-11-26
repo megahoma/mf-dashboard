@@ -7,8 +7,8 @@ import {
   manifestTooltipLines,
   remoteLink,
   remoteLinkKey,
+  type ArtifactProbe,
   type LocalApp,
-  type ManifestModules,
 } from "../../../entities/microfrontend/index.ts";
 import {
   classify,
@@ -17,6 +17,7 @@ import {
   type ProblemDraft,
   type StatusInput,
 } from "../../../entities/status/index.ts";
+import { localManifestUrl } from "../../../shared/lib/urls.ts";
 import type { DashboardNode, DashboardView } from "../models/presentation.ts";
 import { withActionTokens } from "./targets.ts";
 
@@ -42,9 +43,12 @@ function hostLabel(url: string): string {
 export function dashboardNodes(view: DashboardView): DashboardNode[] {
   const byName = appsByName(view.loaded);
   const expanded = new Set<string>();
-  const roots = rootApps(view.loaded, byName, view.structure).map((item) =>
-    appNode(view, item, byName, expanded),
-  );
+  const apps = rootApps(view.loaded, byName, view.structure);
+  if (view.structure === "flat" && view.flatSort === "port") {
+    const unknownPort = Number.MAX_SAFE_INTEGER;
+    apps.sort((left, right) => (left.port ?? unknownPort) - (right.port ?? unknownPort));
+  }
+  const roots = apps.map((item) => appNode(view, item, byName, expanded));
   for (const url of view.extraUrls) roots.push(extraNode(view, url));
   return roots;
 }
@@ -98,20 +102,18 @@ function appNode(
       role: "app",
       port: app.port,
       portOpen: probe?.portOpen ?? false,
+      checking: view.probeRunning && !probe && app.port !== null,
       manifestEnabled: app.manifest,
       buildVersion: probe?.buildVersion ?? null,
       requestFailure: probe?.requestFailure,
-      url: null,
+      url: app.manifest && app.port !== null ? localManifestUrl(app.port, app.manifestPath) : null,
       typesState: "none",
       folder: app.folder,
     },
     false,
     null,
     app.name,
-    {
-      exposes: probe?.exposes ?? [],
-      shared: probe?.shared ?? [],
-    },
+    probe,
   );
   return {
     id: `app:${app.name}`,
@@ -131,6 +133,10 @@ function appNode(
   };
 }
 
+function manifestAnswers(probe: ArtifactProbe | undefined): boolean {
+  return probe?.manifestReachable === true && probe.manifestValid !== false;
+}
+
 function linkStatusInput(
   view: DashboardView,
   parent: LocalApp,
@@ -143,21 +149,24 @@ function linkStatusInput(
   const local = producer !== undefined && producer.port !== null;
   if (local) {
     const producerProbe = view.book.apps.get(appProbeId(producer.name));
+    const checking = view.probeRunning && !producerProbe;
     return {
       role: "link",
       port: producer.port,
       portOpen: producerProbe?.portOpen ?? false,
+      checking,
       manifestEnabled: producer.manifest,
       buildVersion: producerProbe?.buildVersion ?? null,
       requestFailure: probe?.requestFailure,
       url: remote.url,
-      typesState: view.typesForLink(link),
+      typesState: checking ? "none" : view.typesForLink(link),
     };
   }
   return {
     role: "external",
     port: null,
-    portOpen: probe?.manifestReachable ?? false,
+    portOpen: manifestAnswers(probe),
+    checking: view.probeRunning && !probe && remote.url !== null,
     manifestEnabled: true,
     buildVersion: probe?.buildVersion ?? null,
     requestFailure: probe?.requestFailure,
@@ -171,7 +180,8 @@ function extraStatusInput(view: DashboardView, url: string): StatusInput {
   return {
     role: "external",
     port: null,
-    portOpen: result?.manifestReachable ?? false,
+    portOpen: manifestAnswers(result),
+    checking: view.probeRunning && !result,
     manifestEnabled: true,
     buildVersion: result?.buildVersion ?? null,
     requestFailure: result?.requestFailure,
@@ -194,10 +204,7 @@ function linkNode(
   const producer = byName.get(remote.name);
   const input = producer ? { ...status, folder: producer.folder } : status;
   const linkId = remoteLinkKey(link);
-  const row = model(view, input, view.pending.has(linkId), linkId, remote.name, {
-    exposes: linkProbe?.exposes ?? [],
-    shared: linkProbe?.shared ?? [],
-  });
+  const row = model(view, input, view.pending.has(linkId), linkId, remote.name, linkProbe);
   if (producer?.port === null) {
     row.description += ` · ${view.terms.unknownPort}`;
     row.tooltip += `\n${view.terms.unknownPort}`;
@@ -233,10 +240,7 @@ function linkNode(
 function extraNode(view: DashboardView, url: string): DashboardNode {
   const result = view.book.extras.get(externalManifestId(url));
   const input: StatusInput = extraStatusInput(view, url);
-  const row = model(view, input, false, null, hostLabel(url), {
-    exposes: result?.exposes ?? [],
-    shared: result?.shared ?? [],
-  });
+  const row = model(view, input, false, null, hostLabel(url), result);
   return {
     id: `extra:${url}`,
     name: hostLabel(url),
@@ -256,40 +260,39 @@ function model(
   pending: boolean,
   linkId: string | null,
   name: string,
-  modules: ManifestModules = { exposes: [], shared: [] },
-): Pick<DashboardNode, "kind" | "description" | "tooltip" | "contextValue"> {
-  const row = rowModel(input, view.terms);
-  const contextValue = rowContextValue(row.kind, pending);
+  probe: ArtifactProbe | undefined,
+): Pick<DashboardNode, "kind" | "description" | "tooltip" | "contextValue" | "manifest"> {
+  const row = rowModel({ ...input, typesState: "none" }, view.terms);
+  const contextValue = rowContextValue(classify(input), pending);
   let tooltip = row.tooltip;
   if (input.role === "external" && !input.folder)
     tooltip = `${view.terms.folder}: ${view.terms.noWorkspace}\n${tooltip}`;
-  if (
-    input.role === "link" &&
-    (row.kind === "silent" || input.typesState === "changed" || input.typesState === "unchecked")
-  ) {
-    const labels = {
-      none: view.terms.typesDisabled,
-      ok: view.terms.typesCurrent,
-      "stale-source": view.terms.stale,
-      unfetched: view.terms.unfetched,
-      changed: view.terms.typesChanged,
-      manual: view.terms.typesManual,
-      unknown: view.terms.typesUnknown,
-      unchecked: view.terms.typesUnchecked,
-    };
-    const label = `@mf-types: ${labels[input.typesState]}`;
-    row.description = `${row.description} · ${label}`;
-    tooltip = `${tooltip}\n${label}`;
-  }
-  if (input.role === "link" && row.kind !== "silent" && input.typesState === "unknown")
-    tooltip = `${tooltip}\n${view.terms.typesUnknown}`;
-  if (input.role === "link" && row.kind !== "silent" && input.typesState === "none")
-    tooltip = `${tooltip}\n${view.terms.typesDisabled}`;
+  if (input.typesState === "changed") tooltip = `${tooltip}\n${view.terms.typesChanged}`;
   if (contextValue === "unfetched.pending") tooltip = `${tooltip}\n${view.terms.refetchPending}`;
   if (linkId && view.refetchErrors.has(linkId)) tooltip = `${tooltip}\n${view.terms.refetchFailed}`;
   if (view.scriptGaps.has(name)) tooltip = `${tooltip}\n${view.terms.scriptMissing}`;
   const rebuildError = view.rebuildErrors.get(name);
   if (rebuildError) tooltip = `${tooltip}\n${rebuildError}`;
-  for (const line of manifestTooltipLines(modules, view.terms)) tooltip = `${tooltip}\n${line}`;
-  return { kind: row.kind, description: row.description, tooltip, contextValue };
+  if (probe) {
+    for (const line of manifestTooltipLines(probe, view.terms)) tooltip = `${tooltip}\n${line}`;
+  }
+  const { terms } = view;
+  const urlIssue = row.urlIssue ?? (probe?.manifestValid === false ? terms.invalidManifest : null);
+  const status =
+    urlIssue || probe?.manifestReachable === false
+      ? "noAnswer"
+      : manifestAnswers(probe)
+        ? "answers"
+        : input.checking
+          ? "checking"
+          : "unchecked";
+  const manifest =
+    input.url || urlIssue
+      ? ({
+          url: input.url?.trim() || null,
+          status,
+          label: urlIssue ?? (status === "unchecked" ? terms.urlUnchecked : terms[status]),
+        } as const)
+      : undefined;
+  return { kind: row.kind, description: row.description, tooltip, contextValue, manifest };
 }

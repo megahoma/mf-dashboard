@@ -114,7 +114,8 @@ export async function indexComparisonArchive(bytes: Uint8Array): Promise<Compari
       // Keep the index shared so every consumer can compare against it without copying ZIP names.
       const entryIndex = new Uint8Array(new SharedArrayBuffer(encoded.length));
       entryIndex.set(encoded);
-      return { fileCount: entries.size, entryIndex };
+      const contentHash = sha256(JSON.stringify([...entries].sort(([a], [b]) => (a < b ? -1 : 1))));
+      return { fileCount: entries.size, contentHash, entryIndex };
     } finally {
       archive.close();
     }

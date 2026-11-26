@@ -24,7 +24,7 @@ function statusLabel(status: RebuildAppStatus["status"], t: Translate): string {
     case "rebuilt":
       return t("Rebuilt");
     case "current":
-      return t("Up to date");
+      return t("No rebuild needed");
     case "installed":
       return t("Installed");
     case "skipped":
@@ -46,6 +46,12 @@ const icons = {
   failed: "error",
   "not-applicable": "circle-slash",
 } satisfies Record<RebuildAppStatus["status"], string>;
+
+const buildTasks = {
+  generate: { icon: "package", tooltip: "Generates @mf-types for exposed modules." },
+  install: { icon: "arrow-down", tooltip: "Installs @mf-types from dependencies." },
+  both: { icon: "arrow-swap", tooltip: "Installs dependency types and generates @mf-types." },
+} as const;
 
 function position(problem: SourceProblem): vscode.Range {
   const line = problem.line - 1;
@@ -71,14 +77,20 @@ export class TypesBuildView implements vscode.TreeDataProvider<Row>, vscode.Disp
   private structure: "flat" | "tree" = "tree";
   private roots: AppRow[] = [];
   private workspaceApps = new Map<string, LocalApp>();
-  private targets = new Set<string>();
+  private tasksByApp = new Map<string, keyof typeof buildTasks>();
   private readonly rowsByApp = new Map<string, AppRow[]>();
   private running = false;
   private error: string | undefined;
   private t: Translate;
+  private onFirstRootRead?: () => void;
 
-  constructor(previous?: TypesBuildSnapshot, t: Translate = vscode.l10n.t) {
+  constructor(
+    previous?: TypesBuildSnapshot,
+    t: Translate = vscode.l10n.t,
+    onFirstRootRead?: () => void,
+  ) {
     this.t = t;
+    this.onFirstRootRead = onFirstRootRead;
     for (const app of previous?.apps ?? []) this.apps.set(app.settingsKey ?? app.app, app);
     this.error = previous?.error;
   }
@@ -110,7 +122,12 @@ export class TypesBuildView implements vscode.TreeDataProvider<Row>, vscode.Disp
       if (topologyChanged) {
         this.workspaceKey = key;
         this.workspaceApps = new Map(loaded.map((app) => [app.settingsKey ?? app.name, app]));
-        this.targets = new Set(workspaceTypesPlan(loaded).order.map(({ app }) => app.name));
+        this.tasksByApp = new Map(
+          workspaceTypesPlan(loaded).order.map(({ app, generate, links }) => [
+            app.name,
+            generate ? (links.length ? "both" : "generate") : "install",
+          ]),
+        );
       }
     }
     if (!topologyChanged && structure === this.structure) return;
@@ -156,7 +173,7 @@ export class TypesBuildView implements vscode.TreeDataProvider<Row>, vscode.Disp
   targetFor(row?: Row): AppTarget | undefined {
     if (!row || !("app" in row)) return;
     const app = this.workspaceApps.get(row.settingsKey ?? row.app);
-    if (app?.name === row.app && this.targets.has(app.name))
+    if (app?.name === row.app && this.tasksByApp.has(app.name))
       return { app: app.name, settingsKey: app.settingsKey };
   }
 
@@ -218,6 +235,10 @@ export class TypesBuildView implements vscode.TreeDataProvider<Row>, vscode.Disp
 
   getChildren(row?: Row): Row[] {
     if (!row) {
+      if (this.loaded.length && this.onFirstRootRead) {
+        this.onFirstRootRead();
+        this.onFirstRootRead = undefined;
+      }
       const apps = [...this.roots];
       for (const result of this.sortedApps()) {
         const key = result.settingsKey ?? result.app;
@@ -252,8 +273,12 @@ export class TypesBuildView implements vscode.TreeDataProvider<Row>, vscode.Disp
   getTreeItem(row: Row): vscode.TreeItem {
     if ("app" in row) {
       const result = this.resultFor(row);
+      const target = this.targetFor(row);
+      const task = target && this.tasksByApp.get(target.app);
+      const planned = task && buildTasks[task];
+      const label = appLabel(row);
       const item = new vscode.TreeItem(
-        appLabel(row),
+        label,
         row.expandByDefault
           ? vscode.TreeItemCollapsibleState.Expanded
           : row.children?.length ||
@@ -265,9 +290,15 @@ export class TypesBuildView implements vscode.TreeDataProvider<Row>, vscode.Disp
       );
       item.id = row.id ?? `types:${row.settingsKey ?? row.app}`;
       item.description = result ? statusLabel(result.status, this.t) : this.t("Not built yet");
-      item.iconPath = new vscode.ThemeIcon(result ? icons[result.status] : "package");
-      item.tooltip = result?.reason;
-      if (this.targetFor(row)) item.contextValue = "typesBuildApp";
+      item.iconPath = new vscode.ThemeIcon(
+        result ? icons[result.status] : (planned?.icon ?? icons["not-applicable"]),
+      );
+      item.tooltip =
+        result?.reason ?? (!result ? this.t(planned?.tooltip ?? "No types to update") : undefined);
+      item.accessibilityInformation = {
+        label: [label, item.description, item.tooltip].filter(Boolean).join(", "),
+      };
+      if (target) item.contextValue = "typesBuildApp";
       return item;
     }
     const item = new vscode.TreeItem(row.label);

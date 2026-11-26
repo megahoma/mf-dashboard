@@ -34,42 +34,117 @@
           "id": "mf-dashboard",
           "name": "%view.title%",
           "icon": "media/mf-dashboard.svg",
-          "when": "!mf-dashboard.discovering",
+          "when": "!mf-dashboard.searching && !mf-dashboard.welcomeVisible",
+          "initialSize": 3
+        },
+        {
+          "id": "mf-dashboard.welcome",
+          "name": "%view.title%",
+          "type": "webview",
+          "when": "!mf-dashboard.searching && mf-dashboard.welcomeVisible",
           "initialSize": 3
         },
         {
           "id": "mf-dashboard.discovery",
           "name": "%view.title%",
           "icon": "media/mf-dashboard.svg",
-          "when": "mf-dashboard.discovering",
+          "when": "mf-dashboard.searching",
           "initialSize": 3
         },
         {
           "id": "mf-dashboard.details",
           "name": "%view.details%",
           "type": "webview",
+          "when": "!mf-dashboard.searching && !mf-dashboard.welcomeVisible && config.mf-dashboard.language != en && config.mf-dashboard.language != ru",
+          "visibility": "collapsed",
+          "initialSize": 1
+        },
+        {
+          "id": "mf-dashboard.details.en",
+          "name": "Details",
+          "type": "webview",
+          "when": "!mf-dashboard.searching && !mf-dashboard.welcomeVisible && config.mf-dashboard.language == en",
+          "visibility": "collapsed",
+          "initialSize": 1
+        },
+        {
+          "id": "mf-dashboard.details.ru",
+          "name": "Подробности",
+          "type": "webview",
+          "when": "!mf-dashboard.searching && !mf-dashboard.welcomeVisible && config.mf-dashboard.language == ru",
+          "visibility": "collapsed",
           "initialSize": 1
         },
         {
           "id": "mf-dashboard.typesBuild",
           "name": "%view.typesBuild%",
-          "when": "mf-dashboard.typesVisible",
+          "when": "mf-dashboard.appsVisible",
+          "visibility": "collapsed",
           "initialSize": 1
         }
       ]
     },
-    "viewsWelcome": [
+    "commands": [
       {
-        "view": "mf-dashboard",
-        "contents": "%viewsWelcome.contents%",
-        "when": "!mf-dashboard.discovering"
+        "command": "mf-dashboard.sortByName",
+        "title": "%command.sortByName%",
+        "enablement": "mf-dashboard.flat && !mf-dashboard.discovering"
       },
       {
-        "view": "mf-dashboard.typesBuild",
-        "contents": "%viewsWelcome.typesBuild%"
-      }
-    ],
-    "commands": [
+        "command": "mf-dashboard.sortByNameChecked",
+        "title": "%command.sortByNameChecked%",
+        "enablement": "mf-dashboard.flat && !mf-dashboard.discovering"
+      },
+      {
+        "command": "mf-dashboard.sortByPort",
+        "title": "%command.sortByPort%",
+        "enablement": "mf-dashboard.flat && !mf-dashboard.discovering"
+      },
+      {
+        "command": "mf-dashboard.sortByPortChecked",
+        "title": "%command.sortByPortChecked%",
+        "enablement": "mf-dashboard.flat && !mf-dashboard.discovering"
+      },
+      {
+        "command": "mf-dashboard.sortByName.en",
+        "title": "Sort by name",
+        "enablement": "mf-dashboard.flat && !mf-dashboard.discovering"
+      },
+      {
+        "command": "mf-dashboard.sortByNameChecked.en",
+        "title": "✓ Sort by name",
+        "enablement": "mf-dashboard.flat && !mf-dashboard.discovering"
+      },
+      {
+        "command": "mf-dashboard.sortByPort.en",
+        "title": "Sort by port",
+        "enablement": "mf-dashboard.flat && !mf-dashboard.discovering"
+      },
+      {
+        "command": "mf-dashboard.sortByPortChecked.en",
+        "title": "✓ Sort by port",
+        "enablement": "mf-dashboard.flat && !mf-dashboard.discovering"
+      },
+      {
+        "command": "mf-dashboard.sortByName.ru",
+        "title": "Сортировать по названию",
+        "enablement": "mf-dashboard.flat && !mf-dashboard.discovering"
+      },
+      {
+        "command": "mf-dashboard.sortByNameChecked.ru",
+        "title": "✓ Сортировать по названию",
+        "enablement": "mf-dashboard.flat && !mf-dashboard.discovering"
+      },
+      {
+        "command": "mf-dashboard.sortByPort.ru",
+        "title": "Сортировать по порту",
+        "enablement": "mf-dashboard.flat && !mf-dashboard.discovering"
+      },
+      {
+        "command": "mf-dashboard.sortByPortChecked.ru",
+        "title": "✓ Сортировать по порту",
+        "enablement": "mf-dashboard.flat && !mf-dashboard.discovering"
+      },
       {
         "command": "mf-dashboard.checkTypes",
         "title": "%command.checkTypes%",
@@ -84,7 +159,7 @@
       {
         "command": "mf-dashboard.discover",
         "title": "%command.discover%",
-        "icon": "$(search)",
+        "icon": "$(repo)",
         "enablement": "!mf-dashboard.discovering"
       },
       {
@@ -118,7 +193,7 @@
         "command": "mf-dashboard.openTypesBuildReport",
         "title": "%command.openTypesBuildReport%",
         "icon": "$(output)",
-        "enablement": "mf-dashboard.typesVisible"
+        "enablement": "mf-dashboard.appsVisible"
       },
       {
         "command": "mf-dashboard.useFlat",
@@ -161,6 +236,220 @@
         "command": "mf-dashboard.typesUseTree",
         "title": "%command.useTree%",
         "icon": "$(list-tree)"
+      },
+      {
+        "command": "mf-dashboard.checkTypes.en",
+        "title": "Check @mf-types",
+        "icon": "$(refresh)",
+        "category": "%viewContainer.title%"
+      },
+      {
+        "command": "mf-dashboard.checkTypes.ru",
+        "title": "Проверить @mf-types",
+        "icon": "$(refresh)",
+        "category": "%viewContainer.title%"
+      },
+      {
+        "command": "mf-dashboard.rebuildTypes.en",
+        "title": "Rebuild types",
+        "icon": "$(tools)"
+      },
+      {
+        "command": "mf-dashboard.rebuildTypes.ru",
+        "title": "Сгенерировать типы",
+        "icon": "$(tools)"
+      },
+      {
+        "command": "mf-dashboard.refetchTypes.en",
+        "title": "Fetch @mf-types",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "mf-dashboard.refetchTypes.ru",
+        "title": "Загрузить @mf-types",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "mf-dashboard.openConfig.en",
+        "title": "Open config"
+      },
+      {
+        "command": "mf-dashboard.openConfig.ru",
+        "title": "Открыть конфиг"
+      },
+      {
+        "command": "mf-dashboard.openProducerConfig.en",
+        "title": "Open producer config"
+      },
+      {
+        "command": "mf-dashboard.openProducerConfig.ru",
+        "title": "Открыть конфиг производителя"
+      },
+      {
+        "command": "mf-dashboard.revealTypes.en",
+        "title": "Reveal types"
+      },
+      {
+        "command": "mf-dashboard.revealTypes.ru",
+        "title": "Показать типы"
+      },
+      {
+        "command": "mf-dashboard.openManifest.en",
+        "title": "Open manifest"
+      },
+      {
+        "command": "mf-dashboard.openManifest.ru",
+        "title": "Открыть манифест"
+      },
+      {
+        "command": "mf-dashboard.refresh.en",
+        "title": "Check ports, manifests and @mf-types for known microfrontends",
+        "icon": "$(refresh)",
+        "enablement": "!mf-dashboard.discovering",
+        "category": "%viewContainer.title%"
+      },
+      {
+        "command": "mf-dashboard.refresh.ru",
+        "title": "Проверить порты, манифесты и @mf-types известных микрофронтов",
+        "icon": "$(refresh)",
+        "enablement": "!mf-dashboard.discovering",
+        "category": "%viewContainer.title%"
+      },
+      {
+        "command": "mf-dashboard.discover.en",
+        "title": "Scan the workspace and update the microfrontend graph",
+        "icon": "$(repo)",
+        "enablement": "!mf-dashboard.discovering",
+        "category": "%viewContainer.title%"
+      },
+      {
+        "command": "mf-dashboard.discover.ru",
+        "title": "Сканировать проект и обновить граф микрофронтов",
+        "icon": "$(repo)",
+        "enablement": "!mf-dashboard.discovering",
+        "category": "%viewContainer.title%"
+      },
+      {
+        "command": "mf-dashboard.useFlat.en",
+        "title": "Show as a flat list",
+        "icon": "$(list-flat)",
+        "enablement": "!mf-dashboard.discovering",
+        "category": "%viewContainer.title%"
+      },
+      {
+        "command": "mf-dashboard.useFlat.ru",
+        "title": "Показывать плоским списком",
+        "icon": "$(list-flat)",
+        "enablement": "!mf-dashboard.discovering",
+        "category": "%viewContainer.title%"
+      },
+      {
+        "command": "mf-dashboard.useTree.en",
+        "title": "Show dependencies as a tree",
+        "icon": "$(list-tree)",
+        "enablement": "!mf-dashboard.discovering",
+        "category": "%viewContainer.title%"
+      },
+      {
+        "command": "mf-dashboard.useTree.ru",
+        "title": "Показать зависимости деревом",
+        "icon": "$(list-tree)",
+        "enablement": "!mf-dashboard.discovering",
+        "category": "%viewContainer.title%"
+      },
+      {
+        "command": "mf-dashboard.rebuildAllTypes.en",
+        "title": "Update @mf-types across the workspace",
+        "icon": "$(package)",
+        "enablement": "isWorkspaceTrusted && mf-dashboard.canUpdateTypes",
+        "category": "%viewContainer.title%"
+      },
+      {
+        "command": "mf-dashboard.rebuildAllTypes.ru",
+        "title": "Обновить @mf-types во всём проекте",
+        "icon": "$(package)",
+        "enablement": "isWorkspaceTrusted && mf-dashboard.canUpdateTypes",
+        "category": "%viewContainer.title%"
+      },
+      {
+        "command": "mf-dashboard.start.en",
+        "title": "Start this microfrontend's local dev server",
+        "icon": "$(play)"
+      },
+      {
+        "command": "mf-dashboard.start.ru",
+        "title": "Запустить локальный dev-сервер этого микрофронта",
+        "icon": "$(play)"
+      },
+      {
+        "command": "mf-dashboard.typesUseFlat.en",
+        "title": "Show as a flat list",
+        "icon": "$(list-flat)"
+      },
+      {
+        "command": "mf-dashboard.typesUseFlat.ru",
+        "title": "Показывать плоским списком",
+        "icon": "$(list-flat)"
+      },
+      {
+        "command": "mf-dashboard.typesUseTree.en",
+        "title": "Show dependencies as a tree",
+        "icon": "$(list-tree)"
+      },
+      {
+        "command": "mf-dashboard.typesUseTree.ru",
+        "title": "Показать зависимости деревом",
+        "icon": "$(list-tree)"
+      },
+      {
+        "command": "mf-dashboard.openTypesBuildReport.en",
+        "title": "Show results from the last @mf-types update",
+        "icon": "$(output)",
+        "enablement": "mf-dashboard.appsVisible",
+        "category": "%viewContainer.title%"
+      },
+      {
+        "command": "mf-dashboard.openTypesBuildReport.ru",
+        "title": "Показать результаты последнего обновления @mf-types",
+        "icon": "$(output)",
+        "enablement": "mf-dashboard.appsVisible",
+        "category": "%viewContainer.title%"
+      },
+      {
+        "command": "mf-dashboard.rebuildAppTypes.en",
+        "title": "Rebuild @mf-types for this microfrontend",
+        "icon": "$(tools)",
+        "enablement": "isWorkspaceTrusted && mf-dashboard.canUpdateTypes"
+      },
+      {
+        "command": "mf-dashboard.rebuildAppTypes.ru",
+        "title": "Пересобрать @mf-types этого микрофронта",
+        "icon": "$(tools)",
+        "enablement": "isWorkspaceTrusted && mf-dashboard.canUpdateTypes"
+      },
+      {
+        "command": "mf-dashboard.showLogs.en",
+        "title": "Show logs",
+        "category": "%viewContainer.title%"
+      },
+      {
+        "command": "mf-dashboard.showLogs.ru",
+        "title": "Показать логи",
+        "category": "%viewContainer.title%"
+      }
+    ],
+    "submenus": [
+      {
+        "id": "mf-dashboard.viewSort",
+        "label": "%menu.viewSort%"
+      },
+      {
+        "id": "mf-dashboard.viewSort.en",
+        "label": "View & Sort"
+      },
+      {
+        "id": "mf-dashboard.viewSort.ru",
+        "label": "Вид и сортировка"
       }
     ],
     "menus": {
@@ -178,10 +467,6 @@
           "when": "false"
         },
         {
-          "command": "mf-dashboard.checkTypes",
-          "when": "!mf-dashboard.discovering && config.mf-dashboard.types.autoCheck == false"
-        },
-        {
           "command": "mf-dashboard.openConfig",
           "when": "false"
         },
@@ -208,99 +493,614 @@
         {
           "command": "mf-dashboard.rebuildAppTypes",
           "when": "false"
+        },
+        {
+          "command": "mf-dashboard.rebuildTypes.en",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.rebuildTypes.ru",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.refetchTypes.en",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.refetchTypes.ru",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.openConfig.en",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.openConfig.ru",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.openProducerConfig.en",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.openProducerConfig.ru",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.revealTypes.en",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.revealTypes.ru",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.openManifest.en",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.openManifest.ru",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.start.en",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.start.ru",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.refresh",
+          "when": "config.mf-dashboard.language != en && config.mf-dashboard.language != ru"
+        },
+        {
+          "command": "mf-dashboard.refresh.en",
+          "when": "config.mf-dashboard.language == en"
+        },
+        {
+          "command": "mf-dashboard.refresh.ru",
+          "when": "config.mf-dashboard.language == ru"
+        },
+        {
+          "command": "mf-dashboard.discover",
+          "when": "config.mf-dashboard.language != en && config.mf-dashboard.language != ru"
+        },
+        {
+          "command": "mf-dashboard.discover.en",
+          "when": "config.mf-dashboard.language == en"
+        },
+        {
+          "command": "mf-dashboard.discover.ru",
+          "when": "config.mf-dashboard.language == ru"
+        },
+        {
+          "command": "mf-dashboard.sortByName",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.sortByNameChecked",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.sortByPort",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.sortByPortChecked",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.sortByName.en",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.sortByNameChecked.en",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.sortByPort.en",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.sortByPortChecked.en",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.sortByName.ru",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.sortByNameChecked.ru",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.sortByPort.ru",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.sortByPortChecked.ru",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.useFlat",
+          "when": "config.mf-dashboard.language != en && config.mf-dashboard.language != ru"
+        },
+        {
+          "command": "mf-dashboard.useFlat.en",
+          "when": "config.mf-dashboard.language == en"
+        },
+        {
+          "command": "mf-dashboard.useFlat.ru",
+          "when": "config.mf-dashboard.language == ru"
+        },
+        {
+          "command": "mf-dashboard.useTree",
+          "when": "config.mf-dashboard.language != en && config.mf-dashboard.language != ru"
+        },
+        {
+          "command": "mf-dashboard.useTree.en",
+          "when": "config.mf-dashboard.language == en"
+        },
+        {
+          "command": "mf-dashboard.useTree.ru",
+          "when": "config.mf-dashboard.language == ru"
+        },
+        {
+          "command": "mf-dashboard.rebuildAllTypes",
+          "when": "config.mf-dashboard.language != en && config.mf-dashboard.language != ru"
+        },
+        {
+          "command": "mf-dashboard.rebuildAllTypes.en",
+          "when": "config.mf-dashboard.language == en"
+        },
+        {
+          "command": "mf-dashboard.rebuildAllTypes.ru",
+          "when": "config.mf-dashboard.language == ru"
+        },
+        {
+          "command": "mf-dashboard.checkTypes",
+          "when": "!mf-dashboard.discovering && config.mf-dashboard.types.autoCheck == false && config.mf-dashboard.language != en && config.mf-dashboard.language != ru"
+        },
+        {
+          "command": "mf-dashboard.checkTypes.en",
+          "when": "!mf-dashboard.discovering && config.mf-dashboard.types.autoCheck == false && config.mf-dashboard.language == en"
+        },
+        {
+          "command": "mf-dashboard.checkTypes.ru",
+          "when": "!mf-dashboard.discovering && config.mf-dashboard.types.autoCheck == false && config.mf-dashboard.language == ru"
+        },
+        {
+          "command": "mf-dashboard.openTypesBuildReport",
+          "when": "config.mf-dashboard.language != en && config.mf-dashboard.language != ru"
+        },
+        {
+          "command": "mf-dashboard.openTypesBuildReport.en",
+          "when": "config.mf-dashboard.language == en"
+        },
+        {
+          "command": "mf-dashboard.openTypesBuildReport.ru",
+          "when": "config.mf-dashboard.language == ru"
+        },
+        {
+          "command": "mf-dashboard.showLogs",
+          "when": "config.mf-dashboard.language != en && config.mf-dashboard.language != ru"
+        },
+        {
+          "command": "mf-dashboard.showLogs.en",
+          "when": "config.mf-dashboard.language == en"
+        },
+        {
+          "command": "mf-dashboard.showLogs.ru",
+          "when": "config.mf-dashboard.language == ru"
+        },
+        {
+          "command": "mf-dashboard.typesUseFlat.en",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.typesUseFlat.ru",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.typesUseTree.en",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.typesUseTree.ru",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.rebuildAppTypes.en",
+          "when": "false"
+        },
+        {
+          "command": "mf-dashboard.rebuildAppTypes.ru",
+          "when": "false"
+        }
+      ],
+      "mf-dashboard.viewSort": [
+        {
+          "command": "mf-dashboard.useFlat",
+          "when": "!mf-dashboard.flat",
+          "group": "1_view"
+        },
+        {
+          "command": "mf-dashboard.useTree",
+          "when": "mf-dashboard.flat",
+          "group": "1_view"
+        },
+        {
+          "command": "mf-dashboard.sortByName",
+          "group": "2_sort@1",
+          "when": "mf-dashboard.flatSort != name"
+        },
+        {
+          "command": "mf-dashboard.sortByNameChecked",
+          "group": "2_sort@1",
+          "when": "mf-dashboard.flatSort == name"
+        },
+        {
+          "command": "mf-dashboard.sortByPort",
+          "group": "2_sort@2",
+          "when": "mf-dashboard.flatSort != port"
+        },
+        {
+          "command": "mf-dashboard.sortByPortChecked",
+          "group": "2_sort@2",
+          "when": "mf-dashboard.flatSort == port"
+        }
+      ],
+      "mf-dashboard.viewSort.en": [
+        {
+          "command": "mf-dashboard.useFlat.en",
+          "when": "!mf-dashboard.flat",
+          "group": "1_view"
+        },
+        {
+          "command": "mf-dashboard.useTree.en",
+          "when": "mf-dashboard.flat",
+          "group": "1_view"
+        },
+        {
+          "command": "mf-dashboard.sortByName.en",
+          "group": "2_sort@1",
+          "when": "mf-dashboard.flatSort != name"
+        },
+        {
+          "command": "mf-dashboard.sortByNameChecked.en",
+          "group": "2_sort@1",
+          "when": "mf-dashboard.flatSort == name"
+        },
+        {
+          "command": "mf-dashboard.sortByPort.en",
+          "group": "2_sort@2",
+          "when": "mf-dashboard.flatSort != port"
+        },
+        {
+          "command": "mf-dashboard.sortByPortChecked.en",
+          "group": "2_sort@2",
+          "when": "mf-dashboard.flatSort == port"
+        }
+      ],
+      "mf-dashboard.viewSort.ru": [
+        {
+          "command": "mf-dashboard.useFlat.ru",
+          "when": "!mf-dashboard.flat",
+          "group": "1_view"
+        },
+        {
+          "command": "mf-dashboard.useTree.ru",
+          "when": "mf-dashboard.flat",
+          "group": "1_view"
+        },
+        {
+          "command": "mf-dashboard.sortByName.ru",
+          "group": "2_sort@1",
+          "when": "mf-dashboard.flatSort != name"
+        },
+        {
+          "command": "mf-dashboard.sortByNameChecked.ru",
+          "group": "2_sort@1",
+          "when": "mf-dashboard.flatSort == name"
+        },
+        {
+          "command": "mf-dashboard.sortByPort.ru",
+          "group": "2_sort@2",
+          "when": "mf-dashboard.flatSort != port"
+        },
+        {
+          "command": "mf-dashboard.sortByPortChecked.ru",
+          "group": "2_sort@2",
+          "when": "mf-dashboard.flatSort == port"
         }
       ],
       "view/title": [
         {
+          "submenu": "mf-dashboard.viewSort",
+          "when": "view == mf-dashboard && !mf-dashboard.discovering && config.mf-dashboard.language != en && config.mf-dashboard.language != ru",
+          "group": "1_layout"
+        },
+        {
+          "submenu": "mf-dashboard.viewSort.en",
+          "when": "view == mf-dashboard && !mf-dashboard.discovering && config.mf-dashboard.language == en",
+          "group": "1_layout"
+        },
+        {
+          "submenu": "mf-dashboard.viewSort.ru",
+          "when": "view == mf-dashboard && !mf-dashboard.discovering && config.mf-dashboard.language == ru",
+          "group": "1_layout"
+        },
+        {
           "command": "mf-dashboard.refresh",
-          "when": "view == mf-dashboard && !mf-dashboard.discovering",
+          "when": "view == mf-dashboard && !mf-dashboard.discovering && config.mf-dashboard.language != en && config.mf-dashboard.language != ru",
+          "group": "navigation"
+        },
+        {
+          "command": "mf-dashboard.refresh.en",
+          "when": "view == mf-dashboard && !mf-dashboard.discovering && config.mf-dashboard.language == en",
+          "group": "navigation"
+        },
+        {
+          "command": "mf-dashboard.refresh.ru",
+          "when": "view == mf-dashboard && !mf-dashboard.discovering && config.mf-dashboard.language == ru",
           "group": "navigation"
         },
         {
           "command": "mf-dashboard.discover",
-          "when": "view == mf-dashboard && !mf-dashboard.discovering",
+          "when": "view == mf-dashboard && !mf-dashboard.discovering && config.mf-dashboard.language != en && config.mf-dashboard.language != ru",
+          "group": "navigation@1"
+        },
+        {
+          "command": "mf-dashboard.discover.en",
+          "when": "view == mf-dashboard && !mf-dashboard.discovering && config.mf-dashboard.language == en",
+          "group": "navigation@1"
+        },
+        {
+          "command": "mf-dashboard.discover.ru",
+          "when": "view == mf-dashboard && !mf-dashboard.discovering && config.mf-dashboard.language == ru",
           "group": "navigation@1"
         },
         {
           "command": "mf-dashboard.useFlat",
-          "when": "view == mf-dashboard && !mf-dashboard.discovering && !mf-dashboard.flat",
+          "when": "view == mf-dashboard && !mf-dashboard.discovering && !mf-dashboard.flat && config.mf-dashboard.language != en && config.mf-dashboard.language != ru",
+          "group": "navigation@2"
+        },
+        {
+          "command": "mf-dashboard.useFlat.en",
+          "when": "view == mf-dashboard && !mf-dashboard.discovering && !mf-dashboard.flat && config.mf-dashboard.language == en",
+          "group": "navigation@2"
+        },
+        {
+          "command": "mf-dashboard.useFlat.ru",
+          "when": "view == mf-dashboard && !mf-dashboard.discovering && !mf-dashboard.flat && config.mf-dashboard.language == ru",
           "group": "navigation@2"
         },
         {
           "command": "mf-dashboard.useTree",
-          "when": "view == mf-dashboard && !mf-dashboard.discovering && mf-dashboard.flat",
+          "when": "view == mf-dashboard && !mf-dashboard.discovering && mf-dashboard.flat && config.mf-dashboard.language != en && config.mf-dashboard.language != ru",
+          "group": "navigation@2"
+        },
+        {
+          "command": "mf-dashboard.useTree.en",
+          "when": "view == mf-dashboard && !mf-dashboard.discovering && mf-dashboard.flat && config.mf-dashboard.language == en",
+          "group": "navigation@2"
+        },
+        {
+          "command": "mf-dashboard.useTree.ru",
+          "when": "view == mf-dashboard && !mf-dashboard.discovering && mf-dashboard.flat && config.mf-dashboard.language == ru",
           "group": "navigation@2"
         },
         {
           "command": "mf-dashboard.rebuildAllTypes",
-          "when": "view == mf-dashboard && mf-dashboard.canUpdateTypes",
+          "when": "view == mf-dashboard && mf-dashboard.canUpdateTypes && config.mf-dashboard.language != en && config.mf-dashboard.language != ru",
+          "group": "navigation@3"
+        },
+        {
+          "command": "mf-dashboard.rebuildAllTypes.en",
+          "when": "view == mf-dashboard && mf-dashboard.canUpdateTypes && config.mf-dashboard.language == en",
+          "group": "navigation@3"
+        },
+        {
+          "command": "mf-dashboard.rebuildAllTypes.ru",
+          "when": "view == mf-dashboard && mf-dashboard.canUpdateTypes && config.mf-dashboard.language == ru",
           "group": "navigation@3"
         },
         {
           "command": "mf-dashboard.rebuildAllTypes",
-          "when": "view == mf-dashboard.typesBuild && mf-dashboard.canUpdateTypes",
+          "when": "view == mf-dashboard.typesBuild && mf-dashboard.canUpdateTypes && config.mf-dashboard.language != en && config.mf-dashboard.language != ru",
+          "group": "navigation@1"
+        },
+        {
+          "command": "mf-dashboard.rebuildAllTypes.en",
+          "when": "view == mf-dashboard.typesBuild && mf-dashboard.canUpdateTypes && config.mf-dashboard.language == en",
+          "group": "navigation@1"
+        },
+        {
+          "command": "mf-dashboard.rebuildAllTypes.ru",
+          "when": "view == mf-dashboard.typesBuild && mf-dashboard.canUpdateTypes && config.mf-dashboard.language == ru",
           "group": "navigation@1"
         },
         {
           "command": "mf-dashboard.openTypesBuildReport",
-          "when": "view == mf-dashboard.typesBuild",
+          "when": "view == mf-dashboard.typesBuild && config.mf-dashboard.language != en && config.mf-dashboard.language != ru",
+          "group": "navigation@2"
+        },
+        {
+          "command": "mf-dashboard.openTypesBuildReport.en",
+          "when": "view == mf-dashboard.typesBuild && config.mf-dashboard.language == en",
+          "group": "navigation@2"
+        },
+        {
+          "command": "mf-dashboard.openTypesBuildReport.ru",
+          "when": "view == mf-dashboard.typesBuild && config.mf-dashboard.language == ru",
           "group": "navigation@2"
         },
         {
           "command": "mf-dashboard.typesUseFlat",
-          "when": "view == mf-dashboard.typesBuild && !mf-dashboard.typesFlat",
+          "when": "view == mf-dashboard.typesBuild && !mf-dashboard.typesFlat && config.mf-dashboard.language != en && config.mf-dashboard.language != ru",
+          "group": "navigation@0"
+        },
+        {
+          "command": "mf-dashboard.typesUseFlat.en",
+          "when": "view == mf-dashboard.typesBuild && !mf-dashboard.typesFlat && config.mf-dashboard.language == en",
+          "group": "navigation@0"
+        },
+        {
+          "command": "mf-dashboard.typesUseFlat.ru",
+          "when": "view == mf-dashboard.typesBuild && !mf-dashboard.typesFlat && config.mf-dashboard.language == ru",
           "group": "navigation@0"
         },
         {
           "command": "mf-dashboard.typesUseTree",
-          "when": "view == mf-dashboard.typesBuild && mf-dashboard.typesFlat",
+          "when": "view == mf-dashboard.typesBuild && mf-dashboard.typesFlat && config.mf-dashboard.language != en && config.mf-dashboard.language != ru",
+          "group": "navigation@0"
+        },
+        {
+          "command": "mf-dashboard.typesUseTree.en",
+          "when": "view == mf-dashboard.typesBuild && mf-dashboard.typesFlat && config.mf-dashboard.language == en",
+          "group": "navigation@0"
+        },
+        {
+          "command": "mf-dashboard.typesUseTree.ru",
+          "when": "view == mf-dashboard.typesBuild && mf-dashboard.typesFlat && config.mf-dashboard.language == ru",
           "group": "navigation@0"
         }
       ],
       "view/item/context": [
         {
           "command": "mf-dashboard.checkTypes",
-          "when": "view == mf-dashboard && config.mf-dashboard.types.autoCheck == false && viewItem =~ /(^| )check-types($| )/",
+          "when": "view == mf-dashboard && !mf-dashboard.discovering && config.mf-dashboard.types.autoCheck == false && viewItem =~ /(^| )check-types($| )/ && config.mf-dashboard.language != en && config.mf-dashboard.language != ru",
+          "group": "1_types@1"
+        },
+        {
+          "command": "mf-dashboard.checkTypes.en",
+          "when": "view == mf-dashboard && !mf-dashboard.discovering && config.mf-dashboard.types.autoCheck == false && viewItem =~ /(^| )check-types($| )/ && config.mf-dashboard.language == en",
+          "group": "1_types@1"
+        },
+        {
+          "command": "mf-dashboard.checkTypes.ru",
+          "when": "view == mf-dashboard && !mf-dashboard.discovering && config.mf-dashboard.types.autoCheck == false && viewItem =~ /(^| )check-types($| )/ && config.mf-dashboard.language == ru",
           "group": "1_types@1"
         },
         {
           "command": "mf-dashboard.start",
-          "when": "view == mf-dashboard && viewItem =~ /^(silent|unknownPort)($| )/",
+          "when": "view == mf-dashboard && !mf-dashboard.discovering && viewItem =~ /^(silent|unknownPort)($| )/ && config.mf-dashboard.language != en && config.mf-dashboard.language != ru",
+          "group": "inline"
+        },
+        {
+          "command": "mf-dashboard.start.en",
+          "when": "view == mf-dashboard && !mf-dashboard.discovering && viewItem =~ /^(silent|unknownPort)($| )/ && config.mf-dashboard.language == en",
+          "group": "inline"
+        },
+        {
+          "command": "mf-dashboard.start.ru",
+          "when": "view == mf-dashboard && !mf-dashboard.discovering && viewItem =~ /^(silent|unknownPort)($| )/ && config.mf-dashboard.language == ru",
           "group": "inline"
         },
         {
           "command": "mf-dashboard.rebuildTypes",
-          "when": "view == mf-dashboard && viewItem =~ /^stale($| )/",
+          "when": "view == mf-dashboard && !mf-dashboard.discovering && viewItem =~ /^stale($| )/ && config.mf-dashboard.language != en && config.mf-dashboard.language != ru",
+          "group": "1_types@2"
+        },
+        {
+          "command": "mf-dashboard.rebuildTypes.en",
+          "when": "view == mf-dashboard && !mf-dashboard.discovering && viewItem =~ /^stale($| )/ && config.mf-dashboard.language == en",
+          "group": "1_types@2"
+        },
+        {
+          "command": "mf-dashboard.rebuildTypes.ru",
+          "when": "view == mf-dashboard && !mf-dashboard.discovering && viewItem =~ /^stale($| )/ && config.mf-dashboard.language == ru",
           "group": "1_types@2"
         },
         {
           "command": "mf-dashboard.refetchTypes",
-          "when": "view == mf-dashboard && viewItem =~ /^unfetched($| )/",
+          "when": "view == mf-dashboard && !mf-dashboard.discovering && viewItem =~ /^unfetched($| )/ && config.mf-dashboard.language != en && config.mf-dashboard.language != ru",
+          "group": "1_types@3"
+        },
+        {
+          "command": "mf-dashboard.refetchTypes.en",
+          "when": "view == mf-dashboard && !mf-dashboard.discovering && viewItem =~ /^unfetched($| )/ && config.mf-dashboard.language == en",
+          "group": "1_types@3"
+        },
+        {
+          "command": "mf-dashboard.refetchTypes.ru",
+          "when": "view == mf-dashboard && !mf-dashboard.discovering && viewItem =~ /^unfetched($| )/ && config.mf-dashboard.language == ru",
           "group": "1_types@3"
         },
         {
           "command": "mf-dashboard.openConfig",
-          "when": "view == mf-dashboard && viewItem =~ /(^| )config($| )/",
+          "when": "view == mf-dashboard && viewItem =~ /(^| )config($| )/ && config.mf-dashboard.language != en && config.mf-dashboard.language != ru",
+          "group": "navigation"
+        },
+        {
+          "command": "mf-dashboard.openConfig.en",
+          "when": "view == mf-dashboard && viewItem =~ /(^| )config($| )/ && config.mf-dashboard.language == en",
+          "group": "navigation"
+        },
+        {
+          "command": "mf-dashboard.openConfig.ru",
+          "when": "view == mf-dashboard && viewItem =~ /(^| )config($| )/ && config.mf-dashboard.language == ru",
           "group": "navigation"
         },
         {
           "command": "mf-dashboard.openProducerConfig",
-          "when": "view == mf-dashboard && viewItem =~ /(^| )producer($| )/",
+          "when": "view == mf-dashboard && viewItem =~ /(^| )producer($| )/ && config.mf-dashboard.language != en && config.mf-dashboard.language != ru",
+          "group": "navigation"
+        },
+        {
+          "command": "mf-dashboard.openProducerConfig.en",
+          "when": "view == mf-dashboard && viewItem =~ /(^| )producer($| )/ && config.mf-dashboard.language == en",
+          "group": "navigation"
+        },
+        {
+          "command": "mf-dashboard.openProducerConfig.ru",
+          "when": "view == mf-dashboard && viewItem =~ /(^| )producer($| )/ && config.mf-dashboard.language == ru",
           "group": "navigation"
         },
         {
           "command": "mf-dashboard.revealTypes",
-          "when": "view == mf-dashboard && viewItem =~ /(^| )types($| )/",
+          "when": "view == mf-dashboard && viewItem =~ /(^| )types($| )/ && config.mf-dashboard.language != en && config.mf-dashboard.language != ru",
+          "group": "navigation"
+        },
+        {
+          "command": "mf-dashboard.revealTypes.en",
+          "when": "view == mf-dashboard && viewItem =~ /(^| )types($| )/ && config.mf-dashboard.language == en",
+          "group": "navigation"
+        },
+        {
+          "command": "mf-dashboard.revealTypes.ru",
+          "when": "view == mf-dashboard && viewItem =~ /(^| )types($| )/ && config.mf-dashboard.language == ru",
           "group": "navigation"
         },
         {
           "command": "mf-dashboard.openManifest",
-          "when": "view == mf-dashboard && viewItem =~ /(^| )manifest($| )/",
+          "when": "view == mf-dashboard && viewItem =~ /(^| )manifest($| )/ && config.mf-dashboard.language != en && config.mf-dashboard.language != ru",
+          "group": "navigation"
+        },
+        {
+          "command": "mf-dashboard.openManifest.en",
+          "when": "view == mf-dashboard && viewItem =~ /(^| )manifest($| )/ && config.mf-dashboard.language == en",
+          "group": "navigation"
+        },
+        {
+          "command": "mf-dashboard.openManifest.ru",
+          "when": "view == mf-dashboard && viewItem =~ /(^| )manifest($| )/ && config.mf-dashboard.language == ru",
           "group": "navigation"
         },
         {
           "command": "mf-dashboard.rebuildAppTypes",
-          "when": "view == mf-dashboard.typesBuild && viewItem == typesBuildApp",
+          "when": "view == mf-dashboard.typesBuild && viewItem == typesBuildApp && config.mf-dashboard.language != en && config.mf-dashboard.language != ru",
+          "group": "inline"
+        },
+        {
+          "command": "mf-dashboard.rebuildAppTypes.en",
+          "when": "view == mf-dashboard.typesBuild && viewItem == typesBuildApp && config.mf-dashboard.language == en",
+          "group": "inline"
+        },
+        {
+          "command": "mf-dashboard.rebuildAppTypes.ru",
+          "when": "view == mf-dashboard.typesBuild && viewItem == typesBuildApp && config.mf-dashboard.language == ru",
           "group": "inline"
         }
       ]
@@ -368,7 +1168,7 @@
         },
         "mf-dashboard.types.autoCheck": {
           "type": "boolean",
-          "default": true,
+          "default": false,
           "description": "%configuration.types.autoCheck%"
         },
         "mf-dashboard.typesSettleMs": {
@@ -480,6 +1280,7 @@
     "get-tsconfig": "4.14.3",
     "jsonc-parser": "3.3.1",
     "picomatch": "4.0.7",
+    "proper-lockfile": "4.1.2",
     "tinyglobby": "0.2.17",
     "yauzl": "3.4.0"
   }

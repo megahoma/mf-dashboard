@@ -9,6 +9,7 @@ import {
   type RemoteLink,
 } from "../../../entities/microfrontend/index.ts";
 import type { ProblemDraft, StatusInput } from "../../../entities/status/index.ts";
+import { WORKSPACE_DEFAULTS } from "../../../features/init-settings/index.ts";
 import { terms, type DashboardTerms } from "../../../shared/config/index.ts";
 import { noLog } from "../../../shared/config/logging.ts";
 import { logDuration, resolveLogFields, safeError } from "../../../shared/lib/logging.ts";
@@ -25,7 +26,7 @@ import { beginRefetch, endRefetch, linksOf } from "../lib/links.ts";
 import { dashboardNodes, dashboardProblemDrafts } from "../lib/presentation.ts";
 import { resolveRowAction } from "../lib/targets.ts";
 import { workspaceGraphIsStale, type WorkspaceGraph } from "../lib/workspace-graph.ts";
-import type { DashboardNode, DashboardStructure } from "./presentation.ts";
+import type { DashboardNode, DashboardSort, DashboardStructure } from "./presentation.ts";
 import type {
   AppParseCache,
   DashboardPorts,
@@ -42,9 +43,10 @@ export class DashboardSession {
   ownershipSources: ReadonlySet<string> = new Set();
   extraUrls: string[] = [];
   structure: DashboardStructure = "tree";
+  flatSort: DashboardSort = "name";
   terms: DashboardTerms = terms;
   typesForLink: (link: RemoteLink) => StatusInput["typesState"] = () => "unknown";
-  typesAutoCheck = true;
+  typesAutoCheck: boolean = WORKSPACE_DEFAULTS["mf-dashboard.types.autoCheck"];
   typesCheckedAt: (link: RemoteLink) => number | null = () => null;
   beforeRefreshChange: (log?: LogContext) => void = () => {};
   onRefreshFailed: () => void = () => {};
@@ -83,6 +85,7 @@ export class DashboardSession {
     source = "manual",
     log = this.log.operation(source),
     discovery?: KnownAppsTask["discovery"],
+    onAppsReady?: () => void,
   ): Promise<void> {
     this.activeLog = log;
     const seenWarnings = new Set<string>();
@@ -104,6 +107,7 @@ export class DashboardSession {
     let snapshot = this.captureRefreshState();
     let hasConfiguredApps = this.hasConfiguredApps;
     let failureFields: LogFields = {};
+    let publishedStructure = false;
     this.probeRunning = true;
     let structureAtProbe = this.structure;
     try {
@@ -145,6 +149,7 @@ export class DashboardSession {
           this.hasConfiguredApps = hasConfiguredApps;
           if (!workspace.files.length) this.graphStale = false;
           snapshot = this.captureRefreshState();
+          publishedStructure = true;
           this.onChange();
         }
         if (source !== "timer" || Date.now() - this.graphCheck >= 30_000) {
@@ -192,6 +197,7 @@ export class DashboardSession {
         }
         names.add(app.name);
       }
+      if (hasConfiguredApps) onAppsReady?.();
       // The probe writes `staged`. The visible book stays put until the swap below.
       const staged = createProbeBook();
       staged.zips = new Map(this.book.zips);
@@ -232,6 +238,7 @@ export class DashboardSession {
       this.pathWarnings = seenWarnings;
       this.onRefreshFailed();
       if (
+        publishedStructure ||
         toggledDuringProbe ||
         this.hasConfiguredApps !== hasConfiguredApps ||
         failureFields.reason === "duplicate-federation-name"
@@ -275,7 +282,7 @@ export class DashboardSession {
       : accept(prepareDiscoverySnapshot(roots, current, this.ports.scan, log));
   }
 
-  async discover(log = this.log.operation("discovery")): Promise<void> {
+  async discover(log = this.log.operation("discovery"), onAppsReady?: () => void): Promise<void> {
     const started = Date.now();
     let failureFields: LogFields = {};
     log.event("info", "discovery.started");
@@ -321,7 +328,7 @@ export class DashboardSession {
           log,
         );
       } else if (plan.apps) await this.ports.writeApps(plan.apps);
-      await this.refresh("discovery", log, plan.cache);
+      await this.refresh("discovery", log, plan.cache, onAppsReady);
       log.event("info", "discovery.completed", {
         apps: this.loaded.length,
         durationMs: Date.now() - started,
@@ -342,6 +349,12 @@ export class DashboardSession {
     if (this.structure === structure) return;
     this.structure = structure;
     this.onChange();
+  }
+
+  setFlatSort(sort: DashboardSort): void {
+    if (this.flatSort === sort) return;
+    this.flatSort = sort;
+    if (this.structure === "flat") this.onChange();
   }
 
   refetch(linkId: string): boolean {

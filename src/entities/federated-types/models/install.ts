@@ -37,6 +37,7 @@ export type InstallTypesResult = {
 
 export type ComparisonArchive = {
   fileCount: number;
+  contentHash: string;
   entryIndex: Uint8Array<SharedArrayBuffer>;
 };
 

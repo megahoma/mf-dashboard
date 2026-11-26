@@ -4,8 +4,11 @@ import { safeError } from "../../../shared/lib/logging.ts";
 import type { LogContext } from "../../../shared/models/logging.ts";
 import { EMPTY_TYPES_FINGERPRINT } from "../config/freshness.ts";
 import type { InstallConfirmationView } from "../models/freshness.ts";
-import type { InstalledEvidence, ProducerEvidence } from "../models/observe.ts";
-import type { TypesStatus } from "../models/state-types.ts";
+import type {
+  InstalledEvidence,
+  LinkTypeObservation,
+  ProducerEvidence,
+} from "../models/observe.ts";
 import { typesState } from "../models/state.ts";
 import { installedFreshness, sourceFreshness } from "./freshness.ts";
 import { treeFingerprint } from "./tree-fingerprint.ts";
@@ -40,6 +43,7 @@ export function describeLink(
   input: {
     consumeTypes: boolean;
     producer: ProducerEvidence | null;
+    sourceUnavailable?: boolean;
     producerZipMtime: number | null;
     linkZipHash: string | null;
     linkZipReachable: boolean;
@@ -52,20 +56,10 @@ export function describeLink(
     installed: InstalledEvidence;
   },
   log: LogContext = noLog,
-): TypesStatus {
+): LinkTypeObservation {
   const producer = input.producer;
   if (!input.consumeTypes) {
-    return typesState({
-      generateTypes: producer?.generateTypes ?? false,
-      consumeTypes: false,
-      sourceFreshness: "unknown",
-      installedFreshness: "unknown",
-      zipReachable: input.linkZipReachable,
-      folderExists: false,
-      sourceSavedAt: null,
-      checkedAt: input.checkedAt,
-      typesSettleMs: input.typesSettleMs,
-    });
+    return { status: "none", archiveMatch: "unknown", sourceFreshness: "unknown" };
   }
   const source = sourceFreshness({
     zipMtime: input.producerZipMtime,
@@ -80,25 +74,27 @@ export function describeLink(
     confirmation: input.installConfirmation,
     archiveMatches: input.archiveMatches,
   });
-  const status = typesState({
-    generateTypes: producer?.generateTypes ?? false,
-    consumeTypes: true,
-    sourceFreshness: source,
-    installedFreshness: installed,
-    installedChanged:
-      !input.linkZipReachable &&
-      input.installed.folderExists &&
-      !!input.installed.filesFingerprint &&
-      input.installed.filesFingerprint !== EMPTY_TYPES_FINGERPRINT &&
-      input.installConfirmation != null &&
-      input.installConfirmation.url === input.linkUrl &&
-      input.installConfirmation.filesFingerprint !== input.installed.filesFingerprint,
-    zipReachable: input.linkZipReachable,
-    folderExists: input.installed.folderExists,
-    sourceSavedAt: producer?.sourceSavedAt ?? null,
-    checkedAt: input.checkedAt,
-    typesSettleMs: input.typesSettleMs,
-  });
+  const status = input.sourceUnavailable
+    ? "unknown"
+    : typesState({
+        generateTypes: producer?.generateTypes ?? false,
+        consumeTypes: true,
+        sourceFreshness: source,
+        installedFreshness: installed,
+        installedChanged:
+          !input.linkZipReachable &&
+          input.installed.folderExists &&
+          !!input.installed.filesFingerprint &&
+          input.installed.filesFingerprint !== EMPTY_TYPES_FINGERPRINT &&
+          input.installConfirmation != null &&
+          input.installConfirmation.url === input.linkUrl &&
+          input.installConfirmation.filesFingerprint !== input.installed.filesFingerprint,
+        zipReachable: input.linkZipReachable,
+        folderExists: input.installed.folderExists,
+        sourceSavedAt: producer?.sourceSavedAt ?? null,
+        checkedAt: input.checkedAt,
+        typesSettleMs: input.typesSettleMs,
+      });
   log.event("debug", "types.observed", {
     status,
     sourceFreshness: source,
@@ -122,5 +118,15 @@ export function describeLink(
         ? 0
         : Math.max(0, producer.sourceSavedAt + input.typesSettleMs - input.checkedAt),
   });
-  return status;
+  let archiveMatch: LinkTypeObservation["archiveMatch"] = "unknown";
+  if (!input.installed.folderExists || input.installed.filesFingerprint === EMPTY_TYPES_FINGERPRINT)
+    archiveMatch = "missing";
+  else if (input.linkZipReachable && installed === "fresh") archiveMatch = "matches";
+  else if (input.linkZipReachable && installed === "stale" && input.archiveMatches === false)
+    archiveMatch = "differs";
+  return {
+    status,
+    archiveMatch,
+    sourceFreshness: source === "stale" && status !== "stale-source" ? "unknown" : source,
+  };
 }

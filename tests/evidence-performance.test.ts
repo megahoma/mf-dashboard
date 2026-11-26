@@ -22,11 +22,16 @@ import { readTree } from "../src/entities/federated-types/lib/types-tree.ts";
 import {
   createProbeBook,
   linkProbeId,
+  putAppResult,
   putLinkResult,
   readAppFolder,
 } from "../src/entities/microfrontend/index.ts";
 import { verifyTypeInstalls } from "../src/features/observe-types/lib/verify.ts";
 import type { InstallCheck } from "../src/features/observe-types/models/verify.ts";
+import {
+  collectProducerEvidenceAsync,
+  createPublishedZipComparison,
+} from "../src/features/rebuild-types/lib/evidence.ts";
 import { diagnosticFields } from "../src/shared/models/diagnostic-error.ts";
 import { createLogger } from "../src/shared/lib/logging.ts";
 import type { LogContext } from "../src/shared/models/logging.ts";
@@ -470,6 +475,70 @@ test("archive comparison requires matching file names and bytes even with NUL de
     fetchImpl: async () => new Response(bytes),
   });
   assert.equal(result.matches, false);
+});
+
+test("source freshness recognizes repacked generation archives and checks their dependency contents", async (t) => {
+  const f = archiveFixture(t);
+  const book = createProbeBook();
+  const store = createConfirmationStore();
+  const dependency = localApp("shared", path.join(f.root, "shared"));
+  const producer = localApp("widget", path.join(f.root, "widget"), {
+    remotes: [{ name: "shared", alias: "shared", url: "http://127.0.0.1/mf-manifest.json" }],
+  });
+  const apps = [dependency, producer];
+  const archives = new Map<string, ReturnType<typeof zipFixture>>();
+  const fetch = t.mock.method(globalThis, "fetch", async (url: string) => {
+    return new Response(archives.get(url));
+  });
+  const publish = (name: string, text: string) => {
+    const zipUrl = `http://127.0.0.1/${name}/types.zip`;
+    const bytes = f.archive([{ file: "index.d.ts", text }]);
+    archives.set(zipUrl, bytes);
+    putAppResult(book, name, {
+      portOpen: true,
+      manifestReachable: true,
+      buildVersion: null,
+      zipUrl,
+      zipHash: f.hash(bytes),
+      zipMtime: null,
+      exposes: [],
+      shared: [],
+    });
+  };
+  for (const app of apps) {
+    f.write(`${app.name}/index.ts`, "export type Value = 1;");
+    const zipPath = path.join(app.folder, "dist.zip");
+    fs.writeFileSync(zipPath, f.bytes);
+    const { fingerprint } = sourceIdentity(app.folder, app.tsconfig, app.typesFolder);
+    const dependencies: Record<string, string> =
+      app === producer ? { shared: f.hash(f.bytes) } : {};
+    store.saveGeneration(app.name, fingerprint, f.hash(f.bytes), dependencies, {
+      zipPath,
+      inputsFingerprint: "inputs",
+    });
+    publish(app.name, "export type Value = 1;");
+  }
+  const compareZip = createPublishedZipComparison();
+  const observe = (allowDownload = true) =>
+    collectProducerEvidenceAsync(producer, apps, book, store, compareZip, undefined, allowDownload);
+  const timeouts = t.mock.method(AbortSignal, "timeout");
+  assert.notEqual(f.hash(f.bytes), f.hash(archives.get("http://127.0.0.1/widget/types.zip")!));
+  assert.equal((await observe(false)).sourceFreshness, "unknown");
+  assert.equal(fetch.mock.callCount(), 0);
+  assert.equal((await observe()).sourceFreshness, "fresh");
+  assert.equal((await observe(false)).sourceFreshness, "fresh");
+  assert.equal(fetch.mock.callCount(), 2);
+  assert.deepEqual(
+    timeouts.mock.calls.map(({ arguments: [ms] }) => ms),
+    [10_000, 10_000],
+  );
+  publish("shared", "export type Value = 2;");
+  assert.equal((await observe(false)).sourceFreshness, "unknown");
+  assert.equal(fetch.mock.callCount(), 2);
+  assert.equal((await observe()).sourceFreshness, "unknown");
+  publish("shared", "export type Value = 1;");
+  f.write("widget/index.ts", "export type Value = 3;");
+  assert.equal((await observe()).sourceFreshness, "unknown");
 });
 
 test("verification logs archive decoding and internal installed reads in the same operation", async (t) => {

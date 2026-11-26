@@ -12,6 +12,7 @@ import {
   type ProbeBook,
   type RemoteLink,
 } from "../../../entities/microfrontend/index.ts";
+import { HTTP_CHECK_TIMEOUT_MS } from "../../../shared/config/http-body.ts";
 import { noLog } from "../../../shared/config/logging.ts";
 import { logDuration, safeError } from "../../../shared/lib/logging.ts";
 import type { LogContext } from "../../../shared/models/logging.ts";
@@ -71,7 +72,7 @@ export async function verifyTypeInstalls(
         url: probe.zipUrl,
         destination,
         appDir: consumer.folder,
-        timeoutMs: 10_000,
+        timeoutMs: HTTP_CHECK_TIMEOUT_MS,
         expectedZipHash: probe.zipHash,
       });
       const current = await readInstalled(destination, log, true);

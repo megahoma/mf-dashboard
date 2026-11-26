@@ -7,7 +7,11 @@ export { hashManifestZip, manifestZipUrl } from "../../entities/microfrontend/in
 export type { ManifestZipRequest } from "../../entities/microfrontend/index.ts";
 export { rebuildAllTypes } from "./lib/all.ts";
 export { workspaceTypesPlan } from "./lib/workspace-plan.ts";
-export { collectProducerEvidence, collectProducerEvidenceAsync } from "./lib/evidence.ts";
+export {
+  collectProducerEvidence,
+  collectProducerEvidenceAsync,
+  createPublishedZipComparison,
+} from "./lib/evidence.ts";
 export { rebuildTypes } from "./lib/workflow.ts";
 export type { RebuildAllReport, RebuildAppStatus } from "./models/all.ts";
 export { createRebuildAllReport } from "./models/all.ts";

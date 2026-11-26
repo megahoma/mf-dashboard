@@ -1,7 +1,7 @@
 import { createLogger } from "../src/shared/lib/logging.ts";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -23,6 +23,14 @@ registerHooks({
 });
 const { ManifestDocuments } = await import("../src/features/open-manifest/models/documents.ts");
 const { MfDashboardProvider } = await import("../src/widgets/mf-dashboard-tree/models/provider.ts");
+
+function enableAutomaticTypeChecks(t: TestContext) {
+  const getConfiguration = vscode.workspace.getConfiguration;
+  t.mock.method(vscode.workspace, "getConfiguration", () => ({
+    ...getConfiguration(),
+    get: (key: string) => (key === "types.autoCheck" ? true : getConfiguration().get(key)),
+  }));
+}
 
 test("Start uses the same saved app entry as discovery after a federation rename", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-renamed-launch-"));
@@ -255,7 +263,8 @@ test("refresh and Fetch confirm published types and keep offline type changes vi
   );
   await provider.refresh();
   assert.equal(row().kind, "silent");
-  assert.ok(row().description.includes(`@mf-types: ${terms.typesChanged}`));
+  assert.doesNotMatch(row().description, /@mf-types/);
+  assert.ok(row().tooltip.includes(terms.typesChanged));
   assert.equal(persisted.length, 2);
 
   online = true;
@@ -271,6 +280,7 @@ test("refresh and Fetch confirm published types and keep offline type changes vi
 });
 
 test("stat failures in installed types do not prevent rendering the dashboard", (t) => {
+  enableAutomaticTypeChecks(t);
   const producer = localApp("producer", "/producer", { generateTypes: false });
   const consumer = localApp("consumer", "/consumer", {
     consumeTypes: true,
@@ -307,6 +317,7 @@ test("stat failures in installed types do not prevent rendering the dashboard", 
 });
 
 test("shared producers are scanned once and invalidated with the link status cache", async (t) => {
+  enableAutomaticTypeChecks(t);
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mf-producer-cache-")));
   const producer = localApp("producer", root);
@@ -468,6 +479,7 @@ test("manifest command rejects unconfigured extra URLs and separates fetch and e
 });
 
 test("unchanged status and unreadable-type warnings stay quiet until recovery", (t) => {
+  enableAutomaticTypeChecks(t);
   const events: { level: string; text: string }[] = [];
   const log = createLogger({
     enabled: () => true,
@@ -509,6 +521,7 @@ test("unchanged status and unreadable-type warnings stay quiet until recovery", 
 });
 
 test("a malformed producer tsconfig leaves the rest of the tree visible with unknown type evidence", (t) => {
+  enableAutomaticTypeChecks(t);
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mf-bad-tsconfig-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   fs.writeFileSync(path.join(root, "tsconfig.json"), '{"include":broken}');
@@ -528,6 +541,11 @@ test("a malformed producer tsconfig leaves the rest of the tree visible with unk
     ["consumer", "other"],
   );
   assert.equal(rows[0].children[0].name, "producer");
+  assert.deepEqual(provider.typeDetails(rows[0].children[0].linkId!), {
+    status: "unknown",
+    archiveMatch: "missing",
+    sourceFreshness: "unknown",
+  });
   assert.equal(
     provider.session.typesForLink({
       consumer: "consumer",

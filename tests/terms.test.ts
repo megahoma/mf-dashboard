@@ -4,6 +4,7 @@ import { terms } from "../src/shared/config/terms.ts";
 import { icons } from "../src/shared/config/icons.ts";
 
 const statusKeys = [
+  "checking",
   "listen",
   "silent",
   "unknownPort",
@@ -16,7 +17,6 @@ const statusKeys = [
   "noAnswer",
 ] as const;
 const labelKeys = [
-  "empty",
   "scriptMissing",
   "start",
   "folder",

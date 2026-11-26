@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { HTTP_CHECK_TIMEOUT_MS } from "../../../shared/config/http-body.ts";
 import { noLog } from "../../../shared/config/logging.ts";
 import { filesFingerprint, sha256 } from "../../../shared/lib/fingerprint.ts";
 import { readLimitedBody } from "../../../shared/lib/http-body.ts";
@@ -183,24 +184,46 @@ export function createArchiveComparisonBatch(
       const key = JSON.stringify([input.url, input.expectedZipHash ?? ""]);
       let archive = archives.get(key);
       if (!archive) {
-        archive = (async () => {
-          const buffer = await loadZipBytes(input);
-          const zipHash = sha256(buffer);
-          if (input.expectedZipHash && zipHash !== input.expectedZipHash)
-            throw new DiagnosticError("unzip: archive changed since probe", {
-              stage: "archive",
-              reason: "fingerprint-mismatch",
-            });
-          const archive = await runEvidenceTask<ComparisonArchive>(
-            { kind: "archive-comparison", bytes: buffer },
-            log,
-          );
-          return { zipHash, archive };
-        })();
+        archive = readComparisonArchive(input, log);
         archives.set(key, archive);
       }
       return compareArchive(input, await archive, log);
     });
+}
+
+export async function publishedArchiveMatchesLocal(
+  local: { zipPath: string; zipHash: string },
+  published: { url: string; expectedZipHash: string },
+  log: LogContext,
+): Promise<boolean> {
+  const bytes = await readFile(local.zipPath);
+  if (sha256(bytes) !== local.zipHash) throw new Error("Local ZIP changed since generation");
+  const generated = await runEvidenceTask<ComparisonArchive>(
+    { kind: "archive-comparison", bytes },
+    log,
+  );
+  const { archive } = await readComparisonArchive(
+    { ...published, timeoutMs: HTTP_CHECK_TIMEOUT_MS },
+    log,
+  );
+  return generated.contentHash === archive.contentHash;
+}
+
+type ZipDownload = Pick<InstallTypesInput, "url" | "timeoutMs" | "fetchImpl" | "expectedZipHash">;
+
+async function readComparisonArchive(input: ZipDownload, log: LogContext) {
+  const bytes = await loadZipBytes(input);
+  const zipHash = sha256(bytes);
+  if (input.expectedZipHash && zipHash !== input.expectedZipHash)
+    throw new DiagnosticError("unzip: archive changed since probe", {
+      stage: "archive",
+      reason: "fingerprint-mismatch",
+    });
+  const archive = await runEvidenceTask<ComparisonArchive>(
+    { kind: "archive-comparison", bytes },
+    log,
+  );
+  return { zipHash, archive };
 }
 
 async function compareArchive(
@@ -246,7 +269,7 @@ async function loadZip(
   return { archive: checkedArchive(buffer, input.appDir), zipHash: sha256(buffer) };
 }
 
-async function loadZipBytes(input: InstallTypesInput): Promise<Buffer> {
+async function loadZipBytes(input: ZipDownload): Promise<Buffer> {
   const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const fetchImpl = input.fetchImpl ?? fetch;
   const signal = AbortSignal.timeout(timeoutMs);

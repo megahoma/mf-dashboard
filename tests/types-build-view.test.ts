@@ -14,6 +14,22 @@ registerHooks({
 });
 const { TypesBuildView } = await import("../src/app/lib/types-build-view.ts");
 
+test("no rebuild needed applies even to an app that only consumes types", async (t) => {
+  const view = new TypesBuildView({ apps: [{ app: "catalog", status: "current" }] });
+  t.after(() => view.dispose());
+  view.setWorkspace(
+    [localApp("catalog", "/catalog", { generateTypes: false, consumeTypes: true })],
+    "tree",
+  );
+
+  const item = view.getTreeItem(view.getChildren()[0]);
+  assert.equal(item.description, "No rebuild needed");
+  assert.equal(item.tooltip, undefined);
+  const report = t.mock.method(vscode.workspace, "openTextDocument");
+  await view.openReport();
+  assert.match(JSON.stringify(report.mock.calls[0]?.arguments[0]), /catalog — No rebuild needed/);
+});
+
 test("discovered apps can be rebuilt in either layout before the first workspace build", (t) => {
   const view = new TypesBuildView();
   t.after(() => view.dispose());
@@ -189,6 +205,7 @@ test("the row action follows the workspace build plan for producers and consumer
   const apps = [
     localApp("producer", "/producer"),
     localApp("consumer", "/consumer", { ...consumer, remotes: [remote] }),
+    localApp("mixed", "/mixed", { consumeTypes: true, remotes: [remote] }),
     localApp("external", "/external", {
       ...consumer,
       remotes: [{ ...remote, url: "https://example.org/mf-manifest.json" }],
@@ -201,12 +218,22 @@ test("the row action follows the workspace build plan for producers and consumer
     localApp("empty", "/empty", { hasExposes: false }),
   ];
   view.setWorkspace(apps, "flat");
+  const tasks = new Map([
+    ["producer", "package"],
+    ["consumer", "arrow-down"],
+    ["mixed", "arrow-swap"],
+  ]);
   for (const row of view.getChildren()) {
     const item = view.getTreeItem(row);
-    const eligible = item.label === "producer" || item.label === "consumer";
-    assert.equal(view.targetFor(row) !== undefined, eligible, String(item.label));
-    assert.equal(item.contextValue === "typesBuildApp", eligible, String(item.label));
+    const planned = tasks.get(String(item.label));
+    assert.equal(view.targetFor(row) !== undefined, !!planned, String(item.label));
+    assert.equal(item.contextValue === "typesBuildApp", !!planned, String(item.label));
+    assert.deepEqual(item.iconPath, new vscode.ThemeIcon(planned ?? "circle-slash"));
+    assert.ok(item.accessibilityInformation?.label.startsWith(`${item.label}, Not built yet, `));
+    if (!planned) assert.equal(item.tooltip, "No types to update");
   }
+  view.update([{ app: "consumer", status: "failed" }]);
+  assert.deepEqual(view.getTreeItem(view.getChildren()[0]).iconPath, new vscode.ThemeIcon("error"));
 });
 
 test("an unreadable config matches its settings key in both layouts and a restored report", (t) => {

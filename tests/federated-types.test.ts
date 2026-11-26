@@ -140,19 +140,39 @@ test("link classification uses provided evidence, settle time and install confir
     typesSettleMs: 100,
     installed: { folderExists: true, filesFingerprint: "files" },
   };
-  assert.equal(describeLink(input), "ok");
-  assert.equal(describeLink({ ...input, checkedAt: 2100 }), "stale-source");
-  assert.equal(describeLink({ ...input, consumeTypes: false, checkedAt: 2100 }), "none");
-  assert.equal(
+  assert.deepEqual(describeLink(input), {
+    status: "ok",
+    archiveMatch: "matches",
+    sourceFreshness: "unknown",
+  });
+  assert.deepEqual(describeLink({ ...input, checkedAt: 2100 }), {
+    status: "stale-source",
+    archiveMatch: "matches",
+    sourceFreshness: "stale",
+  });
+  assert.equal(describeLink({ ...input, consumeTypes: false, checkedAt: 2100 }).status, "none");
+  assert.deepEqual(
     describeLink({ ...input, installed: { folderExists: false, filesFingerprint: null } }),
-    "unfetched",
+    { status: "unfetched", archiveMatch: "missing", sourceFreshness: "unknown" },
   );
   assert.equal(
-    describeLink({ ...input, linkUrl: "https://changed.example/mf-manifest.json" }),
+    describeLink({ ...input, linkUrl: "https://changed.example/mf-manifest.json" }).status,
     "unfetched",
   );
-  assert.equal(describeLink({ ...input, producerZipMtime: null }), "unknown");
-  assert.equal(describeLink({ ...input, producerZipMtime: null, generationConfirmed: true }), "ok");
+  assert.deepEqual(describeLink({ ...input, producerZipMtime: null }), {
+    status: "unknown",
+    archiveMatch: "matches",
+    sourceFreshness: "unknown",
+  });
+  assert.deepEqual(
+    describeLink({
+      ...input,
+      producerZipMtime: null,
+      generationConfirmed: true,
+      archiveMatches: false,
+    }),
+    { status: "unfetched", archiveMatch: "differs", sourceFreshness: "fresh" },
+  );
 });
 
 test("disabled producer generation still reports missing, changed and confirmed consumer types", () => {
@@ -173,13 +193,14 @@ test("disabled producer generation still reports missing, changed and confirmed 
     typesSettleMs: 100,
     installed: { folderExists: true, filesFingerprint: "files" },
   };
-  assert.equal(describeLink(input), "ok");
+  assert.equal(describeLink(input).status, "ok");
   assert.equal(
-    describeLink({ ...input, installed: { folderExists: false, filesFingerprint: null } }),
+    describeLink({ ...input, installed: { folderExists: false, filesFingerprint: null } }).status,
     "unfetched",
   );
   assert.equal(
-    describeLink({ ...input, installed: { folderExists: true, filesFingerprint: "changed" } }),
+    describeLink({ ...input, installed: { folderExists: true, filesFingerprint: "changed" } })
+      .status,
     "unfetched",
   );
   assert.equal(
@@ -188,11 +209,11 @@ test("disabled producer generation still reports missing, changed and confirmed 
       linkZipReachable: false,
       linkZipHash: null,
       installed: { folderExists: true, filesFingerprint: "changed" },
-    }),
+    }).status,
     "changed",
   );
-  assert.equal(describeLink({ ...input, installConfirmation: null }), "manual");
-  assert.equal(describeLink({ ...input, consumeTypes: false }), "none");
+  assert.equal(describeLink({ ...input, installConfirmation: null }).status, "manual");
+  assert.equal(describeLink({ ...input, consumeTypes: false }).status, "none");
 });
 
 test("relative excludes follow TypeScript semantics inside the app", (t) => {

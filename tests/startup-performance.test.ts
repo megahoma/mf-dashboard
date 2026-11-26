@@ -3,11 +3,17 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { registerHooks } from "node:module";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
-import type { ConfigurationChangeEvent, ExtensionContext } from "vscode";
-import { developmentFederationConfig } from "./support/app.ts";
+import type {
+  ConfigurationChangeEvent,
+  ExtensionContext,
+  WebviewView,
+  WebviewViewProvider,
+} from "vscode";
+import { developmentFederationConfig, localApp } from "./support/app.ts";
 import * as stub from "./support/vscode.ts";
 import { defaultWorkspaceSettings } from "../src/features/init-settings/lib/defaults.ts";
 import {
@@ -111,17 +117,22 @@ async function start(
   let session: DashboardSession | undefined;
   let dashboard: MfDashboardProvider | undefined;
   let typesView: TypesBuildView | undefined;
+  let typesTree: ReturnType<typeof stub.window.createTreeView> | undefined;
   const createTreeView = stub.window.createTreeView;
   t.mock.method(
     stub.window,
     "createTreeView",
     (id: string, options: { treeDataProvider: unknown }) => {
+      const view = createTreeView(id, options);
       if (id === "mf-dashboard") {
         dashboard = options.treeDataProvider as MfDashboardProvider;
         session = dashboard.session;
       }
-      if (id === "mf-dashboard.typesBuild") typesView = options.treeDataProvider as TypesBuildView;
-      return createTreeView(id, options);
+      if (id === "mf-dashboard.typesBuild") {
+        typesView = options.treeDataProvider as TypesBuildView;
+        typesTree = view;
+      }
+      return view;
     },
   );
   const firstChannel = stub.outputChannels.length;
@@ -152,31 +163,75 @@ async function start(
   assert.ok(session);
   assert.ok(dashboard);
   assert.ok(typesView);
-  return { session, values, writes, channel, changes, typesView, state, dashboard };
+  assert.ok(typesTree);
+  return { session, values, writes, channel, changes, typesView, typesTree, state, dashboard };
 }
+
+test("the types tree shows localized loading until its first populated read", async (t) => {
+  const { root, writeApp } = fixture(t);
+  writeApp("catalog");
+  const progress = t.mock.method(stub.window, "withProgress");
+  const { session, typesView, typesTree } = await start(t, root, {
+    "mf-dashboard.language": "ru",
+    "mf-dashboard.apps": { catalog: { path: "catalog" } },
+  });
+  assert.deepEqual(typesView.getChildren(), []);
+  await session.discover();
+  assert.equal(typesTree.message, "Загружаем микрофронты для сборки @mf-types…");
+  typesTree.setVisible(true);
+  assert.deepEqual(progress.mock.calls[0]?.arguments[0].location, {
+    viewId: "mf-dashboard.typesBuild",
+  });
+  assert.equal(typesView.getChildren().length, 1);
+  assert.equal(typesTree.message, undefined);
+  await progress.mock.calls[0].result;
+  typesTree.setVisible(false);
+  typesTree.setVisible(true);
+  assert.equal(progress.mock.callCount(), 1);
+});
 
 test("discovery shows progress and enables type builds only after apps load", async (t) => {
   const { root, writeApp } = fixture(t);
   const context = t.mock.method(stub.commands, "executeCommand");
   const progress = t.mock.method(stub.window, "withProgress");
+  const webviews = t.mock.method(stub.window, "registerWebviewViewProvider");
   const { session } = await start(t, root, {
     ...defaultWorkspaceSettings(),
     "mf-dashboard.apps": {},
   });
   const run = (name: string, ...args: unknown[]) =>
     stub.registeredCommands.get(`mf-dashboard.${name}`)!(...args);
-  const enabled = () =>
+  const contextValue = (key: string) =>
     context.mock.calls
-      .filter(
-        ({ arguments: args }) =>
-          args[0] === "setContext" && args[1] === "mf-dashboard.canUpdateTypes",
-      )
+      .filter(({ arguments: args }) => args[0] === "setContext" && args[1] === key)
       .at(-1)?.arguments[2];
+  const enabled = () => contextValue("mf-dashboard.canUpdateTypes");
+  const welcome = webviews.mock.calls.find(({ arguments: [id] }) => id === "mf-dashboard.welcome")
+    ?.arguments[1] as WebviewViewProvider;
+  const closed = new stub.EventEmitter<void>();
+  t.after(() => closed.fire());
+  const welcomeView = { webview: { html: "" }, onDidDispose: closed.event };
+  await welcome.resolveWebviewView(
+    welcomeView as unknown as WebviewView,
+    { state: undefined },
+    {
+      isCancellationRequested: false,
+      onCancellationRequested: closed.event,
+    },
+  );
   assert.equal(enabled(), false);
+  assert.equal(contextValue("mf-dashboard.welcomeVisible"), true);
+  assert.match(
+    welcomeView.webview.html,
+    /href="command:mf-dashboard\.discover">Find microfrontends<\/a>/,
+  );
   await run("rebuildAllTypes");
   assert.equal(progress.mock.callCount(), 0);
   await run("discover");
   assert.equal(enabled(), false);
+  assert.equal(contextValue("mf-dashboard.welcomeVisible"), true);
+  assert.match(welcomeView.webview.html, /No Module Federation configs found\./);
+  assert.match(welcomeView.webview.html, /href="command:mf-dashboard\.discover">Search again<\/a>/);
   writeApp("disabled");
   fs.writeFileSync(
     writeApp("widget"),
@@ -190,6 +245,7 @@ test("discovery shows progress and enables type builds only after apps load", as
   });
   await scan;
   assert.equal(enabled(), true);
+  assert.equal(contextValue("mf-dashboard.welcomeVisible"), false);
   await run("rebuildAppTypes", { app: "removed" });
   await run("rebuildAppTypes", { app: "disabled" });
   assert.equal(progress.mock.callCount(), 2);
@@ -220,17 +276,23 @@ test("finding microfrontends hides the previous tree and types view and ignores 
   const scanning = new Promise<void>((resolve) => {
     complete = resolve;
   });
-  t.mock.method(session, "discover", () => scanning);
+  let showApps = () => {};
+  t.mock.method(session, "discover", (_log: unknown, onAppsReady?: () => void) => {
+    showApps = () => onAppsReady?.();
+    return scanning;
+  });
   const refresh = t.mock.method(session, "refresh");
-  const run = (name: string) => stub.registeredCommands.get(`mf-dashboard.${name}`)!();
+  const openConfig = t.mock.method(dashboard, "openConfig", async () => {});
+  const run = (name: string, ...args: unknown[]) =>
+    stub.registeredCommands.get(`mf-dashboard.${name}`)!(...args);
   const viewVisible = () =>
     context.mock.calls
       .filter(
-        ({ arguments: args }) =>
-          args[0] === "setContext" && args[1] === "mf-dashboard.typesVisible",
+        ({ arguments: args }) => args[0] === "setContext" && args[1] === "mf-dashboard.appsVisible",
       )
       .at(-1)?.arguments[2];
   assert.equal(viewVisible(), true);
+  const widget = dashboard.getChildren()[0];
   const scan = run("discover");
   try {
     assert.equal(viewVisible(), false);
@@ -238,15 +300,151 @@ test("finding microfrontends hides the previous tree and types view and ignores 
     await run("refresh");
     await run("useFlat");
     await run("openTypesBuildReport");
+    await run("openConfig", widget);
     assert.equal(refresh.mock.callCount(), 0);
     assert.equal(report.mock.callCount(), 0);
     assert.equal(values.get("mf-dashboard.structure"), "tree");
+    assert.equal(openConfig.mock.callCount(), 0);
+
+    showApps();
+    assert.equal(viewVisible(), true);
+    await run("openConfig", widget);
+    await run("refresh");
+    assert.equal(openConfig.mock.calls[0]?.arguments[0], widget);
+    assert.equal(refresh.mock.callCount(), 0);
   } finally {
     complete();
     await scan;
   }
   assert.equal(viewVisible(), true);
   assert.equal(dashboard.getChildren()[0]?.name, "widget");
+});
+
+test("Find shows a localized message when no project folder is open", async (t) => {
+  const message = t.mock.method(stub.window, "showInformationMessage");
+  const { session } = await start(t, [], { "mf-dashboard.language": "ru" });
+  const discover = t.mock.method(session, "discover");
+  await stub.registeredCommands.get("mf-dashboard.discover.ru")!();
+  assert.equal(discover.mock.callCount(), 0);
+  assert.equal(
+    message.mock.calls[0]?.arguments[0],
+    "Откройте папку проекта, чтобы найти микрофронты.",
+  );
+});
+
+test("Find reports no local apps when external manifest rows keep the dashboard visible", async (t) => {
+  const { root } = fixture(t);
+  const context = t.mock.method(stub.commands, "executeCommand");
+  const message = t.mock.method(stub.window, "showInformationMessage");
+  t.mock.method(globalThis, "fetch", async () => new Response("{}", { status: 404 }));
+  const { dashboard } = await start(t, root, {
+    "mf-dashboard.extraManifestUrls": ["http://127.0.0.1:39991/mf-manifest.json"],
+    "mf-dashboard.language": "ru",
+  });
+  const contextValue = (key: string) =>
+    context.mock.calls
+      .filter(({ arguments: [command, name] }) => command === "setContext" && name === key)
+      .at(-1)?.arguments[2];
+  assert.equal(dashboard.getChildren().length, 1);
+  assert.equal(contextValue("mf-dashboard.welcomeVisible"), false);
+  assert.equal(contextValue("mf-dashboard.appsVisible"), false);
+  assert.equal(message.mock.callCount(), 0);
+  await stub.registeredCommands.get("mf-dashboard.discover.ru")!();
+  assert.equal(dashboard.getChildren().length, 1);
+  assert.equal(contextValue("mf-dashboard.welcomeVisible"), false);
+  assert.deepEqual(
+    message.mock.calls.map(({ arguments: args }) => args[0]),
+    ["Конфиги Module Federation не найдены."],
+  );
+});
+
+test("flat sorting is saved across view switches and puts unknown ports last", async (t) => {
+  const { root } = fixture(t);
+  const commands = t.mock.method(stub.commands, "executeCommand");
+  const { session, dashboard, state } = await start(t, root, defaultWorkspaceSettings());
+  session.loaded = [
+    localApp("catalog", root, { port: null }),
+    localApp("menu", root, { port: 3004 }),
+    localApp("shared", root, { port: 3004 }),
+    localApp("shell", root, {
+      port: 3000,
+      remotes: [{ name: "menu", alias: "menu", url: null }],
+    }),
+  ];
+  const run = (name: string) => stub.registeredCommands.get(`mf-dashboard.${name}`)!();
+  const names = () => dashboard.getChildren().map(({ name }) => name);
+  const markedSort = () =>
+    commands.mock.calls
+      .filter(
+        ({ arguments: [command, key] }) =>
+          command === "setContext" && key === "mf-dashboard.flatSort",
+      )
+      .at(-1)?.arguments[2];
+  await run("sortByPort.ru");
+  assert.equal(state.has("mf-dashboard.flatSort"), false);
+  await run("useFlat");
+  assert.equal(markedSort(), "name");
+  assert.deepEqual(names(), ["catalog", "menu", "shared", "shell"]);
+  await run("sortByPort.ru");
+  assert.equal(markedSort(), "port");
+  assert.deepEqual(names(), ["shell", "menu", "shared", "catalog"]);
+  assert.equal(state.get("mf-dashboard.flatSort"), "port");
+  await run("useTree");
+  assert.equal(markedSort(), null);
+  assert.deepEqual(names(), ["catalog", "shared", "shell"]);
+  assert.deepEqual(
+    dashboard
+      .getChildren()
+      .at(-1)
+      ?.children.map(({ name }) => name),
+    ["menu"],
+  );
+  await run("useFlat");
+  assert.equal(markedSort(), "port");
+  assert.deepEqual(names(), ["shell", "menu", "shared", "catalog"]);
+  await run("sortByName");
+  assert.equal(markedSort(), "name");
+  assert.deepEqual(names(), ["catalog", "menu", "shared", "shell"]);
+});
+
+test("the first search opens one dependency level before runtime checks finish", async (t) => {
+  const { root } = fixture(t);
+  for (const [name, remote] of [
+    ["shell", "catalog"],
+    ["catalog", "shared"],
+    ["shared", ""],
+  ] as const) {
+    const folder = path.join(root, name);
+    fs.mkdirSync(folder);
+    const remotes = remote ? { [remote]: `${remote}@http://localhost:4510/mf-manifest.json` } : {};
+    fs.writeFileSync(
+      path.join(folder, "rsbuild.config.ts"),
+      `export default {server:{port:4510}, plugins:[pluginModuleFederation({name:${JSON.stringify(name)}, remotes:${JSON.stringify(remotes)}, dts:false})]};`,
+    );
+  }
+  const { dashboard, session } = await start(t, root, { "mf-dashboard.types.autoCheck": false });
+  let checking: string | undefined;
+  const subscription = dashboard.onDidChangeTreeData(() => {
+    if (session.probeRunning) checking ??= dashboard.getChildren()[0]?.description;
+  });
+  t.after(() => subscription.dispose());
+  await stub.registeredCommands.get("mf-dashboard.discover")!();
+  assert.match(checking ?? "", /Checking status/);
+  const [shell] = dashboard.getChildren();
+  const [catalog] = dashboard.getChildren(shell);
+  const [shared] = dashboard.getChildren(catalog);
+  assert.equal(shell.name, "shell");
+  assert.equal(catalog.name, "catalog");
+  assert.equal(shared.name, "shared");
+  assert.equal(
+    dashboard.getTreeItem(shell).collapsibleState,
+    stub.TreeItemCollapsibleState.Expanded,
+  );
+  assert.equal(
+    dashboard.getTreeItem(catalog).collapsibleState,
+    stub.TreeItemCollapsibleState.Collapsed,
+  );
+  assert.doesNotMatch(shell.description, /Checking status/);
 });
 
 test("duplicate names leave the saved graph intact after a failed rescan", async (t) => {
@@ -263,6 +461,109 @@ test("duplicate names leave the saved graph intact after a failed rescan", async
     session.loaded.map(({ name }) => name),
     ["first"],
   );
+});
+
+for (const existing of [false, true]) {
+  test(`a failed multi-root publish restores ${existing ? "the previous graphs" : "the empty workspace"}`, async (t) => {
+    const first = fixture(t);
+    const second = fixture(t);
+    first.writeApp("catalog");
+    second.writeApp("portal");
+    const roots = [
+      { name: "first", path: first.root },
+      { name: "second", path: second.root },
+    ];
+    const { session } = await start(t, roots, {});
+    if (existing) await session.discover();
+    const files = roots.map(({ path: root }) => path.join(root, GRAPH_FILE));
+    const before = files.map((file) => (existing ? fs.readFileSync(file, "utf8") : null));
+    first.writeApp("search");
+
+    const rename = fs.promises.rename;
+    t.mock.method(fs.promises, "rename", async (from: fs.PathLike, to: fs.PathLike) => {
+      if (to === files[1]) {
+        assert.notEqual(fs.readFileSync(files[0], "utf8"), before[0]);
+        throw new Error("second graph could not be replaced");
+      }
+      await rename(from, to);
+    });
+    await assert.rejects(session.discover(), /second graph could not be replaced/);
+
+    assert.deepEqual(
+      files.map((file) => (fs.existsSync(file) ? fs.readFileSync(file, "utf8") : null)),
+      before,
+    );
+    for (const file of files)
+      assert.equal(
+        fs.readdirSync(path.dirname(file)).some((name) => name.endsWith(".tmp")),
+        false,
+      );
+    await session.refresh();
+    assert.deepEqual(
+      session.loaded.map(({ name }) => name),
+      existing ? ["catalog", "portal"] : [],
+    );
+  });
+}
+
+test("a failed multi-root write cannot roll back another writer's graph", async (t) => {
+  const first = fixture(t);
+  const second = fixture(t);
+  const roots = [
+    { name: "first", path: first.root },
+    { name: "second", path: second.root },
+  ];
+  await prepareWorkspaceGraphDirectories(roots);
+  const settings: DashboardSettings = {
+    apps: {},
+    envMode: "development",
+    ignorePaths: [],
+    extraManifestUrls: [],
+    structure: "tree",
+  };
+  let failSecondRoot = () => {};
+  const paused = new Promise<void>((resolve) => {
+    failSecondRoot = resolve;
+  });
+  let firstRootWritten = () => {};
+  const published = new Promise<void>((resolve) => {
+    firstRootWritten = resolve;
+  });
+  const rename = fs.promises.rename;
+  t.mock.method(fs.promises, "rename", async (from: fs.PathLike, to: fs.PathLike) => {
+    if (to === path.join(second.root, GRAPH_FILE)) {
+      firstRootWritten();
+      await paused;
+      throw new Error("second graph could not be replaced");
+    }
+    await rename(from, to);
+  });
+
+  const failed = assert.rejects(
+    writeWorkspaceGraphs(roots, settings, {}, [], new Set(), () => true),
+    /second graph could not be replaced/,
+  );
+  await published;
+  const independent = writeWorkspaceGraphs(
+    [roots[0]],
+    { ...settings, startScript: "preview" },
+    {},
+    [],
+    new Set(),
+    () => true,
+  );
+  try {
+    assert.equal(
+      await Promise.race([independent.then(() => "published"), delay(100, "waiting")]),
+      "waiting",
+    );
+  } finally {
+    failSecondRoot();
+    await Promise.all([failed, independent]);
+  }
+  const graphs = await readWorkspaceGraphs(roots, noLog);
+  assert.equal(graphs.files[0]?.graph.settings.startScript, "preview");
+  assert.equal(fs.existsSync(path.join(second.root, GRAPH_FILE)), false);
 });
 
 test("refresh keeps the saved graph while an explicit build reports changed configurations", async (t) => {
@@ -425,6 +726,34 @@ test("a saved graph resolves paths in another checkout and rejects paths outside
   const rejected = await readWorkspaceGraphs(copiedRoots, noLog);
   assert.deepEqual(rejected.apps, []);
   assert.equal(rejected.incomplete, true);
+});
+
+test("a shared types directory round-trips without hiding other apps in the graph", async (t) => {
+  const { root, writeApp } = fixture(t);
+  writeApp("portal");
+  fs.writeFileSync(
+    writeApp("catalog"),
+    'export default {name:"catalog", dts:{generateTypes:{typesFolder:"../types"}, consumeTypes:false}};',
+  );
+  const { session } = await start(t, root, {});
+  await session.discover();
+  assert.deepEqual(
+    session.loaded.map(({ name }) => name),
+    ["catalog", "portal"],
+  );
+  assert.equal(session.loaded[0]?.typesFolder, "../types");
+  assert.equal(session.workspaceGraph?.incomplete, false);
+
+  const file = path.join(root, GRAPH_FILE);
+  const graph = JSON.parse(fs.readFileSync(file, "utf8"));
+  graph.apps[0].typesFolder = "../../outside-workspace";
+  fs.writeFileSync(file, JSON.stringify(graph));
+  const remaining = await readWorkspaceGraphs([{ name: "workspace", path: root }], noLog);
+  assert.deepEqual(
+    remaining.apps.map(({ name }) => name),
+    ["portal"],
+  );
+  assert.equal(remaining.incomplete, true);
 });
 
 test("Find preserves computed URLs in an ignored graph and reindexes after edits to local dotenv", async (t) => {

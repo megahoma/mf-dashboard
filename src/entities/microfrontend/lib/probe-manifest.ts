@@ -69,7 +69,10 @@ async function requestManifest(
   let response: Awaited<ReturnType<Net["get"]>>;
   try {
     if (cache) cache.manifestRequests++;
-    response = await request(() => net.get(url), cache, { kind: "manifest", url });
+    response = await request(() => net.get(url, { parseJson: true }), cache, {
+      kind: "manifest",
+      url,
+    });
   } catch (error) {
     const timeout = isTimeoutError(error);
     logDuration(
@@ -110,9 +113,44 @@ async function requestManifest(
       url,
       reason: response.json == null ? "invalid-json" : "missing-or-invalid-types-metadata",
     });
-    return { ...blank, manifestReachable: true, buildVersion, ...modules };
   }
-  return { ...blank, manifestReachable: true, buildVersion, zipUrl, ...modules };
+  return {
+    ...blank,
+    manifestReachable: true,
+    manifestValid: isFederationManifest(response.json),
+    buildVersion,
+    zipUrl,
+    ...modules,
+  };
+}
+
+function isFederationManifest(json: unknown): boolean {
+  if (
+    !isRecord(json) ||
+    typeof json.id !== "string" ||
+    typeof json.name !== "string" ||
+    !isRecord(json.metaData)
+  ) {
+    return false;
+  }
+  const { remoteEntry, publicPath } = json.metaData;
+  if (remoteEntry !== undefined)
+    return isRecord(remoteEntry) && typeof remoteEntry.name === "string";
+
+  // Vite's import-map mode lists a JavaScript entry for each expose.
+  return (
+    typeof publicPath === "string" &&
+    Array.isArray(json.exposes) &&
+    json.exposes.some(
+      (expose) =>
+        isRecord(expose) &&
+        typeof expose.path === "string" &&
+        isRecord(expose.assets) &&
+        isRecord(expose.assets.js) &&
+        Array.isArray(expose.assets.js.sync) &&
+        typeof expose.assets.js.sync[0] === "string",
+    )
+  );
 }
 
 function publicPathOf(meta: Record<string, unknown>, manifestUrl: string): string {

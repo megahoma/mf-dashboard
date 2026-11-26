@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
+import { lock } from "proper-lockfile";
 import { glob } from "tinyglobby";
 import {
   CONFIG_FILE,
@@ -71,15 +72,14 @@ function relative(root: string, file: string): string | undefined {
     : undefined;
 }
 
+function isRelativeGraphPath(file: unknown): file is string {
+  return (
+    typeof file === "string" && file !== "" && !/[\\:\0]/.test(file) && !path.posix.isAbsolute(file)
+  );
+}
+
 function inside(root: string, file: unknown): string | undefined {
-  if (
-    typeof file !== "string" ||
-    file === "" ||
-    /[\\:\0]/.test(file) ||
-    path.posix.isAbsolute(file) ||
-    file.split("/").some((part) => part === "..")
-  )
-    return;
+  if (!isRelativeGraphPath(file) || file.split("/").includes("..")) return;
   return path.resolve(root, file);
 }
 
@@ -295,7 +295,13 @@ export async function writeWorkspaceGraphs(
   ownershipSources: ReadonlySet<string>,
   stillCurrent: () => boolean,
 ): Promise<void> {
-  const prepared: { folder: string; target: string; temporary: string; contents: string }[] = [];
+  const prepared: {
+    folder: string;
+    target: string;
+    temporary: string;
+    contents: string;
+    backup?: string;
+  }[] = [];
   const resolvedKeys = new Set(apps.map((app) => app.settingsKey ?? app.name));
   const unresolved = new Map<string, Record<string, AppSetting>>();
   for (const [key, selection] of Object.entries(selections)) {
@@ -457,15 +463,88 @@ export async function writeWorkspaceGraphs(
     });
   }
   if (!stillCurrent()) throw new Error("Workspace changed during Find microfrontends");
+  const published: typeof prepared = [];
+  const lockPaths = new Map<string, string>();
+  const lostLocks = new Map<string, Error>();
+  const releaseLocks: (() => Promise<void>)[] = [];
   try {
     for (const entry of prepared) {
       if (!(await fs.lstat(entry.folder)).isDirectory()) throw new Error("Invalid graph directory");
+      lockPaths.set(entry.folder, await fs.realpath(entry.folder));
+    }
+    // A single order lets windows with overlapping workspace folders publish independently.
+    for (const folder of [...new Set(lockPaths.values())].sort()) {
+      releaseLocks.push(
+        await lock(folder, {
+          realpath: false,
+          lockfilePath: path.join(folder, ".graph-write.tmp"),
+          stale: 60_000,
+          update: 5_000,
+          retries: { retries: 20, minTimeout: 25, maxTimeout: 100 },
+          onCompromised: (error) => lostLocks.set(folder, error),
+        }),
+      );
+    }
+    if (!stillCurrent()) throw new Error("Workspace changed during Find microfrontends");
+    for (const entry of prepared) {
+      const previous = await fs.lstat(entry.target).catch((error: unknown) => {
+        if (isRecord(error) && error.code === "ENOENT") return undefined;
+        throw error;
+      });
+      if (previous) {
+        if (!previous.isFile()) throw new Error("Invalid existing microfrontend graph file");
+        const backup = path.join(entry.folder, `.graph-${randomUUID()}.tmp`);
+        await fs.copyFile(entry.target, backup, fs.constants.COPYFILE_EXCL);
+        entry.backup = backup;
+      }
       await fs.writeFile(entry.temporary, entry.contents, { flag: "wx", mode: 0o600 });
     }
     if (!stillCurrent()) throw new Error("Workspace changed during Find microfrontends");
-    for (const entry of prepared) await fs.rename(entry.temporary, entry.target);
+    for (const entry of prepared) {
+      const lost = lostLocks.values().next().value;
+      if (lost) throw lost;
+      await fs.rename(entry.temporary, entry.target);
+      published.push(entry);
+    }
+  } catch (error) {
+    const restored = await Promise.allSettled(
+      published.map(async (entry) => {
+        const { backup, target } = entry;
+        const lost = lostLocks.get(lockPaths.get(entry.folder)!);
+        if (lost) {
+          delete entry.backup;
+          throw new Error(
+            `Could not restore ${target} after losing the graph lock${backup ? `. Previous graph is in ${backup}` : ""}`,
+            { cause: lost },
+          );
+        }
+        if (!backup) return fs.rm(target, { force: true });
+        // Leave the backup available if the filesystem rejects the restore.
+        delete entry.backup;
+        try {
+          await fs.rename(backup, target);
+        } catch (cause) {
+          throw new Error(`Could not restore ${target}. Previous graph is in ${backup}`, { cause });
+        }
+      }),
+    );
+    const failures = restored.flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : [],
+    );
+    if (failures.length)
+      throw new AggregateError(
+        [error, ...failures],
+        `Could not restore the workspace graphs\n${failures.join("\n")}`,
+        { cause: error },
+      );
+    throw error;
   } finally {
-    await Promise.all(prepared.map((entry) => fs.rm(entry.temporary, { force: true })));
+    await Promise.allSettled(
+      prepared.flatMap(({ temporary, backup }) =>
+        (backup ? [temporary, backup] : [temporary]).map((file) => fs.rm(file, { force: true })),
+      ),
+    );
+    await Promise.allSettled(releaseLocks.map((release) => release()));
   }
 }
 
@@ -486,6 +565,9 @@ async function decodeApp(root: WorkspaceRoot, entry: unknown, version: number) {
   const tsconfig = entry.tsconfig === null ? null : inside(root.path, entry.tsconfig);
   const generatedZipPath =
     entry.generatedZipPath === undefined ? undefined : inside(root.path, entry.generatedZipPath);
+  const typesFolder = entry.typesFolder;
+  const typesPath =
+    folder && isRelativeGraphPath(typesFolder) ? path.resolve(folder, typesFolder) : undefined;
   if (
     !folder ||
     !configFile ||
@@ -497,8 +579,9 @@ async function decodeApp(root: WorkspaceRoot, entry: unknown, version: number) {
     typeof entry.generateTypes !== "boolean" ||
     typeof entry.consumeTypes !== "boolean" ||
     typeof entry.manifestPath !== "string" ||
-    typeof entry.typesFolder !== "string" ||
-    !inside(folder, entry.typesFolder) ||
+    typeof typesFolder !== "string" ||
+    !typesPath ||
+    !pathIsInside(root.path, typesPath) ||
     !(entry.compilerInstance === null || typeof entry.compilerInstance === "string") ||
     !(
       entry.port === null ||
@@ -537,7 +620,7 @@ async function decodeApp(root: WorkspaceRoot, entry: unknown, version: number) {
     generatedZipPath,
     explicitConfig,
     customZip,
-    inside(folder, entry.typesFolder),
+    typesPath,
   ].filter((file): file is string => typeof file === "string");
   if (!(await Promise.all(checkedPaths.map((file) => confined(root.path, file)))).every(Boolean))
     throw new Error("Graph application path must stay inside the workspace");
@@ -556,7 +639,7 @@ async function decodeApp(root: WorkspaceRoot, entry: unknown, version: number) {
     consumeTypes: entry.consumeTypes,
     manifestPath: entry.manifestPath,
     devManifestPath: typeof entry.devManifestPath === "string" ? entry.devManifestPath : undefined,
-    typesFolder: entry.typesFolder,
+    typesFolder,
     tsconfig: tsconfig ?? null,
     compilerInstance: entry.compilerInstance,
     bundler: entry.bundler === "rslib" ? "rslib" : undefined,
@@ -629,7 +712,20 @@ export async function readWorkspaceGraphs(
       )
         throw new Error("Unsupported microfrontend graph");
       const version = graph.version;
-      const apps = await Promise.all(graph.apps.map((app) => decodeApp(root, app, version)));
+      const decoded = await Promise.allSettled(
+        graph.apps.map((app) => decodeApp(root, app, version)),
+      );
+      const apps: Awaited<ReturnType<typeof decodeApp>>[] = [];
+      for (const entry of decoded) {
+        if (entry.status === "fulfilled") apps.push(entry.value);
+        else {
+          result.incomplete = true;
+          log.event("warn", "graph.app.read.failed", {
+            root: root.path,
+            error: String(entry.reason),
+          });
+        }
+      }
       const combined = [...result.apps, ...apps.map(({ app }) => app)];
       if (
         new Set(combined.map(({ name }) => name)).size !== combined.length ||

@@ -13,6 +13,7 @@ function urlPort(url: URL): number {
 }
 
 export function classify(input: StatusInput): StatusKind {
+  if (input.checking) return "checking";
   if (input.role === "app") {
     if (input.port === null) return "unknownPort";
     return input.portOpen ? "listen" : "silent";
@@ -62,7 +63,8 @@ export function grayLabel(
   if (kind === "invalidUrl" && input.role === "external") return vocabulary.invalidUrl;
   const version =
     kind === "listen" && input.manifestEnabled && input.buildVersion ? input.buildVersion : null;
-  return dotted([grayPort(input.port), vocabulary[kind], version]);
+  const status = kind === "listen" || kind === "silent" ? null : vocabulary[kind];
+  return dotted([grayPort(input.port), status, version]);
 }
 
 export function rowModel(
@@ -76,19 +78,18 @@ export function rowModel(
   if (input.role !== "external" && input.port !== null)
     lines.push(`${vocabulary.localPort}: ${input.port}`);
   if (input.url && input.url.trim() !== "") lines.push(`${vocabulary.url}: ${input.url}`);
-  const hint = input.role === "app" ? null : invalidUrlHint(input.url, vocabulary);
-  if (hint) lines.push(hint);
-  if (input.requestFailure && kind !== "invalidUrl") {
-    lines.push(
-      input.requestFailure === "timeout"
-        ? vocabulary.requestTimeout
-        : input.requestFailure === "network"
-          ? vocabulary.requestNetworkError
-          : input.requestFailure === "HTTP error"
-            ? vocabulary.requestHttpError
-            : input.requestFailure,
-    );
-  }
+  const hint = input.role === "app" && !input.url ? null : invalidUrlHint(input.url, vocabulary);
+  const failure = kind === "invalidUrl" ? null : input.requestFailure;
+  const urlIssue =
+    hint ??
+    (failure === "timeout"
+      ? vocabulary.requestTimeout
+      : failure === "network"
+        ? vocabulary.requestNetworkError
+        : failure === "HTTP error"
+          ? vocabulary.requestHttpError
+          : (failure ?? null));
+  if (urlIssue) lines.push(urlIssue);
   lines.push(vocabulary[kind]);
-  return { kind, description, tooltip: lines.join("\n") };
+  return { kind, description, tooltip: lines.join("\n"), urlIssue };
 }

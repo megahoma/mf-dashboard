@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { createLoopbackNet } from "../../../entities/microfrontend/index.ts";
+import type { DashboardTerms } from "../../../shared/config/index.ts";
 import { safeError } from "../../../shared/lib/logging.ts";
 import type { LogContext } from "../../../shared/models/logging.ts";
 import type { ManifestDocuments } from "../models/documents.ts";
@@ -10,6 +11,7 @@ export async function openManifestPreview(
   name: string,
   url: string,
   log: LogContext,
+  terms: DashboardTerms,
 ): Promise<void> {
   const started = Date.now();
   log.event("info", "manifest.open.started", { app: name, url: url });
@@ -18,12 +20,14 @@ export async function openManifestPreview(
     response = await createLoopbackNet().get(url);
   } catch (error) {
     log.event("error", "manifest.open.failed", { reason: "network", ...safeError(error) });
-    void vscode.window.showErrorMessage(manifestFailureMessage(error));
+    void vscode.window.showErrorMessage(manifestFailureMessage(error, undefined, terms));
     return;
   }
   if (!response.ok) {
     log.event("error", "manifest.open.failed", { reason: "http", status: response.status });
-    void vscode.window.showErrorMessage(manifestFailureMessage(new Error("http"), response.status));
+    void vscode.window.showErrorMessage(
+      manifestFailureMessage(new Error("http"), response.status, terms),
+    );
     return;
   }
   try {
@@ -36,6 +40,6 @@ export async function openManifestPreview(
     });
   } catch (error) {
     log.event("error", "manifest.open.failed", { reason: "editor", ...safeError(error) });
-    void vscode.window.showErrorMessage("MF dashboard: could not open manifest preview");
+    void vscode.window.showErrorMessage(terms.manifestPreviewError);
   }
 }

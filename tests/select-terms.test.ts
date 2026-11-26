@@ -37,13 +37,13 @@ test("ru uses the Russian bundle and not the auto translator", () => {
   assert.equal(selected.discover, "Найти микрофронты");
   assert.equal(selected.urlMissing, "URL отсутствует");
   assert.equal(selected.urlMalformed, "URL некорректен");
-  assert.equal(selected.empty, "Конфиги Module Federation не найдены");
+  assert.equal(selected.checking, "Проверяем статус…");
   assert.equal(selected.scriptMissing, "script не найден");
   assert.equal(selected.exposes, "экспорты");
   assert.equal(selected.shared, "общие");
   assert.equal(selected.singleton, "синглтон");
   assert.equal(selected.folder, "каталог");
-  assert.equal(selected.localPort, "локальный порт");
+  assert.equal(selected.localPort, "Порт");
   assert.equal(selected.manifest, "манифест");
   assert.equal(selected.manifestOff, "выключен в конфиге");
   assert.equal(selected.url, "URL");

@@ -15,6 +15,10 @@ export class Uri {
   static file(path: string): Uri {
     return new Uri("file", path);
   }
+  static parse(value: string): Uri {
+    const url = new URL(value);
+    return new Uri(url.protocol.slice(0, -1), `//${url.host}${url.pathname}`, url.search.slice(1));
+  }
   get fsPath(): string {
     return this.path;
   }
@@ -92,6 +96,12 @@ export const workspace = {
 export const LogLevel = { Trace: 1, Debug: 2, Info: 3, Warning: 4, Error: 5, Off: 0 };
 export const ConfigurationTarget = { Workspace: 2 };
 export const l10n = { t: (text: string) => text };
+export const env = {
+  clipboard: { async writeText(_text: string) {} },
+  async openExternal(_uri: Uri) {
+    return true;
+  },
+};
 export const outputChannels: {
   name: string;
   options: { log: boolean };
@@ -136,14 +146,24 @@ export const window = {
   },
   createTreeView(_id: string, _options: { treeDataProvider: unknown }) {
     const selection = new EventEmitter<unknown>();
+    const visibility = new EventEmitter<{ visible: boolean }>();
     return {
       selection: [],
+      message: undefined as string | undefined,
       onDidChangeSelection: selection.event,
-      dispose: () => selection.dispose(),
+      onDidChangeVisibility: visibility.event,
+      setVisible: (visible: boolean) => visibility.fire({ visible }),
+      dispose: () => {
+        visibility.dispose();
+        selection.dispose();
+      },
     };
   },
-  registerWebviewViewProvider: () => ({ dispose() {} }),
+  registerWebviewViewProvider: (_id: string, _provider: unknown) => ({ dispose() {} }),
   showErrorMessage(_message: string) {},
+  setStatusBarMessage(_message: string, _hideAfter: number) {
+    return { dispose() {} };
+  },
   async showTextDocument(_document: unknown, _options: unknown) {},
 };
 export const commands = {

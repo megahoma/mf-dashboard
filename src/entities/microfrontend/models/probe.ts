@@ -6,7 +6,7 @@ export type Net = {
   connect(port: number): Promise<boolean>;
   get(
     url: string,
-    init?: { ifModifiedSince?: number },
+    init?: { ifModifiedSince?: number; parseJson?: boolean },
   ): Promise<{
     ok: boolean;
     status?: number;
@@ -19,6 +19,7 @@ export type Net = {
 
 export type ArtifactProbe = {
   manifestReachable: boolean;
+  manifestValid?: boolean;
   requestFailure?: "timeout" | "network" | `HTTP ${number}` | "HTTP error";
   buildVersion: string | null;
   zipUrl: string | null;
