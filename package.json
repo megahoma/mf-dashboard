@@ -1173,6 +1173,17 @@
           "default": 5000,
           "description": "%configuration.probeIntervalMs%"
         },
+        "mf-dashboard.types.buildConcurrency": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1,
+          "description": "%configuration.types.buildConcurrency%"
+        },
+        "mf-dashboard.types.useBuildCache": {
+          "type": "boolean",
+          "default": true,
+          "description": "%configuration.types.useBuildCache%"
+        },
         "mf-dashboard.types.autoCheck": {
           "type": "boolean",
           "default": false,

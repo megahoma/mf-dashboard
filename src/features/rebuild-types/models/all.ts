@@ -7,6 +7,8 @@ export type RebuildAllContext = {
   apps: readonly LocalApp[];
   report?: RebuildAllReport;
   target?: string;
+  buildConcurrency?: number;
+  useBuildCache?: boolean;
   confirmations: ConfirmationStore;
   envMode: string;
   rebuildCommand: string;
@@ -17,7 +19,7 @@ export type RebuildAllContext = {
     app: LocalApp,
     customZipPath: string | null,
     tsconfigFingerprint: string,
-    external: readonly [string, string, string][],
+    dependencies: readonly [string, string, string][],
   ): Promise<string>;
   persist(): void | PromiseLike<void>;
   progress?(name: string, index: number, total: number): void;
@@ -38,6 +40,7 @@ export type RebuildAppStatus = {
     | "queued"
     | "running"
     | "rebuilt"
+    | "cached"
     | "current"
     | "installed"
     | "skipped"
@@ -46,6 +49,7 @@ export type RebuildAppStatus = {
   reason?: string;
   problems?: readonly SourceProblem[];
   installed?: readonly string[];
+  builtAt?: number;
 };
 
 export type RebuildAllReport = {

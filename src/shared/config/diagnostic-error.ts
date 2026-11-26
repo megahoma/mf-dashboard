@@ -16,4 +16,5 @@ export const REASONS = [
   "unsafe-types-folder",
   "path-escape",
   "shell-exit",
+  "parallel-output",
 ] as const;

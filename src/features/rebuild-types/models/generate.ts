@@ -81,6 +81,7 @@ export type GenerationInput = {
 };
 
 export type LocalGenerationInput = GenerationInput & {
+  parallel?: boolean;
   workspaceFingerprint: string;
   confirmed?: LocalGeneratedZip & { inputsFingerprint: string };
 };

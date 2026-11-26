@@ -170,4 +170,6 @@ export type WorkspaceSettings = DashboardSettings & {
   rebuildCommand: string;
   refetchCommand: string;
   typesAutoCheck: boolean;
+  buildConcurrency: number;
+  useBuildCache: boolean;
 };

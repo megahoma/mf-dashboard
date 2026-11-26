@@ -677,13 +677,15 @@ export class MfDashboardProvider
           report,
           apps,
           target: target?.app,
+          buildConcurrency: settings.buildConcurrency,
+          useBuildCache: settings.useBuildCache,
           confirmations: this.confirmations,
           envMode: settings.envMode,
           rebuildCommand: settings.rebuildCommand,
           refetchCommand: settings.refetchCommand,
           zipPathOverride: (app) => zipPaths.get(app.name),
           rebuildConfigStamp: (app) => this.knownAppsWorker.request("rebuildConfigStamp", app, log),
-          fingerprintInputs: (app, zip, tsconfig, external) =>
+          fingerprintInputs: (app, zip, tsconfig, dependencies) =>
             this.knownAppsWorker.request(
               "fingerprint",
               [
@@ -691,7 +693,7 @@ export class MfDashboardProvider
                 { envMode: settings.envMode, rebuildCommand: settings.rebuildCommand },
                 zip,
                 tsconfig,
-                external,
+                dependencies,
               ],
               log,
             ),
@@ -704,7 +706,7 @@ export class MfDashboardProvider
           status: (updates) => {
             for (const update of updates) {
               const key = update.settingsKey ?? update.app;
-              if (update.status === "current") currentApps.add(key);
+              if (update.status === "current" || update.status === "cached") currentApps.add(key);
               else currentApps.delete(key);
             }
             status?.(updates);

@@ -15,6 +15,21 @@ type Translate = (message: string, ...args: (string | number)[]) => string;
 
 export const TYPES_BUILD_VIEW = "mf-dashboard.typesBuild";
 
+const ONE_DAY_MS = 24 * 60 * 60 * 1_000;
+const archiveTime = new Intl.DateTimeFormat(undefined, { timeStyle: "short", hourCycle: "h23" });
+const archiveShortDateTime = new Intl.DateTimeFormat(undefined, {
+  day: "numeric",
+  month: "short",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
+const archiveDateTime = new Intl.DateTimeFormat(undefined, {
+  dateStyle: "long",
+  timeStyle: "medium",
+  hourCycle: "h23",
+});
+
 function statusLabel(status: RebuildAppStatus["status"], t: Translate): string {
   switch (status) {
     case "queued":
@@ -23,6 +38,8 @@ function statusLabel(status: RebuildAppStatus["status"], t: Translate): string {
       return t("Updating");
     case "rebuilt":
       return t("Rebuilt");
+    case "cached":
+      return t("Reused from cache");
     case "current":
       return t("No rebuild needed");
     case "installed":
@@ -40,6 +57,7 @@ const icons = {
   queued: "clock",
   running: "sync~spin",
   rebuilt: "check",
+  cached: "check",
   current: "check",
   installed: "check",
   skipped: "warning",
@@ -289,12 +307,18 @@ export class TypesBuildView implements vscode.TreeDataProvider<Row>, vscode.Disp
             : vscode.TreeItemCollapsibleState.None,
       );
       item.id = row.id ?? `types:${row.settingsKey ?? row.app}`;
-      item.description = result ? statusLabel(result.status, this.t) : this.t("Not built yet");
+      const description = result ? statusLabel(result.status, this.t) : this.t("Not built yet");
+      const builtAt = result?.builtAt;
+      item.description = description;
       item.iconPath = new vscode.ThemeIcon(
         result ? icons[result.status] : (planned?.icon ?? icons["not-applicable"]),
       );
-      item.tooltip =
-        result?.reason ?? (!result ? this.t(planned?.tooltip ?? "No types to update") : undefined);
+      item.tooltip = result?.reason;
+      if (builtAt !== undefined) {
+        const format = Date.now() - builtAt > ONE_DAY_MS ? archiveShortDateTime : archiveTime;
+        item.description = `${description} · ${format.format(builtAt)}`;
+        item.tooltip = this.t("Archive built at {0}", archiveDateTime.format(builtAt));
+      } else if (!result) item.tooltip = this.t(planned?.tooltip ?? "No types to update");
       item.accessibilityInformation = {
         label: [label, item.description, item.tooltip].filter(Boolean).join(", "),
       };
@@ -321,6 +345,8 @@ export class TypesBuildView implements vscode.TreeDataProvider<Row>, vscode.Disp
     if (this.error) lines.push(this.t("Could not update @mf-types: {0}", this.error));
     for (const app of this.sortedApps()) {
       lines.push("", `${appLabel(app)} — ${statusLabel(app.status, this.t)}`);
+      if (app.builtAt !== undefined)
+        lines.push(this.t("Archive built at {0}", archiveDateTime.format(app.builtAt)));
       if (app.reason) lines.push(app.reason);
       for (const problem of app.problems ?? []) {
         lines.push(

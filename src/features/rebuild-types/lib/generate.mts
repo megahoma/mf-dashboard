@@ -67,7 +67,7 @@ export function generateLocalFederatedTypes(
   onFailureTimings?: (timings: GenerationTimings) => void,
 ): Promise<LocalGenerationResult> {
   const queuedAt = performance.now();
-  return oneGeneration(async () => {
+  const run = async () => {
     const started = performance.now();
     const queueMs = Math.round(started - queuedAt);
     let phases = emptyGenerationPhaseTimings();
@@ -83,7 +83,8 @@ export function generateLocalFederatedTypes(
       onFailureTimings?.(timings());
       throw error;
     }
-  });
+  };
+  return input.parallel ? run() : oneGeneration(run);
 }
 
 function runGenerationProcess(

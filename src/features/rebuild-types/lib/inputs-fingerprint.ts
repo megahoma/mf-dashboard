@@ -39,7 +39,7 @@ export function inputsFingerprint(
   context: Pick<RebuildAllContext, "envMode" | "rebuildCommand">,
   customZipPath: string | null,
   tsconfigFingerprint: string,
-  external: readonly [string, string, string][],
+  dependencies: readonly [string, string, string][],
 ): string {
   const hash = createHash("sha256");
   const envMode = app.launchEnvironment?.envMode ?? context.envMode;
@@ -55,7 +55,7 @@ export function inputsFingerprint(
       context.rebuildCommand,
       customZipPath,
       tsconfigFingerprint,
-      external,
+      dependencies,
     ]),
   );
   if (app.bundler) hash.update(app.bundler);

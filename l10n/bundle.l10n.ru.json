@@ -20,6 +20,8 @@
   "Queued": "В очереди",
   "Updating": "Обновляется",
   "Rebuilt": "Пересобрано",
+  "Reused from cache": "Взято из кеша",
+  "Archive built at {0}": "Архив собран {0}",
   "No rebuild needed": "Пересборка не потребовалась",
   "Installed": "Установлено",
   "Skipped": "Пропущено",

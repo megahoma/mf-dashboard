@@ -14,20 +14,72 @@ registerHooks({
 });
 const { TypesBuildView } = await import("../src/app/lib/types-build-view.ts");
 
-test("no rebuild needed applies even to an app that only consumes types", async (t) => {
-  const view = new TypesBuildView({ apps: [{ app: "catalog", status: "current" }] });
+test("cached archives and unchanged installed types have distinct labels", async (t) => {
+  const builtAt = new Date(2025, 0, 5, 14, 32, 1).getTime();
+  const day = 24 * 60 * 60 * 1_000;
+  let now = builtAt + 60 * 60 * 1_000;
+  t.mock.method(Date, "now", () => now);
+  const shortTime = new Intl.DateTimeFormat(undefined, {
+    timeStyle: "short",
+    hourCycle: "h23",
+  }).format(builtAt);
+  const shortDateTime = new Intl.DateTimeFormat(undefined, {
+    day: "numeric",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).format(builtAt);
+  const fullDate = new Intl.DateTimeFormat(undefined, {
+    dateStyle: "long",
+    timeStyle: "medium",
+    hourCycle: "h23",
+  }).format(builtAt);
+  const view = new TypesBuildView(
+    {
+      apps: [
+        { app: "catalog", status: "current" },
+        { app: "legacy", status: "cached" },
+        { app: "shared", status: "cached", builtAt },
+      ],
+    },
+    (message, value) => message.replace("{0}", String(value)),
+  );
   t.after(() => view.dispose());
   view.setWorkspace(
-    [localApp("catalog", "/catalog", { generateTypes: false, consumeTypes: true })],
-    "tree",
+    [
+      localApp("catalog", "/catalog", { generateTypes: false, consumeTypes: true }),
+      localApp("legacy", "/legacy"),
+      localApp("shared", "/shared"),
+    ],
+    "flat",
   );
 
-  const item = view.getTreeItem(view.getChildren()[0]);
-  assert.equal(item.description, "No rebuild needed");
-  assert.equal(item.tooltip, undefined);
+  const [catalog, legacy, shared] = view.getChildren().map((row) => view.getTreeItem(row));
+  assert.equal(catalog.description, "No rebuild needed");
+  assert.equal(catalog.tooltip, undefined);
+  assert.equal(legacy.description, "Reused from cache");
+  assert.equal(legacy.tooltip, undefined);
+  assert.equal(shared.description, `Reused from cache · ${shortTime}`);
+  assert.equal(shared.tooltip, `Archive built at ${fullDate}`);
+  const sharedRow = view.getChildren()[2];
+  now = builtAt + day;
+  assert.equal(view.getTreeItem(sharedRow).description, `Reused from cache · ${shortTime}`);
+  now += 1;
+  assert.equal(view.getTreeItem(sharedRow).description, `Reused from cache · ${shortDateTime}`);
+  assert.equal(view.getTreeItem(sharedRow).tooltip, `Archive built at ${fullDate}`);
+  now = builtAt + 5 * day;
+  assert.equal(view.getTreeItem(sharedRow).description, `Reused from cache · ${shortDateTime}`);
   const report = t.mock.method(vscode.workspace, "openTextDocument");
   await view.openReport();
   assert.match(JSON.stringify(report.mock.calls[0]?.arguments[0]), /catalog — No rebuild needed/);
+  assert.match(JSON.stringify(report.mock.calls[0]?.arguments[0]), /shared — Reused from cache/);
+  assert.ok(
+    JSON.stringify(report.mock.calls[0]?.arguments[0]).includes(`Archive built at ${fullDate}`),
+  );
+  now = builtAt;
+  view.update([{ app: "shared", status: "rebuilt", builtAt }]);
+  assert.equal(view.getTreeItem(sharedRow).description, `Rebuilt · ${shortTime}`);
 });
 
 test("discovered apps can be rebuilt in either layout before the first workspace build", (t) => {

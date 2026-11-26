@@ -2,6 +2,7 @@ import { rebuildLocalArchive } from "../src/features/rebuild-types/lib/generate-
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import fs from "node:fs";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import os from "node:os";
@@ -24,9 +25,13 @@ import {
 } from "../src/entities/microfrontend/index.ts";
 import { verifyTypeInstalls } from "../src/features/observe-types/lib/verify.ts";
 import { rebuildAllTypes } from "../src/features/rebuild-types/lib/all.ts";
+import { listCompilerInputs } from "../src/features/rebuild-types/lib/compiler-inputs.ts";
 import { inputsFingerprint } from "../src/features/rebuild-types/lib/inputs-fingerprint.ts";
 import { rebuildTypes } from "../src/features/rebuild-types/lib/workflow.ts";
-import type { RebuildAllContext } from "../src/features/rebuild-types/models/all.ts";
+import type {
+  RebuildAllContext,
+  RebuildAppStatus,
+} from "../src/features/rebuild-types/models/all.ts";
 import {
   generateFederatedTypes,
   generateLocalFederatedTypes,
@@ -39,6 +44,7 @@ import type {
 import { installRemoteTypes } from "../src/features/refetch-types/lib/remote.ts";
 import { createLogger, safeError } from "../src/shared/lib/logging.ts";
 import { noLog } from "../src/shared/config/logging.ts";
+import { DiagnosticError } from "../src/shared/models/diagnostic-error.ts";
 import { loadKnownApps } from "../src/widgets/mf-dashboard-tree/lib/known-apps.ts";
 import { createAppParseCache } from "../src/widgets/mf-dashboard-tree/lib/app-parse-cache.ts";
 import { resolveRebuildApps } from "../src/widgets/mf-dashboard-tree/lib/rebuild-apps.ts";
@@ -1591,6 +1597,287 @@ test("offline workspace rebuild installs dependencies before generation and visi
   assert.deepEqual(reconfigured.rebuilt, ["leaf"]);
   assert.deepEqual(reconfigured.current, ["middle"]);
   assert.deepEqual(reconfigured.installed, []);
+});
+
+test("parallel generation checks SDK output paths and requires exclusive access for hooks", async (t) => {
+  const f = fixture(t);
+  const { name, folder } = f.app("fixture-app", 4501);
+  const configFile = path.join(folder, "rsbuild.config.cjs");
+  const tempConfigDir = path.join(folder, "node_modules/.federation");
+  const shared = path.join(path.dirname(folder), "shared-output");
+  fs.mkdirSync(shared);
+  fs.writeFileSync(path.join(folder, "tsconfig.json"), "{}");
+  fs.writeFileSync(
+    configFile,
+    `const { pluginModuleFederation } = require("@module-federation/rsbuild-plugin");
+module.exports = { plugins: [pluginModuleFederation({
+  name: ${JSON.stringify(name)}, exposes: { "./index": "./index.ts" },
+  dts: { generateTypes: { generateAPITypes: true, afterGenerate: process.env.FIXTURE_BUILD_HOOK ? () => {} : undefined } }
+})] };`,
+  );
+  installGeneratorFixture(
+    folder,
+    `fs.mkdirSync("dist", { recursive: true });
+fs.writeFileSync("dist/@mf-types.zip", Buffer.from([0x50, 0x4b, 3, 4, 0x41]));`,
+  );
+  fs.appendFileSync(
+    path.join(folder, "node_modules/@module-federation/dts-plugin/core.js"),
+    `
+const readConfig = exports.retrieveRemoteConfig;
+exports.retrieveRemoteConfig = options => {
+  const config = readConfig(options);
+  config.tsConfig.compilerOptions = {
+    rootDir: options.context,
+    outDir: path.join(options.context, "dist/@mf-types/compiled-types"),
+    incremental: true,
+    tsBuildInfoFile: options.moduleFederationConfig.name === "implicit" ? null : "./fixture.tsbuildinfo"
+  };
+  return { ...config, remoteOptions: options };
+};
+exports.retrieveMfTypesPath = (_config, options) => path.join(options.context, "dist/@mf-types");
+exports.retrieveTypesAssetsInfo = options => ({
+  apiTypesPath: path.join(options.context, "dist/@mf-types.d.ts"),
+  zipTypesPath: path.join(options.context, "dist/@mf-types.zip")
+});`,
+  );
+  const remote = {
+    context: folder,
+    generateAPITypes: true,
+    moduleFederationConfig: { exposes: { "./index": "./index.ts" } },
+  };
+  const compiler = await listCompilerInputs(createRequire(configFile), remote, folder, undefined);
+  const outputs = await compiler?.writePaths?.();
+  assert.ok(outputs?.paths.includes(path.join(tempConfigDir, "fixture.tsbuildinfo")));
+
+  const input = {
+    appDir: folder,
+    name,
+    configFile,
+    envMode: "development",
+    workspaceFingerprint: "fixture",
+    parallel: true,
+  };
+  const needsExclusive = (error: unknown) =>
+    error instanceof DiagnosticError && error.details.reason === "parallel-output";
+  assert.equal((await generateLocalFederatedTypes(input)).current, false);
+  await assert.rejects(
+    generateLocalFederatedTypes({ ...input, env: { FIXTURE_BUILD_HOOK: "1" } }),
+    needsExclusive,
+  );
+
+  const api = path.join(folder, "dist/@mf-types.d.ts");
+  const sharedApi = path.join(shared, "api.d.ts");
+  fs.writeFileSync(sharedApi, "export {};\n");
+  fs.symlinkSync(sharedApi, api, "file");
+  await assert.rejects(generateLocalFederatedTypes(input), needsExclusive);
+  fs.unlinkSync(api);
+
+  const types = path.join(folder, "dist/@mf-types");
+  const nested = path.join(types, "compiled-types");
+  fs.mkdirSync(nested, { recursive: true });
+  const declaration = path.join(nested, "existing.d.ts");
+  fs.symlinkSync(sharedApi, declaration, "file");
+  await assert.rejects(generateLocalFederatedTypes(input), needsExclusive);
+  fs.unlinkSync(declaration);
+
+  const config = path.join(folder, "tsconfig.json");
+  fs.writeFileSync(
+    path.join(shared, "base.json"),
+    JSON.stringify({ compilerOptions: { module: "amd", outFile: "./shared.js" } }),
+  );
+  fs.writeFileSync(config, JSON.stringify({ extends: "../shared-output/base.json" }));
+  const compilerPackage = path.join(folder, "node_modules/typescript/package.json");
+  const originalCompiler = fs.readFileSync(compilerPackage);
+  const fakeTsc = path.join(path.dirname(compilerPackage), "tsc.cjs");
+  const shownConfig = JSON.stringify({
+    compilerOptions: { outDir: nested, outFile: path.join(shared, "shared.js") },
+  });
+  // Model the TypeScript versions that accept outFile and report it in the effective config.
+  fs.writeFileSync(
+    fakeTsc,
+    `console.log(process.argv.includes("--showConfig") ? ${JSON.stringify(shownConfig)} : ${JSON.stringify(path.join(folder, "index.ts"))});`,
+  );
+  fs.writeFileSync(compilerPackage, JSON.stringify({ bin: { tsc: fakeTsc } }));
+  const inherited = await listCompilerInputs(createRequire(configFile), remote, folder, undefined);
+  assert.ok(inherited?.writePaths);
+  await assert.rejects(inherited.writePaths(), /Compiler write paths unavailable/);
+  await assert.rejects(generateLocalFederatedTypes(input), needsExclusive);
+  const implicitConfig = JSON.stringify({
+    compilerOptions: { outDir: nested, incremental: true, tsBuildInfoFile: "./" },
+  });
+  fs.writeFileSync(
+    fakeTsc,
+    `console.log(process.argv.includes("--showConfig") ? ${JSON.stringify(implicitConfig)} : ${JSON.stringify(path.join(folder, "index.ts"))});`,
+  );
+  const implicitRemote = {
+    ...remote,
+    moduleFederationConfig: { ...remote.moduleFederationConfig, name: "implicit" },
+  };
+  const implicit = await listCompilerInputs(
+    createRequire(configFile),
+    implicitRemote,
+    folder,
+    undefined,
+  );
+  assert.ok(implicit?.writePaths);
+  await assert.rejects(implicit.writePaths(), /Compiler build-info path unavailable/);
+  fs.writeFileSync(compilerPackage, originalCompiler);
+  fs.writeFileSync(config, "{}");
+
+  fs.rmdirSync(tempConfigDir);
+  fs.symlinkSync(shared, tempConfigDir, process.platform === "win32" ? "junction" : "dir");
+  await assert.rejects(generateLocalFederatedTypes(input), needsExclusive);
+});
+
+test("a generator with unverified output retries exclusively", async (t) => {
+  const f = fixture(t);
+  const apps = [f.app("a", 4501), f.app("b", 4502), f.app("c", 4503)];
+  const attempts: string[] = [];
+  const progress: number[] = [];
+  let active = 0;
+  const context = f.context(apps, {
+    buildConcurrency: 2,
+    progress: (_, index) => progress.push(index),
+  });
+  const result = await rebuildAllTypes(context, {
+    ...unused,
+    async generateLocalFederatedTypes(input) {
+      const { name, appDir, parallel } = input;
+      attempts.push(`${name}:${!!parallel}`);
+      if (name === "a" && parallel)
+        throw new DiagnosticError("needs exclusive output", {
+          stage: "generation",
+          reason: "parallel-output",
+        });
+      if (!parallel) assert.equal(active, 0);
+      active++;
+      try {
+        await delay(10);
+        return await mockGeneration(() => writeZip(path.join(appDir, "dist/@mf-types.zip"), name))(
+          input,
+        );
+      } finally {
+        active--;
+      }
+    },
+  });
+  assert.deepEqual(result.failed, []);
+  assert.deepEqual(result.rebuilt.sort(), ["a", "b", "c"]);
+  assert.deepEqual(progress, [0, 1, 2]);
+  assert.deepEqual(
+    attempts.filter((name) => name.startsWith("a:")),
+    ["a:true", "a:false"],
+  );
+});
+
+test("disabling the build cache regenerates archives and records them for subsequent reuse", async (t) => {
+  const initialBuild = Date.UTC(2025, 0, 5, 10, 0);
+  const forcedBuild = Date.UTC(2025, 0, 6, 11, 0);
+  let now = initialBuild;
+  t.mock.method(Date, "now", () => now);
+  const f = fixture(t);
+  const first = f.app("first", 4501);
+  const second = f.app("second", 4502);
+  const viewer = f.app("viewer", 4503, {
+    generateTypes: false,
+    consumeTypes: true,
+    remotes: [remote(first)],
+  });
+  const statuses = new Map<string, RebuildAppStatus>();
+  const context = f.context([viewer, first, second], {
+    buildConcurrency: 2,
+    status(updates) {
+      for (const update of updates) statuses.set(update.app, update);
+    },
+  });
+  const generators = [first.name, second.name];
+  const io = {
+    ...unused,
+    generateLocalFederatedTypes: mockGeneration((appDir) =>
+      writeZip(path.join(appDir, "dist/@mf-types.zip"), path.basename(appDir)),
+    ),
+  };
+  assert.deepEqual((await rebuildAllTypes(context, io)).rebuilt.sort(), generators);
+  assert.equal(statuses.get(viewer.name)?.status, "installed");
+  assert.equal(statuses.get(first.name)?.builtAt, initialBuild);
+  const resumed = {
+    ...context,
+    confirmations: createConfirmationStore(f.confirmations.snapshot()),
+  };
+  now = forcedBuild;
+  assert.deepEqual((await rebuildAllTypes(resumed, io)).current.sort(), generators);
+  assert.deepEqual(
+    new Map([...statuses].map(([app, { status }]) => [app, status])),
+    new Map([
+      [first.name, "cached"],
+      [second.name, "cached"],
+      [viewer.name, "current"],
+    ]),
+  );
+  assert.equal(statuses.get(first.name)?.builtAt, initialBuild);
+  assert.equal(statuses.get(viewer.name)?.builtAt, undefined);
+  const uncached = await rebuildAllTypes({ ...resumed, useBuildCache: false }, io);
+  assert.deepEqual(uncached.rebuilt.sort(), generators);
+  assert.deepEqual(uncached.current, []);
+  assert.equal(statuses.get(first.name)?.builtAt, forcedBuild);
+  assert.deepEqual((await rebuildAllTypes(resumed, io)).current.sort(), generators);
+  assert.equal(statuses.get(first.name)?.builtAt, forcedBuild);
+});
+
+test("changing ZIP metadata keeps a dependent's cache and updates its archive confirmation", async (t) => {
+  const f = fixture(t);
+  const shared = f.app("shared", 4501);
+  const consumer = f.app("consumer", 4502, { consumeTypes: true, remotes: [remote(shared)] });
+  fs.writeFileSync(
+    path.join(path.dirname(shared.folder), "node_modules/adm-zip/index.js"),
+    `
+    const fs = require("node:fs"), path = require("node:path");
+    module.exports = class {
+      constructor(bytes) {
+        const start = 30 + bytes.readUInt16LE(26);
+        this.content = bytes.subarray(start, start + bytes.readUInt32LE(18));
+      }
+      getEntries() { return [{ entryName: "index.d.ts", isDirectory: false }]; }
+      extractAllTo(dir) { fs.writeFileSync(path.join(dir, "index.d.ts"), this.content); }
+    };
+  `,
+  );
+  const context = f.context([shared, consumer], { buildConcurrency: 2 });
+  let stamp = 0;
+  const io = {
+    ...unused,
+    generateLocalFederatedTypes: (input: LocalGenerationInput) =>
+      rebuildLocalArchive(
+        input,
+        path.join(input.appDir, "dist/@mf-types.zip"),
+        { config: "", files: [] },
+        async () => {
+          const zipPath = path.join(input.appDir, "dist/@mf-types.zip");
+          const bytes = zipFixture([
+            { file: "index.d.ts", text: "export declare const value: string;" },
+          ]);
+          bytes.writeUInt16LE(++stamp, 10);
+          fs.mkdirSync(path.dirname(zipPath), { recursive: true });
+          fs.writeFileSync(zipPath, bytes);
+          return { zipPath, zipHash: createHash("sha256").update(bytes).digest("hex") };
+        },
+      ),
+  };
+  assert.deepEqual((await rebuildAllTypes(context, io)).rebuilt, ["shared", "consumer"]);
+  const consumerBuiltAt = f.confirmations.generation("consumer")?.builtAt;
+  assert.equal(typeof consumerBuiltAt, "number");
+  const before = f.confirmations.generation("shared")?.zipHash;
+  assert.deepEqual((await rebuildAllTypes({ ...context, target: "shared" }, io)).rebuilt, [
+    "shared",
+  ]);
+  const after = f.confirmations.generation("shared")?.zipHash;
+  assert.notEqual(before, after);
+  const again = await rebuildAllTypes(context, io);
+  assert.deepEqual(again.rebuilt, []);
+  assert.deepEqual(again.current, ["shared", "consumer"]);
+  assert.deepEqual(again.installed, []);
+  assert.equal(f.confirmations.generation("consumer")?.builtDependencyHashes.shared, after);
+  assert.equal(f.confirmations.generation("consumer")?.builtAt, consumerBuiltAt);
 });
 
 test("rebuilding one app forces its generation and reuses only its required local dependencies", async (t) => {
@@ -3322,7 +3609,7 @@ fs.writeFileSync("dist/@mf-types.zip", Buffer.concat([
   assert.deepEqual((await rebuildAllTypes(context)).current, ["catalog"]);
   const phases = messages.filter((line) => line.startsWith("types.rebuild.all.app"));
   assert.match(phases[0], /status=rebuilt.*compileMs=\d+ zipMs=\d+/);
-  assert.match(phases[1], /status=current.*compileMs=0 zipMs=\d+/);
+  assert.match(phases[1], /status=cached.*compileMs=0 zipMs=\d+/);
   setAlias("./second");
   assert.deepEqual((await rebuildAllTypes(context)).rebuilt, ["catalog"]);
   assert.match(fs.readFileSync(path.join(folder, "dist", "@mf-types.zip"), "utf8"), /\.\/second/);

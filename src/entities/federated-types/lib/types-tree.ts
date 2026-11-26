@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathIsInside } from "../../../shared/lib/paths.ts";
 
-export function assertTreeInside(root: string): void {
+export function assertTreeInside(root: string, { rejectHardLinks = false } = {}): void {
   if (fs.lstatSync(root).isSymbolicLink()) throw new Error("unzip: symlink types directory");
   const realRoot = fs.realpathSync(root);
   const walk = (dir: string) => {
@@ -10,6 +10,7 @@ export function assertTreeInside(root: string): void {
       const full = path.join(dir, name);
       const stat = fs.lstatSync(full);
       if (stat.isSymbolicLink()) throw new Error(`unzip: symlink ${name}`);
+      if (rejectHardLinks && stat.isFile() && stat.nlink > 1) throw new Error(`hard link ${name}`);
       if (!pathIsInside(realRoot, fs.realpathSync(full))) {
         throw new Error(`unzip: entry escapes ${name}`);
       }
