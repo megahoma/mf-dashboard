@@ -12,7 +12,7 @@
   "configuration.ignorePaths": "Дополнительные каталоги, которые обход пропускает.",
   "configuration.extraManifestUrls": "URL манифестов без приложения в этом воркспейсе.",
   "configuration.packageManager": "auto читает менеджер репозитория. npm, pnpm, yarn и bun задаются явно.",
-  "configuration.probeIntervalMs": "Пауза в миллисекундах между проверками порта, манифеста и zip.",
+  "configuration.probeIntervalMs": "Пауза между фоновыми проверками в миллисекундах (от 1000). При 0 статусы проверяются вручную.",
   "configuration.typesSettleMs": "Пауза в миллисекундах после сохранения исходника, прежде чем zip считается устаревшим.",
   "configuration.types.autoCheck": "Автоматически проверять файлы типов, исходники продюсеров и ZIP типов. При отключении порты и манифесты продолжают обновляться; для проверки типов используйте «Проверить @mf-types».",
   "command.checkTypes": "Проверить @mf-types",

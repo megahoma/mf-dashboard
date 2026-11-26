@@ -167,6 +167,7 @@ test("refresh and Fetch confirm published types and keep offline type changes vi
   let text = "export type Pigment = 'blue';";
   let online = true;
   let consumerOnline = true;
+  let probeIntervalMs = 5000;
   let downloads = 0;
   fs.writeFileSync(path.join(consumer, "package.json"), "{}");
   fs.writeFileSync(
@@ -203,7 +204,8 @@ test("refresh and Fetch confirm published types and keep offline type changes vi
       workspaceValue: { workshop: { path: "workshop" }, palette: { path: "palette" } },
     }),
     get: <T>(key: string): T | undefined =>
-      (key === "structure" ? "tree" : undefined) as T | undefined,
+      (key === "structure" ? "tree" : key === "probeIntervalMs" ? probeIntervalMs : undefined) as
+        T | undefined,
   }));
   t.mock.method(net, "connect", (options: net.NetConnectOpts) => {
     const socket = Object.assign(new EventEmitter(), { setTimeout() {}, destroy() {} });
@@ -277,6 +279,20 @@ test("refresh and Fetch confirm published types and keep offline type changes vi
   await provider.finishRefetch(linkId).finally(() => provider.releaseRefetch(linkId));
   assert.equal(fs.readFileSync(path.join(destination, "index.d.ts"), "utf8"), text);
   assert.equal(persisted[beforeFetch], true, "Fetch saves the proof before refreshing the tree");
+
+  probeIntervalMs = 0;
+  fs.rmSync(destination, { recursive: true });
+  await provider.refresh();
+  assert.equal(provider.typeDetails(linkId)?.archiveMatch, "missing");
+  assert.match(row().contextValue, /^unfetched\b/);
+  const requests = t.mock.method(provider.session["ports"], "probe");
+  text = "export type Pigment = 'amber';";
+  assert.equal(provider.refetch(linkId), true);
+  await provider.finishRefetch(linkId).finally(() => provider.releaseRefetch(linkId));
+  assert.equal(fs.readFileSync(path.join(destination, "index.d.ts"), "utf8"), text);
+  assert.equal(provider.typeDetails(linkId)?.archiveMatch, "matches");
+  assert.doesNotMatch(row().contextValue, /^unfetched\b/);
+  assert.equal(requests.mock.callCount(), 0);
 });
 
 test("stat failures in installed types do not prevent rendering the dashboard", (t) => {
@@ -380,14 +396,8 @@ test("shared producers are scanned once and invalidated with the link status cac
     evidenceEvents.filter((text) => text.includes("fingerprint.sources.") && text.includes(root))
       .length;
   const beforeSettle = sourceScans();
-  const settled = new Promise<void>((resolve) => {
-    const listener = provider.onDidChangeTreeData(() => {
-      listener.dispose();
-      resolve();
-    });
-  });
   t.mock.timers.tick(15_000);
-  await settled;
+  await provider["run"](async () => {});
   provider.session.typesForLink(linkA);
   provider.session.typesForLink(linkB);
   assert.equal(

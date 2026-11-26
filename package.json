@@ -660,15 +660,15 @@
         },
         {
           "command": "mf-dashboard.checkTypes",
-          "when": "!mf-dashboard.discovering && config.mf-dashboard.types.autoCheck == false && config.mf-dashboard.language != en && config.mf-dashboard.language != ru"
+          "when": "!mf-dashboard.discovering && (config.mf-dashboard.types.autoCheck == false || config.mf-dashboard.probeIntervalMs == 0) && config.mf-dashboard.language != en && config.mf-dashboard.language != ru"
         },
         {
           "command": "mf-dashboard.checkTypes.en",
-          "when": "!mf-dashboard.discovering && config.mf-dashboard.types.autoCheck == false && config.mf-dashboard.language == en"
+          "when": "!mf-dashboard.discovering && (config.mf-dashboard.types.autoCheck == false || config.mf-dashboard.probeIntervalMs == 0) && config.mf-dashboard.language == en"
         },
         {
           "command": "mf-dashboard.checkTypes.ru",
-          "when": "!mf-dashboard.discovering && config.mf-dashboard.types.autoCheck == false && config.mf-dashboard.language == ru"
+          "when": "!mf-dashboard.discovering && (config.mf-dashboard.types.autoCheck == false || config.mf-dashboard.probeIntervalMs == 0) && config.mf-dashboard.language == ru"
         },
         {
           "command": "mf-dashboard.openTypesBuildReport",
@@ -970,17 +970,17 @@
       "view/item/context": [
         {
           "command": "mf-dashboard.checkTypes",
-          "when": "view == mf-dashboard && !mf-dashboard.discovering && config.mf-dashboard.types.autoCheck == false && viewItem =~ /(^| )check-types($| )/ && config.mf-dashboard.language != en && config.mf-dashboard.language != ru",
+          "when": "view == mf-dashboard && !mf-dashboard.discovering && (config.mf-dashboard.types.autoCheck == false || config.mf-dashboard.probeIntervalMs == 0) && viewItem =~ /(^| )check-types($| )/ && config.mf-dashboard.language != en && config.mf-dashboard.language != ru",
           "group": "1_types@1"
         },
         {
           "command": "mf-dashboard.checkTypes.en",
-          "when": "view == mf-dashboard && !mf-dashboard.discovering && config.mf-dashboard.types.autoCheck == false && viewItem =~ /(^| )check-types($| )/ && config.mf-dashboard.language == en",
+          "when": "view == mf-dashboard && !mf-dashboard.discovering && (config.mf-dashboard.types.autoCheck == false || config.mf-dashboard.probeIntervalMs == 0) && viewItem =~ /(^| )check-types($| )/ && config.mf-dashboard.language == en",
           "group": "1_types@1"
         },
         {
           "command": "mf-dashboard.checkTypes.ru",
-          "when": "view == mf-dashboard && !mf-dashboard.discovering && config.mf-dashboard.types.autoCheck == false && viewItem =~ /(^| )check-types($| )/ && config.mf-dashboard.language == ru",
+          "when": "view == mf-dashboard && !mf-dashboard.discovering && (config.mf-dashboard.types.autoCheck == false || config.mf-dashboard.probeIntervalMs == 0) && viewItem =~ /(^| )check-types($| )/ && config.mf-dashboard.language == ru",
           "group": "1_types@1"
         },
         {
@@ -1162,7 +1162,14 @@
         },
         "mf-dashboard.probeIntervalMs": {
           "type": "number",
-          "minimum": 1000,
+          "anyOf": [
+            {
+              "const": 0
+            },
+            {
+              "minimum": 1000
+            }
+          ],
           "default": 5000,
           "description": "%configuration.probeIntervalMs%"
         },

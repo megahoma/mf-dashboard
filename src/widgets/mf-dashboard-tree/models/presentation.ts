@@ -30,12 +30,11 @@ export type DashboardView = {
   readonly terms: DashboardTerms;
   readonly book: ProbeBook;
   readonly probeRunning?: boolean;
+  readonly manualProbeOnly?: boolean;
   readonly pending: ReadonlySet<string>;
   readonly refetchErrors: ReadonlySet<string>;
   readonly scriptGaps: ReadonlySet<string>;
   readonly rebuildErrors: ReadonlyMap<string, string>;
   typesForLink(link: RemoteLink): StatusInput["typesState"];
-  readonly typesAutoCheck?: boolean;
-  typesCheckedAt?(link: RemoteLink): number | null;
   actionFor(node: unknown): RowAction | null;
 };

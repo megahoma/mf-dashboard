@@ -70,11 +70,13 @@ A simple start script can select a config with `--config`. Discovery uses `mf-da
 
 The local port comes from `server.port` or `devServer.port`. Remote URLs may use `process.env` or `import.meta.env` values from `.env.<mode>` and `.env.<mode>.local`, with the local file taking precedence. When discovery recognizes a Vite start script, it resolves `process.env` from literal assignments in the script and uses Vite's default `NODE_ENV` when the script leaves it unset. The default manifest path is `/mf-manifest.json`.
 
-After cloning, run **Find microfrontends** once. It generates `.mf-dashboard/graph.json` and adds an ignore rule in `.mf-dashboard/.gitignore`. The graph is a local cache. On later opens, the dashboard renders the saved graph while probes run. **Refresh** updates statuses using the graph. **Find microfrontends** is available in the toolbar to rebuild it.
+After cloning, run **Find microfrontends** once. It generates `.mf-dashboard/graph.json` and adds an ignore rule in `.mf-dashboard/.gitignore`. The graph is a local cache. On later opens, the dashboard renders the saved graph and starts background checks when polling is enabled. **Refresh** updates statuses using the graph. **Find microfrontends** is available in the toolbar to rebuild it.
 
-The graph stores relative paths, resolved URLs and checksums of relevant inputs, including local dotenv files. A dotenv edit marks the existing tree as outdated until the next Find. Explicit types rebuilds read the current build configs and launcher environment.
+With `mf-dashboard.probeIntervalMs: 0`, saving source files also skips automatic type checks, even when `mf-dashboard.types.autoCheck` is enabled.
 
-Discovery skips `node_modules`, `.git`, `dist`, `.mf-dashboard`, and `mf-dashboard.ignorePaths`. It writes one graph per workspace folder. Federation names and workspace-folder names must be unique. A conflicting search preserves the saved graph. The dashboard marks an outdated graph when it detects changes to discovery settings, tracked inputs, or candidate files, including custom configs selected by the start script.
+The graph stores relative paths, resolved URLs and checksums of relevant inputs, including local dotenv files. Run **Find microfrontends** after editing a config or local dotenv file to update the graph. Explicit types rebuilds read the current build configs and launcher environment.
+
+Discovery skips `node_modules`, `.git`, `dist`, `.mf-dashboard`, and `mf-dashboard.ignorePaths`. It writes one graph per workspace folder. Federation names and workspace-folder names must be unique. A conflicting search preserves the saved graph.
 
 Probe cycles share manifest requests and ZIP downloads by URL. Later cycles use `If-Modified-Since` when available and reuse ZIP hashes on 304.
 
@@ -109,7 +111,7 @@ All settings use the `mf-dashboard.*` namespace.
 | `mf-dashboard.ignorePaths`           | `[]`          | Additional scan exclusions. A folder name matches at any depth. A relative path excludes that subtree. An explicit `apps` entry can include an excluded folder.                                                              |
 | `mf-dashboard.extraManifestUrls`     | `[]`          | External manifest URLs shown as root rows. Only valid HTTP(S) URLs are requested.                                                                                                                                            |
 | `mf-dashboard.packageManager`        | `auto`        | Start command manager: `auto`, `npm`, `pnpm`, `yarn`, or `bun`.                                                                                                                                                              |
-| `mf-dashboard.probeIntervalMs`       | `5000`        | Delay in milliseconds between background checks. Minimum `1000`.                                                                                                                                                             |
+| `mf-dashboard.probeIntervalMs`       | `5000`        | Delay between background checks in milliseconds (minimum `1000`). Set to `0` to check statuses only with **Refresh** or **Check @mf-types**.                                                                                 |
 | `mf-dashboard.types.autoCheck`       | `false`       | Set to `true` to check types automatically. By default, ports and manifests update in the background and types are checked on **Refresh** or **Check @mf-types**.                                                            |
 | `mf-dashboard.typesSettleMs`         | `15000`       | Grace period in milliseconds after a source edit before stale types are reported. Set `0` to report immediately.                                                                                                             |
 | `mf-dashboard.terminal.reveal`       | `true`        | Show the terminal when starting an app. With `false`, the script still runs.                                                                                                                                                 |

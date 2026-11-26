@@ -14,6 +14,10 @@ function stringList(value: unknown): string[] {
 
 export function readWorkspaceSettings(): WorkspaceSettings {
   const config = dashboardConfiguration();
+  const probeIntervalMs = finiteNumber(
+    config.get("probeIntervalMs"),
+    WORKSPACE_DEFAULTS["mf-dashboard.probeIntervalMs"],
+  );
   return {
     apps: readConfiguredApps<AppSetting>(config),
     envMode: config.get<string>("envMode") ?? WORKSPACE_DEFAULTS["mf-dashboard.envMode"],
@@ -25,16 +29,15 @@ export function readWorkspaceSettings(): WorkspaceSettings {
         : WORKSPACE_DEFAULTS["mf-dashboard.structure"],
     packageManager:
       config.get<string>("packageManager") ?? WORKSPACE_DEFAULTS["mf-dashboard.packageManager"],
-    probeIntervalMs: finiteNumber(
-      config.get("probeIntervalMs"),
-      WORKSPACE_DEFAULTS["mf-dashboard.probeIntervalMs"],
-    ),
+    probeIntervalMs,
     typesSettleMs: finiteNumber(
       config.get("typesSettleMs"),
       WORKSPACE_DEFAULTS["mf-dashboard.typesSettleMs"],
     ),
     typesAutoCheck:
-      config.get<boolean>("types.autoCheck") ?? WORKSPACE_DEFAULTS["mf-dashboard.types.autoCheck"],
+      probeIntervalMs !== 0 &&
+      (config.get<boolean>("types.autoCheck") ??
+        WORKSPACE_DEFAULTS["mf-dashboard.types.autoCheck"]),
     terminalReveal:
       config.get<boolean>("terminal.reveal") ?? WORKSPACE_DEFAULTS["mf-dashboard.terminal.reveal"],
     startScript:

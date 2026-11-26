@@ -24,9 +24,9 @@ export function resolveTypesPath(root: string, target: string, route?: Set<strin
   return walkTypesPath(realRoot, relative, route, realRoot);
 }
 
-function rememberRoute(file: string, from: string, route: Set<string>): void {
+function rememberRoute(file: string, from: string, route: Set<string>): string {
   const root = path.parse(file).root;
-  walkTypesPath(root ? path.resolve(from, root) : from, file.slice(root.length), route);
+  return walkTypesPath(root ? path.resolve(from, root) : from, file.slice(root.length), route);
 }
 
 function walkTypesPath(
@@ -59,7 +59,27 @@ function walkTypesPath(
         }
       }
       current = resolved;
-    } catch {
+    } catch (error) {
+      // Preserve the route through dangling links so the watcher can see the target return.
+      if (
+        route &&
+        !route.has(next) &&
+        error instanceof Error &&
+        "code" in error &&
+        (error.code === "ENOENT" || error.code === "ENOTDIR")
+      ) {
+        route.add(next);
+        try {
+          const target = fs.readlinkSync(next);
+          try {
+            route.add(rememberRoute(target, current, route));
+          } finally {
+            route.add(path.resolve(current, target));
+          }
+        } catch {
+          // Keep the route collected before the missing entry.
+        }
+      }
       throw typesPathEscape("cannot resolve types symlink");
     }
     if (boundary !== undefined) relativeInside(boundary, current);

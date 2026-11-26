@@ -52,6 +52,7 @@ export type ConfigWorkerReply = {
 } & ({ result: ConfigWorkerTasks[keyof ConfigWorkerTasks]["result"] } | { error: string });
 
 export type DashboardSettings = {
+  probeIntervalMs?: number;
   apps: Record<string, AppSetting> | undefined;
   envMode: string;
   startScript?: string;

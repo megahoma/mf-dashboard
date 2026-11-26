@@ -755,22 +755,3 @@ export async function readWorkspaceGraphs(
   }
   return result;
 }
-
-export async function workspaceGraphIsStale(
-  current: WorkspaceGraph,
-  settings: DashboardSettings,
-): Promise<boolean> {
-  const currentSelections = selectionHash(settings.apps);
-  for (const { root, graph } of current.files) {
-    if (graph.version !== VERSION) return true;
-    if (JSON.stringify(graph.settings) !== JSON.stringify(discoverySettings(settings))) return true;
-    if (currentSelections !== null && currentSelections !== graph.legacySelections) return true;
-    for (const [file, hash] of Object.entries(graph.inputs)) {
-      if (contentHash(await readText(root, path.join(root, file), MAX_INPUT_BYTES)) !== hash)
-        return true;
-    }
-    const candidates = await candidateFiles(root, settings, graph.inputs);
-    if (JSON.stringify(candidates) !== JSON.stringify(graph.candidates)) return true;
-  }
-  return current.incomplete && current.files.length > 0;
-}
